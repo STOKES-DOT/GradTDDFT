@@ -38,7 +38,7 @@ def _scf_stop_gradient_mask(
     core_cfg: Any,
     scf_info: Any | None,
 ) -> Array:
-    if scf_info is None or getattr(scf_info, "mode", None) != "self_consistent":
+    if scf_info is None or not str(getattr(scf_info, "mode", "")).startswith("self_consistent"):
         return jnp.asarray(False)
     mask = jnp.asarray(False)
     if bool(getattr(core_cfg, "scf_stop_gradient_on_unconverged", False)):
@@ -1638,13 +1638,19 @@ def strict_janak_frontier_autodiff_penalty(
         homo_grad = jax.lax.cond(
             jnp.all(jnp.isfinite(homo_grad)),
             lambda _: homo_grad,
-            lambda _: _finite_difference_branch_gradient(_homo_branch_energy, clipped_eta),
+            lambda _: jnp.asarray(
+                _finite_difference_branch_gradient(_homo_branch_energy, clipped_eta),
+                dtype=homo_grad.dtype,
+            ),
             operand=None,
         )
         lumo_grad = jax.lax.cond(
             jnp.all(jnp.isfinite(lumo_grad)),
             lambda _: lumo_grad,
-            lambda _: _finite_difference_branch_gradient(_lumo_branch_energy, clipped_eta),
+            lambda _: jnp.asarray(
+                _finite_difference_branch_gradient(_lumo_branch_energy, clipped_eta),
+                dtype=lumo_grad.dtype,
+            ),
             operand=None,
         )
     mol_homo_minus, info_homo_minus = _resolve_variational_spin_orbital_state_and_info(
@@ -2748,6 +2754,7 @@ def _make_differentiable_scf(
             vxc_clip=cfg.scf_vxc_clip,
             iterate_selection=cfg.scf_iterate_selection,
             require_converged_iterates=cfg.scf_require_convergence,
+            implicit_forward_mode=cfg.scf_implicit_forward_mode,
             implicit_diff_max_iter=cfg.scf_implicit_diff_max_iter,
             implicit_diff_step_size=cfg.scf_implicit_diff_step_size,
             implicit_diff_clip=cfg.scf_implicit_diff_clip,
@@ -3154,7 +3161,7 @@ def ground_state_mse_loss(
                 datum.molecule,
                 cfg,
             )
-            if eval_scf_info.mode == "self_consistent":
+            if str(eval_scf_info.mode).startswith("self_consistent"):
                 scf_info_for_datum = eval_scf_info
             if needs_predicted_ground_state_energy:
                 predicted = _predict_ground_state_total_energy_from_molecule(
@@ -3395,7 +3402,7 @@ def ground_state_mse_loss(
                     assume_self_consistent_input=(core_cfg.mode == "self_consistent"),
                 )
             )
-        if scf_info_for_datum is not None and scf_info_for_datum.mode == "self_consistent":
+        if scf_info_for_datum is not None and str(scf_info_for_datum.mode).startswith("self_consistent"):
             dtype = predicted.dtype
             stop_gradient_mask = _scf_stop_gradient_mask(core_cfg, scf_info_for_datum)
             scf_stop_gradient_terms.append(

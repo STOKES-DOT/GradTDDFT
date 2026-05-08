@@ -2129,6 +2129,8 @@ def _gpu4pyscf_rys_source_files() -> tuple[Path, ...]:
         "gvhf-rys/rys_jk_driver.cu",
         "gvhf-rys/rys_roots_dat.cu",
         "gvhf-rys/rys_constant.cu",
+        "gvhf-rys/rys_contract_k.cu",
+        "gvhf-rys/unrolled_rys_k.cu",
         "gvhf-rys/rys_contract_jk.cu",
         "gvhf-rys/unrolled_rys_jk.cu",
     )
@@ -2165,6 +2167,7 @@ def _gpu4pyscf_rys_library_name_for_arch(arch: str) -> str:
         root / "gvhf-rys/rys_contract_k.cuh",
         root / "gvhf-rys/rys_roots.cuh",
         root / "gvhf-rys/rys_roots.cu",
+        root / "gvhf-rys/rys_roots_for_k.cu",
         root / "gvhf-rys/create_tasks.cu",
         root / "gint/cuda_alloc.cuh",
     ):

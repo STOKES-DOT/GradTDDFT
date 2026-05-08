@@ -26,7 +26,7 @@ import optax
 from td_graddft.device import put_restricted_reference_on_device
 from td_graddft.jax_libxc import b3lyp_component_basis
 from td_graddft.neural_xc import make_neural_xc_functional
-from td_graddft.pyscf_bridge import restricted_reference_from_pyscf
+from td_graddft.reference_legacy import restricted_reference_from_pyscf
 from td_graddft.scf import DifferentiableSCF, DifferentiableSCFConfig
 from td_graddft.scf.rks import _vxc_matrix_from_grid_potential
 from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths

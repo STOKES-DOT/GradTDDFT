@@ -43,6 +43,21 @@ def test_top_level_exposes_recommended_neural_xc_facades():
     assert td_graddft.LongRangeCorrection is td_graddft.neural_xc.LongRangeCorrection
 
 
+def test_top_level_removes_legacy_neural_xc_exports():
+    import td_graddft
+
+    removed = (
+        "Density" "NeuralXCFunctional",
+        "Neural" "XCFunctional",
+        "Pointwise" "MLP",
+        "make_neural" "_lda_functional",
+        "make_dm21" "_like_functional",
+    )
+
+    for name in removed:
+        assert not hasattr(td_graddft, name), f"{name} should not be exported at top level"
+
+
 def test_td_graddft_pyscf_style_submodules_import():
     for name in (
         "td_graddft.gto.basis",

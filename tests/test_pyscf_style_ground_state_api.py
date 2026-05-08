@@ -1,4 +1,5 @@
 import importlib
+from pathlib import Path
 import types
 
 import jax.numpy as jnp
@@ -211,8 +212,10 @@ def test_rks_run_and_backend_helpers(monkeypatch):
     assert mf.e_tot == -1.0
 
 
-def test_cuda_direct_scf_selects_gpu_cuda_backbone_when_available(monkeypatch):
+def test_cuda_direct_scf_selects_gpu_cuda_backbone_when_available(monkeypatch, tmp_path):
     monkeypatch.setattr("td_graddft.scf.facade.cuda_ffi_available", lambda: True)
+    monkeypatch.delenv("TD_GRADDFT_JAX_CACHE_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
     cache_calls = []
 
     def fake_cache(**kwargs):
@@ -231,7 +234,13 @@ def test_cuda_direct_scf_selects_gpu_cuda_backbone_when_available(monkeypatch):
     assert mf.grid_ao_backend == "pyscf"
     assert mf.iteration_backend == "lax"
     assert mf._config().iteration_backend == "lax"
-    assert cache_calls == []
+    assert cache_calls == [
+        {
+            "cache_dir": str(Path(tmp_path) / ".cache" / "td_graddft" / "jax"),
+            "min_compile_time_secs": 1.0,
+            "min_entry_size_bytes": 64 * 1024,
+        }
+    ]
 
 
 def test_cuda_direct_scf_defaults_to_lax_iteration_when_available(monkeypatch):

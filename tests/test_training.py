@@ -1,13 +1,15 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any, Callable, Sequence
 
 import jax
 import jax.numpy as jnp
 import optax
+from flax import linen as nn
+from jax.lax import Precision
 
 import td_graddft.training.targets as training_targets
 from td_graddft import HARTREE_TO_EV, lorentzian_spectrum
-from td_graddft.neural_xc import DensityNeuralXCFunctional, PointwiseMLP
 from td_graddft.neural_xc import make_neural_xc_functional
 from td_graddft.nn_rsh.functional import BoundTrainableRSHFunctional
 from td_graddft.nn_rsh.schema import RSHFunctionalTemplate, ResolvedRSHParameters
@@ -37,6 +39,7 @@ from td_graddft.training.targets import _electron_count, orbital_energy_matching
 from td_graddft.training.targets import janak_frontier_finite_difference_penalty
 from td_graddft.workflows.core import run_reference_from_spec
 from td_graddft.workflows.types import ReferenceSpecConfig, SimulationConfig
+from td_graddft.xc import AdiabaticDensityFunctional
 
 
 @dataclass
@@ -140,9 +143,192 @@ def _make_overlap_toy_molecule():
     )
 
 
+def _clip_toy_density(density: jnp.ndarray, density_floor: float) -> jnp.ndarray:
+    return jnp.maximum(jnp.asarray(density), density_floor)
+
+
+class _ToyPointwiseNet(nn.Module):
+    hidden_dims: Sequence[int]
+    output_dim: int
+    activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.gelu
+
+    @nn.compact
+    def __call__(self, inputs: jnp.ndarray) -> jnp.ndarray:
+        x = inputs
+        for width in self.hidden_dims:
+            x = nn.Dense(width)(x)
+            x = self.activation(x)
+        return nn.Dense(self.output_dim)(x)
+
+
+@dataclass(frozen=True)
+class _ToyCoefficientCore:
+    model: nn.Module
+    name: str = "toy_xc"
+    hybrid_fraction_init: float | None = None
+    hybrid_fraction_bounds: tuple[float, float] = (0.0, 1.0)
+
+    def init(self, rng: jnp.ndarray, coefficient_inputs: jnp.ndarray) -> Any:
+        params = self.model.init(rng, jnp.asarray(coefficient_inputs))
+        if self.hybrid_fraction_init is None:
+            return params
+        lower, upper = self.hybrid_fraction_bounds
+        scaled = (self.hybrid_fraction_init - lower) / (upper - lower)
+        clipped = jnp.clip(scaled, 1e-6, 1.0 - 1e-6)
+        raw = jnp.log(clipped / (1.0 - clipped))
+        return {"local": params, "hybrid_raw": raw}
+
+    def coefficients(self, params: Any, coefficient_inputs: jnp.ndarray) -> jnp.ndarray:
+        local_params = params["local"] if "local" in params else params
+        return jnp.asarray(self.model.apply(local_params, jnp.asarray(coefficient_inputs)))
+
+    def energy_density(
+        self,
+        params: Any,
+        coefficient_inputs: jnp.ndarray,
+        channels: jnp.ndarray,
+    ) -> jnp.ndarray:
+        coefficients = self.coefficients(params, coefficient_inputs)
+        basis = jnp.asarray(channels)
+        if basis.ndim == coefficients.ndim - 1:
+            basis = basis[..., None]
+        if coefficients.shape != basis.shape:
+            raise ValueError(
+                "Coefficient/basis channel shape mismatch "
+                f"(coefficients={coefficients.shape}, basis={basis.shape})."
+            )
+        return jnp.einsum("...f,...f->...", coefficients, basis)
+
+    def energy(
+        self,
+        params: Any,
+        coefficient_inputs: jnp.ndarray,
+        channels: jnp.ndarray,
+        *,
+        weights: jnp.ndarray | None = None,
+    ) -> jnp.ndarray:
+        integrand = self.energy_density(params, coefficient_inputs, channels)
+        if weights is None:
+            return jnp.sum(integrand)
+        return jnp.tensordot(jnp.asarray(weights), integrand, axes=(0, 0))
+
+    def hybrid_fraction(self, params: Any) -> jnp.ndarray:
+        if self.hybrid_fraction_init is None:
+            return jnp.asarray(0.0)
+        lower, upper = self.hybrid_fraction_bounds
+        return lower + (upper - lower) * jax.nn.sigmoid(params["hybrid_raw"])
+
+    def exact_exchange_energy(self, molecule: Any) -> jnp.ndarray:
+        rep_tensor = jnp.asarray(molecule.rep_tensor)
+        rdm1 = jnp.asarray(molecule.rdm1)
+        if rdm1.ndim == 2:
+            rdm1 = jnp.stack([0.5 * rdm1, 0.5 * rdm1], axis=0)
+
+        def spin_exchange(dm_spin):
+            exchange_matrix = jnp.einsum(
+                "prqs,rs->pq",
+                rep_tensor,
+                dm_spin,
+                precision=Precision.HIGHEST,
+            )
+            return -0.5 * jnp.einsum(
+                "pq,pq->",
+                dm_spin,
+                exchange_matrix,
+                precision=Precision.HIGHEST,
+            )
+
+        return jnp.sum(jax.vmap(spin_exchange)(rdm1))
+
+
+@dataclass(frozen=True)
+class _ToyDensityFunctional:
+    model: nn.Module
+    coefficient_input_fn: Callable[..., jnp.ndarray]
+    energy_density_basis_fn: Callable[..., jnp.ndarray]
+    density_floor: float = 1e-12
+    name: str = "toy_density_xc"
+    hybrid_fraction_init: float | None = None
+    hybrid_fraction_bounds: tuple[float, float] = (0.0, 1.0)
+
+    def _core(self) -> _ToyCoefficientCore:
+        return _ToyCoefficientCore(
+            model=self.model,
+            name=self.name,
+            hybrid_fraction_init=self.hybrid_fraction_init,
+            hybrid_fraction_bounds=self.hybrid_fraction_bounds,
+        )
+
+    def coefficient_inputs(self, density: jnp.ndarray) -> jnp.ndarray:
+        return self.coefficient_input_fn(density, density_floor=self.density_floor)
+
+    def energy_density_basis(self, density: jnp.ndarray) -> jnp.ndarray:
+        return self.energy_density_basis_fn(density, density_floor=self.density_floor)
+
+    def init(self, rng: jnp.ndarray, sample_density: jnp.ndarray) -> Any:
+        return self._core().init(rng, self.coefficient_inputs(sample_density))
+
+    def init_from_molecule(self, rng: jnp.ndarray, molecule: Any) -> Any:
+        return self.init(rng, jnp.asarray(molecule.density()).sum(axis=-1))
+
+    def energy_density(self, params: Any, density: jnp.ndarray) -> jnp.ndarray:
+        return self._core().energy_density(
+            params,
+            self.coefficient_inputs(density),
+            self.energy_density_basis(density),
+        )
+
+    def energy(self, params: Any, density: jnp.ndarray, weights: jnp.ndarray | None = None) -> jnp.ndarray:
+        rho = _clip_toy_density(density, self.density_floor)
+        local_channels = rho[..., None] * self.energy_density_basis(rho)
+        return self._core().energy(
+            params,
+            self.coefficient_inputs(rho),
+            local_channels,
+            weights=weights,
+        )
+
+    def hybrid_fraction(self, params: Any) -> jnp.ndarray:
+        return self._core().hybrid_fraction(params)
+
+    def exact_exchange_energy(self, molecule: Any) -> jnp.ndarray:
+        return self._core().exact_exchange_energy(molecule)
+
+    def energy_from_molecule(self, params: Any, molecule: Any) -> jnp.ndarray:
+        total_density = jnp.asarray(molecule.density()).sum(axis=-1)
+        return self.energy(params, total_density, molecule.grid.weights) + (
+            self.hybrid_fraction(params) * self.exact_exchange_energy(molecule)
+        )
+
+    def local_potential(self, params: Any, density: jnp.ndarray) -> jnp.ndarray:
+        density = _clip_toy_density(density, self.density_floor)
+        flat = density.reshape(-1)
+
+        def local_energy(value):
+            return value * self.energy_density(params, value)
+
+        return jax.vmap(jax.grad(local_energy))(flat).reshape(density.shape)
+
+    def local_kernel(self, params: Any, density: jnp.ndarray) -> jnp.ndarray:
+        density = _clip_toy_density(density, self.density_floor)
+        flat = density.reshape(-1)
+
+        def local_energy(value):
+            return value * self.energy_density(params, value)
+
+        return jax.vmap(jax.grad(jax.grad(local_energy)))(flat).reshape(density.shape)
+
+    def bind(self, params: Any) -> AdiabaticDensityFunctional:
+        return AdiabaticDensityFunctional(
+            name=self.name,
+            energy_density_fn=lambda density: self.energy_density(params, density),
+            exact_exchange_fraction=self.hybrid_fraction(params),
+        )
+
+
 def _make_trainable_functional():
-    return DensityNeuralXCFunctional(
-        model=PointwiseMLP(hidden_dims=(), output_dim=1, activation=lambda x: x),
+    return _ToyDensityFunctional(
+        model=_ToyPointwiseNet(hidden_dims=(), output_dim=1, activation=lambda x: x),
         coefficient_input_fn=lambda density, density_floor=1e-12: jnp.ones(density.shape + (1,)),
         energy_density_basis_fn=lambda density, density_floor=1e-12: density[..., None],
         name="toy_ground_state_xc",
@@ -151,8 +337,8 @@ def _make_trainable_functional():
 
 
 def _make_hybrid_only_functional():
-    return DensityNeuralXCFunctional(
-        model=PointwiseMLP(hidden_dims=(), output_dim=1, activation=lambda x: x),
+    return _ToyDensityFunctional(
+        model=_ToyPointwiseNet(hidden_dims=(), output_dim=1, activation=lambda x: x),
         coefficient_input_fn=lambda density, density_floor=1e-12: jnp.ones(
             density.shape + (1,)
         ),

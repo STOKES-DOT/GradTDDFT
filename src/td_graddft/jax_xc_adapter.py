@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+import jax
 import jax.numpy as jnp
 
 from .jax_libxc import RestrictedFeatureBundle, _eval_xc_per_particle
@@ -80,6 +82,204 @@ _SAFE_HYBRID_COMPOSITES: dict[str, tuple[_HybridTerm, ...]] = {
         (0.81, "gga_c_lyp", {}),
     ),
 }
+
+JAXXCStatus = Literal["strict", "wrapped", "experimental", "unavailable"]
+
+
+@dataclass(frozen=True)
+class JAXXCFunctionalInfo:
+    name: str
+    status: JAXXCStatus
+    family: str
+    reason: str
+    children: tuple[str, ...] = ()
+
+
+_STRICT_FUNCTIONALS = {
+    "lda_x",
+    "lda_c_pw",
+    "lda_c_vwn",
+    "lda_c_vwn_rpa",
+    "gga_x_b88",
+    "gga_x_pbe",
+    "gga_x_wpbeh",
+    "gga_c_lyp",
+    "gga_c_pbe",
+}
+
+_EXPERIMENTAL_FUNCTIONALS = {
+    "gga_x_rpbe",
+    "gga_x_wc",
+    "gga_x_pw91",
+    "hyb_gga_xc_b97",
+    "hyb_gga_xc_b97_1",
+    "hyb_gga_xc_wb97x",
+}
+
+_KNOWN_MISMATCH_FUNCTIONALS = {
+    "hyb_gga_xc_b97",
+    "hyb_gga_xc_b97_1",
+    "hyb_gga_xc_wb97x",
+}
+
+
+def _is_mgga_name(name: str) -> bool:
+    return name.startswith("mgga_") or name.startswith("hyb_mgga_")
+
+
+def _family_from_name(name: str) -> str:
+    if name.startswith("lda_"):
+        return "LDA"
+    if _is_mgga_name(name):
+        return "MGGA"
+    if name.startswith("gga_"):
+        return "GGA"
+    if name.startswith("hyb_gga_"):
+        return "HYB_GGA"
+    return "unknown"
+
+
+def _active_jax_xc_has(name: str) -> bool:
+    module, _ = load_jax_xc()
+    return hasattr(module, name)
+
+
+def _active_jax_xc_names() -> set[str]:
+    module, _ = load_jax_xc()
+    raw_module = getattr(module, "_module", module)
+    names = {name for name in dir(raw_module) if not name.startswith("_")}
+    mapping = getattr(raw_module, "_MAPPING", None)
+    if mapping is not None:
+        names.update(str(name) for name in mapping)
+    names.update(_SAFE_HYBRID_COMPOSITES)
+    return names
+
+
+def jax_xc_functional_info(name: str) -> JAXXCFunctionalInfo:
+    canonical = str(name).strip().lower()
+    if canonical in _STRICT_FUNCTIONALS:
+        return JAXXCFunctionalInfo(
+            name=canonical,
+            status="strict",
+            family=_family_from_name(canonical),
+            reason="Implemented by TD-GradDFT's strict local JAX evaluator.",
+        )
+    if canonical in _SAFE_HYBRID_COMPOSITES:
+        children = tuple(child for _, child, _ in _SAFE_HYBRID_COMPOSITES[canonical])
+        return JAXXCFunctionalInfo(
+            name=canonical,
+            status="wrapped",
+            family=_family_from_name(canonical),
+            reason="Reconstructed by TD-GradDFT from safe semilocal child components.",
+            children=children,
+        )
+    if canonical in _EXPERIMENTAL_FUNCTIONALS and _active_jax_xc_has(canonical):
+        reason = "Available from jax_xc but not validated for Neural XC training."
+        if canonical in _KNOWN_MISMATCH_FUNCTIONALS:
+            reason = (
+                "B97-family jax_xc output has benchmark mismatches against PySCF/libxc; "
+                "explicit experimental opt-in is required."
+            )
+        return JAXXCFunctionalInfo(
+            name=canonical,
+            status="experimental",
+            family=_family_from_name(canonical),
+            reason=reason,
+        )
+    if _is_mgga_name(canonical) and _active_jax_xc_has(canonical):
+        reason = (
+            "MGGA functional is available from jax_xc and requires an orbital-derived "
+            "tau/mo_fn bridge; explicit experimental opt-in is required."
+        )
+        if canonical.startswith("hyb_mgga_"):
+            reason = (
+                "Hybrid MGGA functional is available from jax_xc as an experimental "
+                "local channel; TD-GradDFT does not infer exact-exchange fractions "
+                "from this name."
+            )
+        return JAXXCFunctionalInfo(
+            name=canonical,
+            status="experimental",
+            family="MGGA",
+            reason=reason,
+        )
+    return JAXXCFunctionalInfo(
+        name=canonical,
+        status="unavailable",
+        family=_family_from_name(canonical),
+        reason="No strict, wrapped, or active jax_xc implementation is available.",
+    )
+
+
+def list_jax_xc_functionals(status: JAXXCStatus | None = None) -> tuple[JAXXCFunctionalInfo, ...]:
+    active_mgga = {name for name in _active_jax_xc_names() if _is_mgga_name(name)}
+    names = sorted(
+        _STRICT_FUNCTIONALS
+        | set(_SAFE_HYBRID_COMPOSITES)
+        | _EXPERIMENTAL_FUNCTIONALS
+        | active_mgga
+    )
+    infos = tuple(jax_xc_functional_info(name) for name in names)
+    if status is None:
+        return infos
+    return tuple(info for info in infos if info.status == status)
+
+
+def _raise_if_not_allowed(
+    info: JAXXCFunctionalInfo,
+    *,
+    allow_experimental_jax_xc: bool,
+) -> None:
+    if info.status == "unavailable":
+        raise KeyError(f"jax_xc functional {info.name!r} is unavailable: {info.reason}")
+    if info.status == "experimental" and not bool(allow_experimental_jax_xc):
+        raise ValueError(
+            f"jax_xc functional {info.name!r} is experimental: {info.reason} "
+            "Pass allow_experimental_jax_xc=True to evaluate it."
+        )
+
+
+def eval_jax_xc_from_restricted_features(
+    name: str,
+    features: RestrictedFeatureBundle,
+    *,
+    allow_experimental_jax_xc: bool = False,
+) -> jnp.ndarray:
+    info = jax_xc_functional_info(name)
+    _raise_if_not_allowed(info, allow_experimental_jax_xc=allow_experimental_jax_xc)
+    if info.status == "strict":
+        return _eval_xc_per_particle(info.name, features)
+
+    module, _ = load_jax_xc()
+    factory = getattr(module, info.name)
+    functional = factory(polarized=False)
+    rho = jnp.maximum(jnp.asarray(features.rho), 1e-12)
+    sigma = jnp.maximum(jnp.asarray(features.sigma), 0.0)
+    grad_mag = jnp.sqrt(sigma)
+    tau = jnp.maximum(jnp.asarray(features.tau_a + features.tau_b), 0.0)
+    origin = jnp.zeros((3,), dtype=rho.dtype)
+
+    def point_eval(rho_value, grad_value, tau_value):
+        def rho_fn(r):
+            return rho_value + grad_value * r[0]
+
+        def mo_fn(r):
+            mo_grad = jnp.sqrt(jnp.maximum(2.0 * tau_value, 1e-30))
+            return jnp.asarray([mo_grad * r[0]], dtype=rho.dtype)
+
+        if info.family == "MGGA":
+            value = functional(rho_fn, origin, mo_fn)
+        else:
+            value = functional(rho_fn, origin)
+        if isinstance(value, tuple):
+            value = value[0]
+        return jnp.asarray(value, dtype=rho.dtype)
+
+    if rho.ndim == 0:
+        value = point_eval(rho, grad_mag, tau)
+    else:
+        value = jax.vmap(point_eval)(rho, grad_mag, tau)
+    return jnp.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def _project_root() -> Path:

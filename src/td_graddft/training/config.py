@@ -90,6 +90,7 @@ class GroundStateDatum:
         *,
         target_total_energy: Array | None = None,
         require_hfx: bool = False,
+        functional: Any | None = None,
         **kwargs: Any,
     ) -> "GroundStateDatum":
         if require_hfx:
@@ -102,6 +103,12 @@ class GroundStateDatum:
                 raise ValueError(
                     "GroundStateDatum.from_reference(require_hfx=True) requires "
                     "reference.hfx_nu."
+                )
+        if functional is not None and bool(getattr(functional, "include_pt2_channel", False)):
+            if getattr(reference, "pt2_local", None) is None:
+                raise ValueError(
+                    "Neural XC training with include_pt2_channel=True requires local PT2 "
+                    "features. Build the reference with compute_local_pt2_features=True."
                 )
         target = (
             getattr(reference, "mf_energy", None)
@@ -255,6 +262,7 @@ class GroundStateCoreTrainingConfig:
     scf_stop_gradient_on_unconverged: bool = False
     scf_stop_gradient_rms_threshold: float | None = None
     scf_gradient_mode: Literal["unrolled", "implicit_commutator"] = "unrolled"
+    scf_implicit_forward_mode: Literal["unrolled", "input_state"] = "unrolled"
     scf_implicit_diff_max_iter: int = 24
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
@@ -339,6 +347,7 @@ class GroundStateTrainingConfig:
     scf_stop_gradient_on_unconverged: bool = False
     scf_stop_gradient_rms_threshold: float | None = None
     scf_gradient_mode: Literal["unrolled", "implicit_commutator"] = "unrolled"
+    scf_implicit_forward_mode: Literal["unrolled", "input_state"] = "unrolled"
     scf_implicit_diff_max_iter: int = 24
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
@@ -406,6 +415,7 @@ class GroundStateTrainingConfig:
             scf_stop_gradient_on_unconverged=core.scf_stop_gradient_on_unconverged,
             scf_stop_gradient_rms_threshold=core.scf_stop_gradient_rms_threshold,
             scf_gradient_mode=core.scf_gradient_mode,
+            scf_implicit_forward_mode=core.scf_implicit_forward_mode,
             scf_implicit_diff_max_iter=core.scf_implicit_diff_max_iter,
             scf_implicit_diff_step_size=core.scf_implicit_diff_step_size,
             scf_implicit_diff_clip=core.scf_implicit_diff_clip,
@@ -454,6 +464,7 @@ class GroundStateTrainingConfig:
             scf_stop_gradient_on_unconverged=self.scf_stop_gradient_on_unconverged,
             scf_stop_gradient_rms_threshold=self.scf_stop_gradient_rms_threshold,
             scf_gradient_mode=self.scf_gradient_mode,
+            scf_implicit_forward_mode=self.scf_implicit_forward_mode,
             scf_implicit_diff_max_iter=self.scf_implicit_diff_max_iter,
             scf_implicit_diff_step_size=self.scf_implicit_diff_step_size,
             scf_implicit_diff_clip=self.scf_implicit_diff_clip,

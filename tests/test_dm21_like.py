@@ -16,7 +16,7 @@ from td_graddft.neural_xc import (
     make_neural_xc_functional,
 )
 from td_graddft.features import restricted_grid_features
-from td_graddft.pyscf_bridge import restricted_reference_from_pyscf
+from td_graddft.reference_legacy import restricted_reference_from_pyscf
 from td_graddft.spectra import HARTREE_TO_EV, oscillator_strengths
 from td_graddft.tddft import RestrictedCasidaTDDFT
 from td_graddft.tddft.response import build_restricted_tda_matrix
@@ -277,6 +277,104 @@ def test_semilocal_xc_alias_expands_to_component_channels_for_neural_basis():
     assert channels.shape[-1] == 2
     assert coefficients.shape[-1] >= 2
     assert jnp.all(jnp.isfinite(channels))
+
+
+def test_neural_xc_rejects_experimental_jax_xc_semilocal_by_default(monkeypatch):
+    from td_graddft import jax_xc_adapter
+
+    class FakeModule:
+        __version__ = "fake"
+
+        @staticmethod
+        def hyb_gga_xc_b97(*, polarized=False):
+            del polarized
+            return lambda rho_fn, r, mo_fn=None: rho_fn(r)
+
+    monkeypatch.setattr(
+        jax_xc_adapter,
+        "load_jax_xc",
+        lambda: (jax_xc_adapter._SafeJAXXCModule(FakeModule()), "upstream"),
+    )
+
+    with pytest.raises(ValueError, match="allow_experimental_jax_xc=True"):
+        make_neural_xc_functional(
+            semilocal_xc="hyb_gga_xc_b97",
+            hidden_dims=(8,),
+        )
+
+
+def test_neural_xc_accepts_experimental_jax_xc_with_explicit_opt_in(monkeypatch):
+    from td_graddft import jax_xc_adapter
+
+    class FakeModule:
+        __version__ = "fake"
+
+        @staticmethod
+        def gga_x_rpbe(*, polarized=False):
+            del polarized
+            return lambda rho_fn, r, mo_fn=None: rho_fn(r)
+
+    monkeypatch.setattr(
+        jax_xc_adapter,
+        "load_jax_xc",
+        lambda: (jax_xc_adapter._SafeJAXXCModule(FakeModule()), "upstream"),
+    )
+
+    functional = make_neural_xc_functional(
+        semilocal_xc="gga_x_rpbe",
+        hidden_dims=(8,),
+        allow_experimental_jax_xc=True,
+    )
+
+    assert functional.allow_experimental_jax_xc is True
+    assert functional.resolved_non_hf_module().channel_names == ("gga_x_rpbe",)
+
+
+def test_neural_xc_accepts_dynamic_mgga_with_explicit_opt_in(monkeypatch):
+    from td_graddft import jax_xc_adapter
+
+    class FakeModule:
+        __version__ = "fake"
+
+        @staticmethod
+        def mgga_x_demo(*, polarized=False):
+            del polarized
+
+            def functional(rho_fn, r, mo_fn=None):
+                if mo_fn is None:
+                    raise ValueError("mo_fn is required for MGGA")
+                mo_jac = jax.jacfwd(mo_fn)(r)
+                tau = 0.5 * jnp.sum(mo_jac * mo_jac)
+                return rho_fn(r) + 0.25 * tau
+
+            return functional
+
+    monkeypatch.setattr(
+        jax_xc_adapter,
+        "load_jax_xc",
+        lambda: (jax_xc_adapter._SafeJAXXCModule(FakeModule()), "upstream"),
+    )
+
+    with pytest.raises(ValueError, match="allow_experimental_jax_xc=True"):
+        make_neural_xc_functional(
+            semilocal_xc="mgga_x_demo",
+            hidden_dims=(8,),
+        )
+
+    functional = make_neural_xc_functional(
+        semilocal_xc="mgga_x_demo",
+        hidden_dims=(8,),
+        allow_experimental_jax_xc=True,
+    )
+    features = restricted_grid_features(_make_toy_molecule())
+    channels = functional.semilocal_energy_density_channels(features)
+    kernel = functional._projected_semilocal_kernel(features)
+
+    assert functional.resolved_non_hf_module().channel_names == ("mgga_x_demo",)
+    assert channels.shape[-1] == 1
+    assert jnp.all(jnp.isfinite(channels))
+    assert kernel.shape == features.rho.shape
+    assert jnp.all(jnp.isfinite(kernel))
 
 
 def test_dldh_two_lmf_mixing_transform_remains_smooth_above_one():

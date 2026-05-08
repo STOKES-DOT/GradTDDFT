@@ -27,7 +27,6 @@ from .functional import (
     SemilocalLocalContributionFn,
     available_semilocal_components,
     make_custom_semilocal_module,
-    make_dm21_like_functional,
     make_libxc_semilocal_module,
     make_neural_xc_functional,
 )
@@ -58,7 +57,6 @@ __all__ = [
     "SemilocalLocalContributionFn",
     "available_semilocal_components",
     "make_custom_semilocal_module",
-    "make_dm21_like_functional",
     "make_libxc_semilocal_module",
     "make_neural_xc_functional",
     "resolve_coefficient_prior_values",

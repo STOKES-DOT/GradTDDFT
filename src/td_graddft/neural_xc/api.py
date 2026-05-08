@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import warnings
 from typing import Any, Literal
 
-from .dm21.functional import make_dm21_like_functional as _make_dm21_like_functional
 from .dm21.functional import make_neural_xc_functional
 
 _ARCHITECTURE_ALIASES = {
@@ -82,20 +80,9 @@ def LongRangeCorrection(
     )
 
 
-def make_dm21_like_functional(*args: Any, **kwargs: Any):
-    warnings.warn(
-        "neural_xc.make_dm21_like_functional is deprecated; "
-        "use neural_xc.make_functional instead.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return _make_dm21_like_functional(*args, **kwargs)
-
-
 __all__ = [
     "Functional",
     "LongRangeCorrection",
     "make_functional",
     "make_long_range_correction",
-    "make_dm21_like_functional",
 ]

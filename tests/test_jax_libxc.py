@@ -9,6 +9,7 @@ from td_graddft.jax_libxc import (
     b3lyp_component_basis,
     canonical_rsh_preset_name,
     eval_xc_energy_density,
+    eval_xc_response_tensor,
     get_rsh_functional_preset,
     hybrid_coeff,
     list_rsh_functional_presets,
@@ -203,6 +204,63 @@ def test_pbe_energy_density_is_finite_and_differentiable():
     assert energy_density.shape == (2,)
     assert jnp.all(jnp.isfinite(energy_density))
     assert jnp.all(jnp.isfinite(grad))
+
+
+def test_dynamic_mgga_jax_xc_energy_and_response_tensor_require_opt_in(monkeypatch):
+    from td_graddft import jax_xc_adapter
+
+    class FakeModule:
+        __version__ = "fake"
+
+        @staticmethod
+        def mgga_x_demo(*, polarized=False):
+            del polarized
+
+            def functional(rho_fn, r, mo_fn=None):
+                if mo_fn is None:
+                    raise ValueError("mo_fn is required for MGGA")
+                mo_jac = jax.jacfwd(mo_fn)(r)
+                tau = 0.5 * jnp.sum(mo_jac * mo_jac)
+                return rho_fn(r) + 0.25 * tau
+
+            return functional
+
+    monkeypatch.setattr(
+        jax_xc_adapter,
+        "load_jax_xc",
+        lambda: (jax_xc_adapter._SafeJAXXCModule(FakeModule()), "upstream"),
+    )
+    features = _features()
+    total_tau = features.tau_a + features.tau_b
+    grad = jnp.stack(
+        [
+            jnp.sqrt(jnp.maximum(features.sigma, 0.0)),
+            jnp.zeros_like(features.rho),
+            jnp.zeros_like(features.rho),
+        ],
+        axis=-1,
+    )
+
+    with pytest.raises(ValueError, match="allow_experimental_jax_xc=True"):
+        eval_xc_energy_density("mgga_x_demo", features)
+
+    got = eval_xc_energy_density(
+        "mgga_x_demo",
+        features,
+        allow_experimental_jax_xc=True,
+    )
+    kind, tensor = eval_xc_response_tensor(
+        "mgga_x_demo",
+        features.rho,
+        grad=grad,
+        tau=total_tau,
+        allow_experimental_jax_xc=True,
+    )
+
+    assert jnp.allclose(got, features.rho * (features.rho + 0.25 * total_tau))
+    assert kind == "MGGA"
+    assert tensor.shape == (5, 5, features.rho.shape[0])
+    assert jnp.all(jnp.isfinite(tensor))
 
 
 def test_b3lyp_energy_density_is_finite():

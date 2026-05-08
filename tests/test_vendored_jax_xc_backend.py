@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import jax.numpy as jnp
+import pytest
 
 from td_graddft.jax_libxc import (
     RestrictedFeatureBundle,
@@ -94,3 +95,55 @@ def test_resolved_semilocal_specs_are_energy_channels():
 
     assert len(channels) == 2
     assert all(channel.shape == features.rho.shape for channel in channels)
+
+
+def test_eval_xc_energy_density_routes_experimental_jax_xc_with_opt_in(monkeypatch):
+    from td_graddft import jax_xc_adapter
+
+    class FakeModule:
+        __version__ = "fake"
+
+        @staticmethod
+        def gga_x_rpbe(*, polarized=False):
+            del polarized
+            return lambda rho_fn, r, mo_fn=None: 3.0 * rho_fn(r)
+
+    monkeypatch.setattr(
+        jax_xc_adapter,
+        "load_jax_xc",
+        lambda: (jax_xc_adapter._SafeJAXXCModule(FakeModule()), "upstream"),
+    )
+    features = _features()
+
+    with pytest.raises(ValueError, match="allow_experimental_jax_xc=True"):
+        eval_xc_energy_density("gga_x_rpbe", features)
+
+    got = eval_xc_energy_density(
+        "gga_x_rpbe",
+        features,
+        allow_experimental_jax_xc=True,
+    )
+
+    assert got.shape == features.rho.shape
+    assert jnp.allclose(got, 3.0 * features.rho * features.rho)
+
+
+def test_b97_family_is_experimental_by_default(monkeypatch):
+    from td_graddft import jax_xc_adapter
+
+    class FakeModule:
+        __version__ = "fake"
+
+        @staticmethod
+        def hyb_gga_xc_b97(*, polarized=False):
+            del polarized
+            return lambda rho_fn, r, mo_fn=None: rho_fn(r)
+
+    monkeypatch.setattr(
+        jax_xc_adapter,
+        "load_jax_xc",
+        lambda: (jax_xc_adapter._SafeJAXXCModule(FakeModule()), "upstream"),
+    )
+
+    with pytest.raises(ValueError, match="B97-family"):
+        eval_xc_energy_density("hyb_gga_xc_b97", _features())

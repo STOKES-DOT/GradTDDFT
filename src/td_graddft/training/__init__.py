@@ -36,6 +36,8 @@ from .trainer import (
     create_train_state_from_molecule,
     make_ground_state_loss_and_grad,
     make_ground_state_train_step,
+    make_runtime_forward_implicit_loss_and_grad,
+    make_runtime_forward_implicit_train_step,
 )
 from .excited_state_trainer import (
     ExcitedStateFineTuneConfig,
@@ -78,6 +80,8 @@ __all__ = [
     "create_train_state_from_molecule",
     "make_ground_state_loss_and_grad",
     "make_ground_state_train_step",
+    "make_runtime_forward_implicit_loss_and_grad",
+    "make_runtime_forward_implicit_train_step",
     "ExcitedStateFineTuneConfig",
     "ExcitedStateFineTuneResult",
     "ExcitedStateFineTuner",

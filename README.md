@@ -239,20 +239,19 @@ Guaranteed local JAX parser support:
 
 `jax_xc` backend support:
 
-- Installing with `python -m pip install -e ".[upstreams]"` adds
-  `jax-xc>=0.0.12`.
 - `td_graddft.jax_xc_adapter.load_jax_xc()` resolves backends in this order:
   external `jax_xc`, vendored generated `third_party/jax_xc/generated`, then the
-  local fallback subset above.
-- The adapter exposes `jax_xc` factories for LDA-like adiabatic wrappers through
-  `lda_from_jax_xc(...)` and wraps selected hybrid composite nodes so TD-GradDFT
-  handles exact exchange in the SCF/RSH layer while using semilocal JAX
-  components from `jax_xc`.
-- When a complete upstream or vendored `jax_xc` backend is present, additional
-  libxc-translated semilocal names can be used experimentally if their required
-  grid features are supplied by the calling path. The strict training and TDDFT
-  paths still validate against the guaranteed local subset unless explicitly
-  routed through the adapter.
+  TD-GradDFT fallback subset.
+- `jax_libxc.eval_xc_energy_density(...)` uses the local strict JAX
+  implementations first, then safe wrapped `jax_xc` composites, then explicitly
+  enabled experimental `jax_xc` functionals.
+- Safe wrapped composites include PBE0/PBEH, B3LYP, B3PW91, BHandHLYP, HSE03,
+  HSE06, and CAM-B3LYP.
+- Active `jax_xc` MGGA names beginning with `mgga_` or `hyb_mgga_` are routed
+  through an experimental tau/mo_fn bridge and keep the MGGA response variables
+  `[rho, grad_x, grad_y, grad_z, tau]` for `f_xc`.
+- B97-family, MGGA, and other unvalidated generated functionals require
+  `allow_experimental_jax_xc=True`; Neural XC training rejects them by default.
 
 Range-separated and neural XC support:
 
@@ -266,6 +265,9 @@ Range-separated and neural XC support:
 - Neural XC supports residual and MLP architectures, DM21-style feature modes,
   HF/PT2 channels, semilocal channel bases from the supported XC specs, and
   trainable long-range correction heads.
+- Neural XC training data that uses HF or PT2 channels should be built with
+  `compute_local_hfx_features=True`, `compute_local_hfx_aux=True`, and
+  `compute_local_pt2_features=True` when `include_pt2_channel=True`.
 - Neural RSH supports trainable `omega`, `alpha`, and `beta` parameters, plus
   atom-centered and GNN parameter heads.
 

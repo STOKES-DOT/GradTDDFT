@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Literal
 
 import numpy as np
@@ -10,6 +11,7 @@ from .data.integrals import (
     build_hcore,
     dipole_matrix,
     eri_tensor,
+    overlap_hcore_matrices,
     overlap_matrix,
 )
 from .jax_libxc import parse_xc
@@ -49,6 +51,20 @@ def _hybrid_fraction_from_mf(mf: Any) -> float:
     except Exception:
         return 0.0
     return float(hyb)
+
+
+def _uses_cuda_direct_jk(cfg: RKSConfig) -> bool:
+    return cfg.jk_backend == "direct" and cfg.direct_jk_engine == "cuda"
+
+
+def _overlap_hcore_for_jax_rks_reference(basis: Any, cfg: RKSConfig) -> tuple[Any, Any]:
+    if _uses_cuda_direct_jk(cfg):
+        from .scf.cuda_direct_jk import cuda_ffi_available
+        from .scf.cuda_one_electron import CudaOneElectronBuilder
+
+        if cuda_ffi_available():
+            return CudaOneElectronBuilder(basis).build_overlap_hcore()
+    return overlap_hcore_matrices(basis)
 
 
 def _infer_jax_xc_spec_from_pyscf_label(xc_label: str | None) -> str:
@@ -406,25 +422,23 @@ def restricted_reference_from_pyscf_with_jax_rks(
     parse_xc(xc_spec_resolved)
     cfg = RKSConfig(xc_spec=xc_spec_resolved) if rks_config is None else rks_config
     if cfg.xc_spec != xc_spec_resolved:
-        cfg = RKSConfig(
-            xc_spec=xc_spec_resolved,
-            max_cycle=cfg.max_cycle,
-            conv_tol=cfg.conv_tol,
-            conv_tol_density=cfg.conv_tol_density,
-            damping=cfg.damping,
-            level_shift=cfg.level_shift,
-            orthogonalization_eps=cfg.orthogonalization_eps,
-            density_floor=cfg.density_floor,
-            potential_clip=cfg.potential_clip,
-        )
+        cfg = replace(cfg, xc_spec=xc_spec_resolved)
 
     mol_cart = mf.mol if bool(getattr(mf.mol, "cart", False)) else _clone_pyscf_mol_cart(mf.mol)
-    basis = basis_from_pyscf_mol_cart(mol_cart, max_l=max_l)
-    s = overlap_matrix(basis)
-    h1e = build_hcore(basis)
-    eri_pair_matrix = jnp.asarray(
-        mol_cart.intor("int2e_cart" if bool(getattr(mol_cart, "cart", False)) else "int2e_sph", aosym="s4")
+    basis = basis_from_pyscf_mol_cart(
+        mol_cart,
+        max_l=max_l,
+        precompute_eri_groups=not _uses_cuda_direct_jk(cfg),
     )
+    s, h1e = _overlap_hcore_for_jax_rks_reference(basis, cfg)
+    eri_pair_matrix = None
+    if cfg.jk_backend != "direct":
+        eri_pair_matrix = jnp.asarray(
+            mol_cart.intor(
+                "int2e_cart" if bool(getattr(mol_cart, "cart", False)) else "int2e_sph",
+                aosym="s4",
+            )
+        )
 
     coords = jnp.asarray(mf.grids.coords)
     ao, ao_deriv1 = _eval_grid_ao(
@@ -445,6 +459,7 @@ def restricted_reference_from_pyscf_with_jax_rks(
         ao=ao,
         ao_deriv1=ao_deriv1,
         grid_weights=weights,
+        direct_basis=basis if cfg.jk_backend == "direct" else None,
         init_mo_coeff=jnp.asarray(getattr(mf, "mo_coeff")),
         init_mo_occ=jnp.asarray(getattr(mf, "mo_occ")),
         init_mo_energy=jnp.asarray(getattr(mf, "mo_energy")),

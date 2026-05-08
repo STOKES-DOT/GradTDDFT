@@ -3,7 +3,7 @@ import os
 import numpy as np
 import pytest
 
-from td_graddft.pyscf_bridge import unrestricted_reference_from_pyscf
+from td_graddft.reference_legacy import unrestricted_reference_from_pyscf
 from td_graddft.spectra import oscillator_strengths
 from td_graddft.tddft import UnrestrictedCasidaTDDFT
 

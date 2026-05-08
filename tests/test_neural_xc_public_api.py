@@ -26,11 +26,34 @@ def test_neural_xc_functional_public_constructor_uses_unified_name():
     assert functional.input_feature_mode == "dm21_original"
 
 
-def test_dm21_like_public_wrapper_is_deprecated():
-    with pytest.warns(DeprecationWarning):
-        functional = neural_xc.make_dm21_like_functional(hidden_dims=(8,))
+def test_legacy_neural_xc_public_constructors_are_removed():
+    removed = (
+        "Density" "NeuralXCFunctional",
+        "Neural" "XCFunctional",
+        "Pointwise" "MLP",
+        "make_neural" "_lda_functional",
+        "make_dm21" "_like_functional",
+    )
 
-    assert isinstance(functional, neural_xc.NeuralXCHybridFunctional)
+    for name in removed:
+        assert not hasattr(neural_xc, name), f"{name} should not be a public Neural XC API"
+
+
+def test_legacy_neural_xc_subpackage_exports_are_removed():
+    import importlib
+
+    base_module = importlib.import_module("td_graddft.neural_xc.base")
+    dm21_module = importlib.import_module("td_graddft.neural_xc.dm21")
+    base_removed = (
+        "Density" "NeuralXCFunctional",
+        "Neural" "XCFunctional",
+        "Pointwise" "MLP",
+        "make_neural" "_lda_functional",
+    )
+
+    for name in base_removed:
+        assert not hasattr(base_module, name), f"{name} should not be exported from neural_xc.base"
+    assert not hasattr(dm21_module, "make_dm21" "_like_functional")
 
 
 def test_rsh_public_constructor_builds_trainable_functional():
@@ -200,15 +223,29 @@ class _ToyMolecule:
         return jnp.einsum("spq,rp,rq->rs", self.rdm1, self.ao, self.ao)
 
 
+class _ToyTrainableModel:
+    @staticmethod
+    def apply(params, *args, **kwargs):
+        del args, kwargs
+        return params["scale"]
+
+
+class _ToyTrainableFunctional:
+    model = _ToyTrainableModel()
+    name = "toy_public_neural_xc"
+
+    def init_from_molecule(self, rng, molecule):
+        del rng, molecule
+        return {"scale": jnp.asarray(0.0)}
+
+    def energy_from_molecule(self, params, molecule):
+        density = jnp.asarray(molecule.density())
+        density_weight = jnp.sum(density)
+        return jnp.asarray(params["scale"]) * density_weight
+
+
 def _toy_trainable_density_functional():
-    return neural_xc.DensityNeuralXCFunctional(
-        model=neural_xc.PointwiseMLP(hidden_dims=(), output_dim=1, activation=lambda x: x),
-        coefficient_input_fn=lambda density, density_floor=1e-12: jnp.ones(
-            density.shape + (1,)
-        ),
-        energy_density_basis_fn=lambda density, density_floor=1e-12: density[..., None],
-        name="toy_public_neural_xc",
-    )
+    return _ToyTrainableFunctional()
 
 
 def test_neural_xc_trainer_runs_50_ground_state_steps_and_lowers_loss():
@@ -294,6 +331,40 @@ def test_ground_state_datum_from_reference_requires_hfx_fields():
     )
 
     assert datum.molecule is molecule
+
+
+def test_ground_state_datum_from_reference_requires_pt2_fields_when_pt2_enabled():
+    from td_graddft.reference import GridReference, RestrictedMoleculeReference
+
+    grid = GridReference(coords=jnp.zeros((2, 3)), weights=jnp.ones((2,)))
+    molecule = RestrictedMoleculeReference(
+        ao=jnp.ones((2, 2)),
+        ao_deriv1=jnp.ones((4, 2, 2)),
+        grid=grid,
+        dipole_integrals=jnp.zeros((3, 2, 2)),
+        rep_tensor=jnp.zeros((2, 2, 2, 2)),
+        rdm1=jnp.stack([jnp.eye(2), jnp.eye(2)], axis=0),
+        h1e=jnp.eye(2),
+        nuclear_repulsion=0.0,
+        mo_coeff=jnp.stack([jnp.eye(2), jnp.eye(2)], axis=0),
+        mo_occ=jnp.asarray([[1.0, 0.0], [1.0, 0.0]]),
+        mo_energy=jnp.asarray([[-0.5, 0.1], [-0.5, 0.1]]),
+        mf_energy=-1.0,
+        hfx_local=jnp.zeros((2, 2, 1)),
+        hfx_nu=jnp.zeros((1, 2, 2, 2)),
+    )
+    functional = neural_xc.Functional(
+        hidden_dims=(8,),
+        include_pt2_channel=True,
+        pt2_channel_mode="local_exact",
+    )
+
+    with pytest.raises(ValueError, match="compute_local_pt2_features=True"):
+        training.GroundStateDatum.from_reference(
+            molecule,
+            target_total_energy=-1.0,
+            functional=functional,
+        )
 
 
 def test_training_coulomb_energy_accepts_packed_eri_pair_matrix():

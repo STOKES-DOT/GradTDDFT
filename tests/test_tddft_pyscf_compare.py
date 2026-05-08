@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import jax.numpy as jnp
 
-from td_graddft.pyscf_bridge import restricted_reference_from_pyscf
+from td_graddft.reference_legacy import restricted_reference_from_pyscf
 from td_graddft.spectra import oscillator_strengths, transition_dipoles
 from td_graddft.tddft._semilocal_response import SemilocalResponseFunctional
 from td_graddft.tddft import RestrictedCasidaTDDFT

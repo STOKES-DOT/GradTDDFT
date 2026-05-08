@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from td_graddft.pyscf_bridge import restricted_reference_from_pyscf_with_jax_rhf
+from td_graddft.reference_legacy import restricted_reference_from_pyscf_with_jax_rhf
 from td_graddft.scf import RHFConfig
 from td_graddft.workflows.core import run_reference
 from td_graddft.workflows.types import SimulationConfig

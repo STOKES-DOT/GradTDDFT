@@ -194,8 +194,15 @@ def _normalize_hidden_dims(hidden_dims: Sequence[int]) -> tuple[int, ...]:
     return dims
 
 
-def _normalize_semilocal_xc_names(semilocal_xc: str | Sequence[str]) -> tuple[str, ...]:
-    return resolve_semilocal_xc_specs(semilocal_xc)
+def _normalize_semilocal_xc_names(
+    semilocal_xc: str | Sequence[str],
+    *,
+    allow_experimental_jax_xc: bool = False,
+) -> tuple[str, ...]:
+    return resolve_semilocal_xc_specs(
+        semilocal_xc,
+        allow_experimental_jax_xc=allow_experimental_jax_xc,
+    )
 
 
 SemilocalEnergyDensityFn = Callable[[RestrictedFeatureBundle], Array]
@@ -512,18 +519,29 @@ def make_libxc_semilocal_module(
     *,
     channel_names: Sequence[str] | None = None,
     name: str = "libxc_semilocal_module",
+    allow_experimental_jax_xc: bool = False,
 ) -> SemilocalEnergyDensityModule:
-    specs = _normalize_semilocal_xc_names(channel_specs)
+    specs = _normalize_semilocal_xc_names(
+        channel_specs,
+        allow_experimental_jax_xc=allow_experimental_jax_xc,
+    )
     resolved_specs = tuple(COMMON_SEMILOCAL_COMPONENT_SPECS.get(spec, spec) for spec in specs)
     for spec in resolved_specs:
-        parse_xc(spec)
+        parse_xc(spec, allow_experimental_jax_xc=allow_experimental_jax_xc)
     names = specs if channel_names is None else tuple(str(label) for label in channel_names)
     if len(names) != len(resolved_specs):
         raise ValueError("channel_names must match the number of semilocal channel specs.")
 
     def energy_density_channels_fn(features: RestrictedFeatureBundle) -> Array:
         return jnp.stack(
-            [eval_xc_energy_density(spec, features) for spec in resolved_specs],
+            [
+                eval_xc_energy_density(
+                    spec,
+                    features,
+                    allow_experimental_jax_xc=allow_experimental_jax_xc,
+                )
+                for spec in resolved_specs
+            ],
             axis=-1,
         )
 
@@ -557,6 +575,7 @@ def _legacy_semilocal_module(
     semilocal_energy_density_fn: SemilocalEnergyDensityFn | None,
     *,
     n_semilocal_channels: int | None = None,
+    allow_experimental_jax_xc: bool = False,
 ) -> SemilocalEnergyDensityModule:
     if semilocal_energy_density_fn is not None:
         if n_semilocal_channels is None:
@@ -573,6 +592,7 @@ def _legacy_semilocal_module(
     return make_libxc_semilocal_module(
         semilocal_xc,
         name="legacy_libxc_semilocal_module",
+        allow_experimental_jax_xc=allow_experimental_jax_xc,
     )
 
 
@@ -620,6 +640,7 @@ class DM21LikeFunctional:
         "local_projected"
     )
     strict_dm21_feature_alignment: bool = True
+    allow_experimental_jax_xc: bool = False
     density_floor: float = 1e-12
     response_density_floor: float | None = None
     kernel_clip: float = 5.0
@@ -649,6 +670,7 @@ class DM21LikeFunctional:
         return _legacy_semilocal_module(
             self.semilocal_xc,
             self.semilocal_energy_density_fn,
+            allow_experimental_jax_xc=self.allow_experimental_jax_xc,
         )
 
     def _maybe_clip_response(self, values: Array) -> Array:
@@ -3043,7 +3065,7 @@ class DM21LikeFunctional:
         )
 
 
-def make_dm21_like_functional(
+def _make_neural_xc_hybrid_functional(
     *,
     non_hf_module: SemilocalEnergyDensityModule | None = None,
     semilocal_xc: str | Sequence[str] = DEFAULT_NEURAL_XC_SEMILOCAL_XC,
@@ -3069,6 +3091,7 @@ def make_dm21_like_functional(
         "local_projected"
     ),
     strict_dm21_feature_alignment: bool = True,
+    allow_experimental_jax_xc: bool = False,
     hidden_dims: Sequence[int] = GRADDFT_DEFAULT_DM21_HIDDEN_DIMS,
     activation: Callable[[Array], Array] = nn.tanh,
     network_architecture: Literal["simple_mlp", "graddft_residual"] = (
@@ -3097,7 +3120,12 @@ def make_dm21_like_functional(
             )
         n_semilocal = int(non_hf_module.n_channels)
     elif semilocal_energy_density_fn is None:
-        n_semilocal = len(_normalize_semilocal_xc_names(semilocal_xc))
+        n_semilocal = len(
+            _normalize_semilocal_xc_names(
+                semilocal_xc,
+                allow_experimental_jax_xc=allow_experimental_jax_xc,
+            )
+        )
     elif n_semilocal_channels is None:
         n_semilocal = 1
     else:
@@ -3148,6 +3176,7 @@ def make_dm21_like_functional(
         response_hf_mode=response_hf_mode,
         response_pt2_mode=response_pt2_mode,
         strict_dm21_feature_alignment=bool(strict_dm21_feature_alignment),
+        allow_experimental_jax_xc=bool(allow_experimental_jax_xc),
         density_floor=density_floor,
         response_density_floor=response_density_floor,
         kernel_clip=kernel_clip,
@@ -3193,6 +3222,7 @@ def make_neural_xc_functional(
         "local_projected"
     ),
     strict_dm21_feature_alignment: bool = True,
+    allow_experimental_jax_xc: bool = False,
     hidden_dims: Sequence[int] = GRADDFT_DEFAULT_DM21_HIDDEN_DIMS,
     activation: Callable[[Array], Array] = nn.tanh,
     network_architecture: Literal["simple_mlp", "graddft_residual"] = (
@@ -3211,7 +3241,7 @@ def make_neural_xc_functional(
     dldh_qac_parameters: Sequence[float] = (),
     name: str = "neural_xc",
 ) -> NeuralXCHybridFunctional:
-    return make_dm21_like_functional(
+    return _make_neural_xc_hybrid_functional(
         non_hf_module=non_hf_module,
         semilocal_xc=semilocal_xc,
         semilocal_energy_density_fn=semilocal_energy_density_fn,
@@ -3225,6 +3255,7 @@ def make_neural_xc_functional(
         response_hf_mode=response_hf_mode,
         response_pt2_mode=response_pt2_mode,
         strict_dm21_feature_alignment=strict_dm21_feature_alignment,
+        allow_experimental_jax_xc=allow_experimental_jax_xc,
         hidden_dims=hidden_dims,
         activation=activation,
         network_architecture=network_architecture,

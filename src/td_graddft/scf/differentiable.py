@@ -831,6 +831,7 @@ class DifferentiableSCFConfig:
 
     mode: Literal["fixed_density", "self_consistent"] = "fixed_density"
     gradient_mode: Literal["unrolled", "implicit_commutator"] = "unrolled"
+    implicit_forward_mode: Literal["unrolled", "input_state"] = "unrolled"
     max_cycle: int = 12
     damping: float = 0.25
     level_shift: float = 0.0
@@ -905,6 +906,79 @@ class DifferentiableSCF:
             best_rms_density=jnp.asarray(0.0),
         )
         return fixed, info
+
+    def _implicit_input_state_info(
+        self,
+        density: Array,
+    ) -> DifferentiableSCFInfo:
+        dtype = jnp.asarray(density).dtype
+        zero_float = jnp.asarray(0.0, dtype=dtype)
+        zero_int = jnp.asarray(0, dtype=jnp.int32)
+        return DifferentiableSCFInfo(
+            mode="self_consistent_implicit_input_state",
+            converged=jnp.asarray(True),
+            cycles=zero_int,
+            final_rms_density=zero_float,
+            rms_density_history=jnp.zeros((0,), dtype=dtype),
+            selected_cycle=zero_int,
+            selected_rms_density=zero_float,
+            best_cycle=zero_int,
+            best_rms_density=zero_float,
+        )
+
+    def _implicit_forward_state_restricted(
+        self,
+        molecule: Any,
+        xc_functional: Any,
+        xc_params: PyTree,
+    ) -> tuple[Any, DifferentiableSCFInfo]:
+        mode = str(self.config.implicit_forward_mode)
+        if mode == "unrolled":
+            unrolled_cfg = replace(
+                self.config,
+                gradient_mode="unrolled",
+                implicit_forward_mode="unrolled",
+            )
+            unrolled_solver = DifferentiableSCF(unrolled_cfg)
+            return unrolled_solver._full_scf(
+                molecule,
+                xc_functional,
+                jax.lax.stop_gradient(xc_params),
+            )
+        if mode == "input_state":
+            density = _spin_summed_density_matrix(molecule)
+            return molecule, self._implicit_input_state_info(density)
+        raise ValueError(
+            "implicit_forward_mode must be 'unrolled' or 'input_state', "
+            f"got {self.config.implicit_forward_mode!r}."
+        )
+
+    def _implicit_forward_state_unrestricted(
+        self,
+        molecule: Any,
+        xc_functional: Any,
+        xc_params: PyTree,
+    ) -> tuple[Any, DifferentiableSCFInfo]:
+        mode = str(self.config.implicit_forward_mode)
+        if mode == "unrolled":
+            unrolled_cfg = replace(
+                self.config,
+                gradient_mode="unrolled",
+                implicit_forward_mode="unrolled",
+            )
+            unrolled_solver = DifferentiableSCF(unrolled_cfg)
+            return unrolled_solver._full_scf_unrestricted(
+                molecule,
+                xc_functional,
+                jax.lax.stop_gradient(xc_params),
+            )
+        if mode == "input_state":
+            density = _spin_resolved_density_matrix(molecule)
+            return molecule, self._implicit_input_state_info(density)
+        raise ValueError(
+            "implicit_forward_mode must be 'unrolled' or 'input_state', "
+            f"got {self.config.implicit_forward_mode!r}."
+        )
 
     def _full_scf(
         self,
@@ -1515,12 +1589,10 @@ class DifferentiableSCF:
         xc_functional: Any,
         xc_params: PyTree,
     ) -> tuple[Any, DifferentiableSCFInfo]:
-        unrolled_cfg = replace(self.config, gradient_mode="unrolled")
-        unrolled_solver = DifferentiableSCF(unrolled_cfg)
-        forward_molecule, info = unrolled_solver._full_scf_unrestricted(
+        forward_molecule, info = self._implicit_forward_state_unrestricted(
             molecule,
             xc_functional,
-            jax.lax.stop_gradient(xc_params),
+            xc_params,
         )
 
         density_star_spin = _spin_resolved_density_matrix(forward_molecule)
@@ -1854,12 +1926,10 @@ class DifferentiableSCF:
         xc_functional: Any,
         xc_params: PyTree,
     ) -> tuple[Any, DifferentiableSCFInfo]:
-        unrolled_cfg = replace(self.config, gradient_mode="unrolled")
-        unrolled_solver = DifferentiableSCF(unrolled_cfg)
-        forward_molecule, info = unrolled_solver._full_scf(
+        forward_molecule, info = self._implicit_forward_state_restricted(
             molecule,
             xc_functional,
-            jax.lax.stop_gradient(xc_params),
+            xc_params,
         )
 
         density_star = _spin_summed_density_matrix(forward_molecule)

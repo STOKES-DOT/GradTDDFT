@@ -340,7 +340,7 @@ def b3lyp_component_coefficients() -> tuple[float, ...]:
     return _B3LYP_COMPONENT_COEFFICIENTS
 
 
-def parse_xc(spec: str) -> list[XCTerm]:
+def parse_xc(spec: str, *, allow_experimental_jax_xc: bool = False) -> list[XCTerm]:
     """Parse a small PySCF-like XC specification into weighted terms."""
 
     normalized = _normalize_spec(spec)
@@ -351,22 +351,39 @@ def parse_xc(spec: str) -> list[XCTerm]:
         coefficient, raw_name = _parse_coefficient(token)
         name = _canonical_name(raw_name)
         if name not in registry:
-            raise KeyError(
-                f"Unsupported JAX XC functional '{raw_name}'. "
-                "Supported names: lda_x, lda_c_pw, lda_c_vwn, lda_c_vwn_rpa, "
-                "gga_x_b88, gga_x_pbe, gga_x_wpbeh, gga_c_lyp, gga_c_pbe, hf, "
-                "plus aliases lda, svwn, svwn_rpa, pbe, pbe0, pbeh, b3lyp, "
-                "bhandhlyp, hyb_gga_xc_pbeh, hyb_gga_xc_b3lyp, "
-                "hyb_gga_xc_bhandhlyp, lc_wpbe_local."
-            )
+            from .jax_xc_adapter import jax_xc_functional_info
+
+            info = jax_xc_functional_info(name)
+            if info.status == "experimental" and not allow_experimental_jax_xc:
+                raise ValueError(
+                    f"jax_xc functional {name!r} is experimental: {info.reason} "
+                    "Pass allow_experimental_jax_xc=True to evaluate it."
+                )
+            if info.status not in {"wrapped", "experimental"}:
+                raise KeyError(
+                    f"Unsupported JAX XC functional {raw_name!r}. "
+                    "Supported names include TD-GradDFT strict local names, safe wrapped "
+                    "jax_xc composites, and explicitly enabled experimental jax_xc names."
+                )
+            family = info.family
+            kind = "semilocal"
+            terms.append(XCTerm(name=name, coefficient=coefficient, family=family, kind=kind))
+            continue
         family, _ = registry[name]
         kind = "hf" if name == "hf" else "semilocal"
         terms.append(XCTerm(name=name, coefficient=coefficient, family=family, kind=kind))
     return terms
 
 
-def xc_type(spec: str) -> str:
-    families = {term.family for term in parse_xc(spec) if term.kind == "semilocal"}
+def xc_type(spec: str, *, allow_experimental_jax_xc: bool = False) -> str:
+    families = {
+        term.family
+        for term in parse_xc(
+            spec,
+            allow_experimental_jax_xc=allow_experimental_jax_xc,
+        )
+        if term.kind == "semilocal"
+    }
     if not families:
         return "HF"
     if "MGGA" in families:
@@ -380,11 +397,19 @@ def hybrid_coeff(spec: str) -> float:
     return sum(term.coefficient for term in parse_xc(spec) if term.kind == "hf")
 
 
-def semilocal_terms(spec: str) -> list[XCTerm]:
-    return [term for term in parse_xc(spec) if term.kind == "semilocal"]
+def semilocal_terms(spec: str, *, allow_experimental_jax_xc: bool = False) -> list[XCTerm]:
+    return [
+        term
+        for term in parse_xc(spec, allow_experimental_jax_xc=allow_experimental_jax_xc)
+        if term.kind == "semilocal"
+    ]
 
 
-def resolve_semilocal_xc_specs(spec: str | Sequence[str]) -> tuple[str, ...]:
+def resolve_semilocal_xc_specs(
+    spec: str | Sequence[str],
+    *,
+    allow_experimental_jax_xc: bool = False,
+) -> tuple[str, ...]:
     """Resolve aliases/composites into semilocal energy-density channel names."""
 
     if isinstance(spec, str):
@@ -396,7 +421,10 @@ def resolve_semilocal_xc_specs(spec: str | Sequence[str]) -> tuple[str, ...]:
 
     resolved: list[str] = []
     for raw_spec in raw_specs:
-        for term in semilocal_terms(raw_spec):
+        for term in semilocal_terms(
+            raw_spec,
+            allow_experimental_jax_xc=allow_experimental_jax_xc,
+        ):
             resolved.append(term.name)
     if not resolved:
         raise ValueError(f"XC specification {spec!r} contains no semilocal terms.")
@@ -660,18 +688,32 @@ def eval_xc_energy_density(
     features: RestrictedFeatureBundle,
     *,
     omega: Array | float | None = None,
+    allow_experimental_jax_xc: bool = False,
 ) -> Array:
     """Return the local XC grid contribution e_xc(r) for direct quadrature."""
+
+    from .jax_xc_adapter import eval_jax_xc_from_restricted_features
 
     registry = _registry()
     omega_value = _omega_or_default(omega)
     values = []
-    for term in semilocal_terms(spec):
-        _, evaluator = registry[term.name]
-        if term.name == "gga_x_wpbeh":
-            values.append(term.coefficient * evaluator(features, omega=omega_value))
+    for term in semilocal_terms(
+        spec,
+        allow_experimental_jax_xc=allow_experimental_jax_xc,
+    ):
+        if term.name in registry:
+            _, evaluator = registry[term.name]
+            if term.name == "gga_x_wpbeh":
+                values.append(term.coefficient * evaluator(features, omega=omega_value))
+            else:
+                values.append(term.coefficient * evaluator(features))
         else:
-            values.append(term.coefficient * evaluator(features))
+            eps = eval_jax_xc_from_restricted_features(
+                term.name,
+                features,
+                allow_experimental_jax_xc=allow_experimental_jax_xc,
+            )
+            values.append(term.coefficient * features.rho * eps)
     if not values:
         return jnp.zeros_like(features.rho)
     return jnp.sum(jnp.stack(values, axis=0), axis=0)
@@ -705,10 +747,12 @@ def _point_xc_response_kernel(
     spec: str,
     kind: str,
     density_floor: float,
+    allow_experimental_jax_xc: bool,
 ) -> Callable[[Array, Array], Array]:
     spec_norm = str(spec)
     kind_norm = str(kind)
     density_floor_value = float(density_floor)
+    allow_experimental = bool(allow_experimental_jax_xc)
 
     def point_energy(variables: Array, omega: Array) -> Array:
         rho_point = jnp.maximum(variables[0], density_floor_value)
@@ -729,7 +773,12 @@ def _point_xc_response_kernel(
             tau_point,
             density_floor=density_floor_value,
         )
-        return eval_xc_energy_density(spec_norm, features, omega=omega)
+        return eval_xc_energy_density(
+            spec_norm,
+            features,
+            omega=omega,
+            allow_experimental_jax_xc=allow_experimental,
+        )
 
     return jax.jit(jax.vmap(jax.hessian(point_energy, argnums=0), in_axes=(0, None)))
 
@@ -742,6 +791,7 @@ def eval_xc_response_tensor(
     tau: Array | None = None,
     density_floor: float = _DENSITY_FLOOR,
     omega: Array | float | None = None,
+    allow_experimental_jax_xc: bool = False,
 ) -> tuple[str, Array]:
     """Return the strict semilocal grid Hessian for a JAX libxc-like spec.
 
@@ -752,7 +802,10 @@ def eval_xc_response_tensor(
     - ``MGGA``: ``(5, 5, ngrids)`` with variables ``[rho, dx, dy, dz, tau]``
     """
 
-    kind = xc_type(spec)
+    kind = xc_type(
+        spec,
+        allow_experimental_jax_xc=allow_experimental_jax_xc,
+    )
     if kind == "HF":
         raise ValueError("Pure HF does not define a semilocal response tensor.")
 
@@ -774,7 +827,12 @@ def eval_xc_response_tensor(
     else:
         raise ValueError(f"Unsupported XC response kind {kind!r}.")
 
-    tensor = _point_xc_response_kernel(spec, kind, density_floor)(
+    tensor = _point_xc_response_kernel(
+        spec,
+        kind,
+        density_floor,
+        bool(allow_experimental_jax_xc),
+    )(
         response_variables,
         _omega_or_default(omega),
     )

@@ -3,6 +3,7 @@ from pathlib import Path
 
 TOOLS = tuple(Path("tools").glob("*.py"))
 EXAMPLES = tuple(Path("examples").glob("*.py"))
+REMOVED_PYSCF_BRIDGE_MODULE = "td_graddft." + "pyscf_bridge"
 
 
 def test_tools_use_tdscf_facade_for_restricted_response():
@@ -35,10 +36,24 @@ def test_user_scripts_avoid_deprecated_pyscf_bridge_imports():
     offenders = []
     for path in TOOLS + EXAMPLES:
         text = path.read_text()
-        if "td_graddft.pyscf_bridge" in text:
+        if REMOVED_PYSCF_BRIDGE_MODULE in text:
             offenders.append(str(path))
 
     assert offenders == []
+
+
+def test_pyscf_bridge_module_is_removed_from_public_api():
+    import importlib
+
+    try:
+        importlib.import_module(REMOVED_PYSCF_BRIDGE_MODULE)
+    except ModuleNotFoundError:
+        return
+    except ImportError as exc:
+        assert "td_graddft.reference_legacy" in str(exc)
+        return
+
+    raise AssertionError(f"{REMOVED_PYSCF_BRIDGE_MODULE} should no longer import successfully")
 
 
 def test_user_scripts_use_neural_xc_long_range_facade():

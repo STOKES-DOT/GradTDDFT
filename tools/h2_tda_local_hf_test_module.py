@@ -20,14 +20,13 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from td_graddft import neural_xc
+from td_graddft import neural_xc, tdscf
 from td_graddft.neural_xc import (
     GRADDFT_DEFAULT_DM21_HIDDEN_DIMS,
     GRADDFT_DEFAULT_INPUT_FEATURE_MODE,
     GRADDFT_DEFAULT_NETWORK_ARCHITECTURE,
 )
 from td_graddft.spectra import HARTREE_TO_EV
-from td_graddft.tddft import RestrictedCasidaTDDFT
 from td_graddft.tddft.test_module import RestrictedLocalHFKhhTDAWrapper
 from td_graddft.training import create_train_state_from_molecule, load_params_checkpoint
 
@@ -136,12 +135,12 @@ def _merge_checkpoint_metadata(args: argparse.Namespace, meta: dict[str, Any]) -
 
 
 def _make_functional(args: argparse.Namespace, *, response_hf_mode: str):
-    return neural_xc.make_neural_xc_functional(
+    return neural_xc.Functional(
         name=f"h2_tda_local_hf_test_module_{response_hf_mode}",
         semilocal_xc=tuple(_DEFAULT_SEMILOCAL_XC),
         input_feature_mode=str(args.input_feature_mode),
         hidden_dims=tuple(int(v) for v in args.hidden_dims),
-        network_architecture=str(args.network_architecture),
+        architecture=str(args.network_architecture),
         include_pt2_channel=bool(args.include_pt2_channel),
         pt2_channel_mode=str(args.pt2_channel_mode),
         response_hf_mode=str(response_hf_mode),
@@ -160,8 +159,8 @@ def _load_params(functional: Any, molecule: Any, checkpoint: Path):
 
 
 def _predict_s1_h(molecule: Any, xc_obj: Any) -> float:
-    solver = RestrictedCasidaTDDFT(molecule=molecule, xc_functional=xc_obj)
-    result = solver.tda(nstates=1)
+    solver = tdscf.TDA(molecule, xc_functional=xc_obj)
+    result = solver.kernel(nstates=1)
     return float(np.asarray(result.excitation_energies, dtype=float)[0])
 
 

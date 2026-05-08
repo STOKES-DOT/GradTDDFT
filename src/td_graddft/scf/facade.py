@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
 
@@ -117,7 +118,7 @@ def _configure_cuda_jax_cache() -> None:
         return
     cache_dir = os.environ.get("TD_GRADDFT_JAX_CACHE_DIR")
     if cache_dir is None or not cache_dir.strip():
-        return
+        cache_dir = str(Path.home() / ".cache" / "td_graddft" / "jax")
     min_compile_time = float(
         os.environ.get(
             "TD_GRADDFT_JAX_CACHE_MIN_COMPILE_SECS",

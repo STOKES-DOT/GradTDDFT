@@ -10,7 +10,7 @@ from td_graddft.jax_libxc import b3lyp_component_basis
 from td_graddft.neural_xc import make_neural_xc_functional
 from td_graddft.nn_rsh.functional import BoundTrainableRSHFunctional
 from td_graddft.nn_rsh.schema import RSHFunctionalTemplate, ResolvedRSHParameters
-from td_graddft.pyscf_bridge import restricted_reference_from_pyscf
+from td_graddft.reference_legacy import restricted_reference_from_pyscf
 from td_graddft.reference import GridReference, UnrestrictedMoleculeReference
 from td_graddft.scf import DifferentiableSCF, DifferentiableSCFConfig
 from td_graddft.scf.differentiable import (
@@ -23,6 +23,7 @@ from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,
     ground_state_mse_loss,
+    make_runtime_forward_implicit_loss_and_grad,
     predict_ground_state_total_energy,
 )
 
@@ -119,6 +120,28 @@ def _toy_grid():
     )
     weights = jnp.asarray([0.5, 0.7, 0.6], dtype=jnp.float32)
     return ao, ao_deriv1, weights
+
+
+def _make_toy_restricted_reference():
+    ao, ao_deriv1, weights = _toy_grid()
+    mo_coeff = jnp.eye(2, dtype=jnp.float32)
+    mo_occ = jnp.asarray([[1.0, 0.0], [1.0, 0.0]], dtype=jnp.float32)
+    mo_energy = jnp.asarray([[-0.8, 0.2], [-0.8, 0.2]], dtype=jnp.float32)
+    density_half = jnp.einsum("pi,i,qi->pq", mo_coeff, mo_occ[0], mo_coeff)
+    return SimpleNamespace(
+        ao=ao,
+        ao_deriv1=ao_deriv1,
+        grid=GridReference(weights=weights),
+        rep_tensor=jnp.zeros((2, 2, 2, 2), dtype=jnp.float32),
+        mo_coeff=jnp.stack([mo_coeff, mo_coeff], axis=0),
+        mo_occ=mo_occ,
+        mo_energy=mo_energy,
+        rdm1=jnp.stack([density_half, density_half], axis=0),
+        h1e=jnp.diag(jnp.asarray([-0.8, 0.2], dtype=jnp.float32)),
+        nuclear_repulsion=0.0,
+        overlap_matrix=jnp.eye(2, dtype=jnp.float32),
+        hfx_omega_values=(0.0,),
+    )
 
 
 def _make_toy_unrestricted_reference():
@@ -478,6 +501,114 @@ def test_unrestricted_implicit_commutator_produces_finite_gradient():
         atol=5e-2,
         rtol=5e-1,
     )
+
+
+def test_implicit_commutator_can_use_input_state_as_forward_primal():
+    molecule = _make_toy_restricted_reference()
+
+    class _ToyRestrictedFunctional:
+        def scf_potential_components_and_alpha(self, params, molecule_in):
+            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
+            v_rho = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
+            v_grad = jnp.zeros((int(molecule_in.ao.shape[0]), 3), dtype=jnp.float32)
+            return v_rho, v_grad, "LDA", jnp.asarray(0.0, dtype=jnp.float32)
+
+    functional = _ToyRestrictedFunctional()
+    solver = DifferentiableSCF(
+        DifferentiableSCFConfig(
+            mode="self_consistent",
+            gradient_mode="implicit_commutator",
+            implicit_forward_mode="input_state",
+            implicit_diff_max_iter=12,
+            implicit_diff_regularization=1e-3,
+            implicit_diff_tolerance=1e-6,
+            implicit_diff_restart=6,
+        )
+    )
+
+    def _objective(raw_strength):
+        params = {"strength": raw_strength}
+        out, _ = solver.run(molecule, functional, params)
+        return jnp.sum(out.rdm1[0])
+
+    value, grad = jax.value_and_grad(_objective)(jnp.asarray(0.1, dtype=jnp.float32))
+    out, info = solver.run(molecule, functional, {"strength": jnp.asarray(0.1, dtype=jnp.float32)})
+
+    assert bool(info.converged)
+    assert info.mode == "self_consistent_implicit_input_state"
+    assert int(info.cycles) == 0
+    assert np.allclose(np.asarray(out.rdm1), np.asarray(molecule.rdm1), atol=1e-7)
+    assert jnp.isfinite(value)
+    assert jnp.isfinite(grad)
+
+
+def test_training_config_passes_implicit_forward_mode_to_scf():
+    import td_graddft.training.targets as targets_mod
+
+    cfg = GroundStateTrainingConfig(
+        mode="self_consistent",
+        scf_gradient_mode="implicit_commutator",
+        scf_implicit_forward_mode="input_state",
+    )
+
+    scf_solver = targets_mod._make_differentiable_scf(cfg)
+
+    assert scf_solver.config.gradient_mode == "implicit_commutator"
+    assert scf_solver.config.implicit_forward_mode == "input_state"
+
+
+def test_runtime_forward_implicit_loss_runs_provider_before_grad():
+    molecule = _make_toy_restricted_reference()
+
+    class _ToyRestrictedFunctional:
+        def scf_potential_components_and_alpha(self, params, molecule_in):
+            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
+            v_rho = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
+            v_grad = jnp.zeros((int(molecule_in.ao.shape[0]), 3), dtype=jnp.float32)
+            return v_rho, v_grad, "LDA", jnp.asarray(0.0, dtype=jnp.float32)
+
+        def energy(self, params, density, weights):
+            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
+            return strength * jnp.sum(jnp.asarray(density) * jnp.asarray(weights))
+
+    calls = []
+
+    def _runtime_forward(params, functional, molecule_in):
+        del params, functional
+        calls.append("forward")
+        return _replace_molecule(
+            molecule_in,
+            rdm1=jnp.asarray(molecule_in.rdm1),
+            scf_initial_density=jnp.asarray(molecule_in.rdm1).sum(axis=0),
+        )
+
+    loss_and_grad = make_runtime_forward_implicit_loss_and_grad(
+        _ToyRestrictedFunctional(),
+        _runtime_forward,
+        training_config=GroundStateTrainingConfig(
+            energy_mse_weight=1.0,
+            energy_mae_weight=0.0,
+            scf_implicit_diff_max_iter=8,
+            scf_implicit_diff_regularization=1e-3,
+            scf_implicit_diff_tolerance=1e-6,
+            scf_implicit_diff_restart=4,
+        ),
+    )
+    datum = GroundStateDatum(
+        molecule=molecule,
+        target_total_energy=jnp.asarray(0.0, dtype=jnp.float32),
+    )
+
+    loss, metrics, grads = loss_and_grad(
+        {"strength": jnp.asarray(0.1, dtype=jnp.float32)},
+        datum,
+    )
+
+    assert calls == ["forward"]
+    assert np.isfinite(float(loss))
+    assert metrics["scf_cycles"].shape == (1,)
+    assert int(metrics["scf_cycles"][0]) == 0
+    assert jnp.isfinite(grads["strength"])
 
 
 def test_implicit_commutator_self_consistent_loss_produces_finite_gradient():

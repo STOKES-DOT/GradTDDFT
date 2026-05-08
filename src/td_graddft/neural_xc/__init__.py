@@ -1,17 +1,8 @@
 from .api import (
     Functional,
     LongRangeCorrection,
-    make_dm21_like_functional,
     make_functional,
     make_long_range_correction,
-)
-from .base import (
-    DensityNeuralXCFunctional,
-    NeuralXCFunctional,
-    PointwiseMLP,
-    default_lda_coefficient_inputs,
-    default_lda_energy_density_basis,
-    make_neural_lda_functional,
 )
 from .dm21 import (
     BoundDM21LikeFunctional,
@@ -59,7 +50,6 @@ __all__ = [
     "DEFAULT_NEURAL_XC_SEMILOCAL_XC",
     "DM21LikeFunctional",
     "DM21MixingMLP",
-    "DensityNeuralXCFunctional",
     "Functional",
     "LongRangeCorrection",
     "GRADDFT_DEFAULT_DM21_HIDDEN_DIMS",
@@ -68,20 +58,14 @@ __all__ = [
     "GradDFTResidualMixingMLP",
     "NeuralXCHybridFunctional",
     "NeuralXCMixingMLP",
-    "NeuralXCFunctional",
-    "PointwiseMLP",
     "SemilocalEnergyDensityFn",
     "SemilocalEnergyDensityModule",
     "SemilocalLocalContributionFn",
     "available_semilocal_components",
-    "default_lda_coefficient_inputs",
-    "default_lda_energy_density_basis",
     "make_custom_semilocal_module",
-    "make_dm21_like_functional",
     "make_functional",
     "make_long_range_correction",
     "make_libxc_semilocal_module",
-    "make_neural_lda_functional",
     "make_neural_xc_functional",
     "resolve_coefficient_prior_values",
 ]

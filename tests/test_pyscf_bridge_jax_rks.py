@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 import types
 
-from td_graddft.pyscf_bridge import (
+from td_graddft.reference_legacy import (
     restricted_reference_from_pyscf_spec_with_jax_rks,
     restricted_reference_from_pyscf_with_jax_rks,
 )
