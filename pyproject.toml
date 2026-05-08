@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "td-graddft"
 version = "0.1.0"
-description = "Research scaffold for time-dependent differentiable density functional theory in JAX."
+description = "JAX research toolkit for differentiable TDDFT, Neural XC/RSH training, spectra, integrals, and CUDA J/K experiments."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}

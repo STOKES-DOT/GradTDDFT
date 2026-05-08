@@ -8,6 +8,12 @@ geometry-response experiments.
 
 The package name is `td-graddft`; the import namespace is `td_graddft`.
 
+## Repository Description
+
+GitHub description:
+
+> JAX research toolkit for differentiable TDDFT: strict-JAX SCF, TDA/Casida TDDFT, Neural XC/RSH training, spectra, integrals, and CUDA J/K experiments.
+
 ## Project Status
 
 This repository is an active research prototype. The stable public entry points
@@ -148,7 +154,7 @@ is skipped.
 | Molecules | Cartesian AO molecular input via `gto.M`; charge, spin, Angstrom/Bohr style specs. |
 | Ground state | RHF kernels, RKS and UKS facades, differentiable SCF, PySCF/libcint reference bridges. |
 | SCF backends | Full J/K, density fitting for RKS, direct J/K, optional CUDA direct J/K for supported Cartesian basis sets. |
-| XC models | Semilocal and hybrid strings through local parsers/backends, classic helpers for LDA/PBE/PBE0/B3LYP-style workflows, RSH presets such as LC-wPBE. |
+| XC models | Local JAX parser for core LDA/GGA/hybrid channels, optional `jax_xc` bridge for libxc-translated functionals, classic helpers for LDA/PBE/PBE0/B3LYP-style workflows, and RSH presets such as LC-wPBE and wB97X-D. |
 | TDDFT | Restricted and unrestricted TDA, restricted and unrestricted Casida TDDFT, dense and Davidson-style eigensolver paths. |
 | Observables | Excitation energies, eV conversion, transition dipoles, oscillator strengths, Lorentzian spectra. |
 | Neural XC | Residual and MLP Neural XC functionals, DM21-like feature modes, HF/PT2 channels, long-range correction heads. |
@@ -164,6 +170,104 @@ Integral-engine notes:
   momentum or large contractions can fall back to safer non-JIT paths.
 - CUDA direct J/K is optional and depends on GPU-enabled JAX, `nvcc` or a
   prebuilt shared library, and the supported CUDA basis/kernel configuration.
+
+## Supported Basis Sets
+
+Basis names follow PySCF-style spelling and are normalized internally, so common
+forms such as `sto-3g`, `6-31g*`, `def2-svp`, and `cc-pvdz` are accepted. The
+strict-JAX basis loader reads the bundled `.dat` snapshot in
+`src/td_graddft/data/pyscf_basis_snapshot`; PySCF-backed reference paths can also
+use basis names that an installed PySCF environment can resolve.
+
+Representative bundled orbital basis families:
+
+- Minimal and compact bases: `sto-3g`, `sto-6g`, `dz`, `dzp`, `dzvp`, `dzvp2`,
+  `tzv`, `tzp`, `qzp`, `ano`, `roos-dz`, `roos-tz`, `adzp`, `atzp`, `aqzp`.
+- Pople bases: `3-21g`, `3-21g*`, `3-21++g`, `3-21++g*`, `4-31g`, `6-31g`,
+  `6-31g*`, `6-31g**`, `6-31+g`, `6-31+g*`, `6-31+g**`, `6-31++g`,
+  `6-31++g*`, `6-31++g**`, `6-311g`, `6-311g*`, `6-311g**`, `6-311+g`,
+  `6-311+g*`, `6-311+g**`, `6-311++g`, `6-311++g*`, and `6-311++g**`.
+- Dunning correlation-consistent bases: `cc-pvdz`, `cc-pvtz`, `cc-pvqz`,
+  `cc-pv5z`, `aug-cc-pvdz`, `aug-cc-pvtz`, `aug-cc-pvqz`, `aug-cc-pv5z`,
+  `cc-pcvdz`, `cc-pcvtz`, `cc-pcvqz`, `cc-pcv5z`, `cc-pcv6z`, `cc-pwcvdz`,
+  `cc-pwcvtz`, `cc-pwcvqz`, `cc-pwcv5z`, plus DK, DK3, PP, and PP-NR variants.
+- F12 and auxiliary Dunning variants: `cc-pvdz-f12`, `cc-pvtz-f12`,
+  `cc-pvqz-f12`, `cc-pv5z-f12`, `cc-pvdz-f12rev2`, `cc-pvtz-f12rev2`,
+  `cc-pvqz-f12rev2`, `cc-pv5z-f12rev2`, and OptRI companion bases.
+- Karlsruhe/def2 bases: `def2-svp`, `def2-svpd`, `def2-tzvp`, `def2-tzvpd`,
+  `def2-tzvpp`, `def2-tzvppd`, `def2-qzvp`, `def2-qzvpd`, `def2-qzvpp`,
+  `def2-qzvppd`, `def2-mtzvp`, `def2-mtzvpp`, `ma-def2-svp`, `ma-def2-svpp`,
+  `ma-def2-tzvp`, `ma-def2-tzvpp`, `ma-def2-qzvp`, and `ma-def2-qzvpp`.
+- Jensen polarization-consistent bases: `pc-0` through `pc-4`, `aug-pc-0`
+  through `aug-pc-4`, `pcseg-0` through `pcseg-4`, and `aug-pcseg-0` through
+  `aug-pcseg-4`.
+- Relativistic, ECP, and heavy-element families: `lanl2dz`, `lanl2tz`,
+  `lanl08`, `stuttgart_dz`, `stuttgart_rsc`, `bfd_vdz`, `bfd_vtz`, `bfd_vqz`,
+  `bfd_v5z`, `bfd_pp`, `Burkatzi-Filippi-Dolg-PP`, `crenbl`, `crenbs`,
+  `sbkjc`, `sarc-dkh2`, `ccECP`, `ccECP_cc-pVDZ` through `ccECP_cc-pV6Z`,
+  `ccECP_aug-cc-pVDZ` through `ccECP_aug-cc-pV6Z`, and spin-orbit ECP data.
+- Fitting and auxiliary bases: `def2-*-ri`, `def2-universal-jfit`,
+  `def2-universal-jkfit`, `cc-pv*z-ri`, `cc-pv*z-jkfit`, `cc-pV*Z_MP2FIT`,
+  `weigend_cfit`, `ahlrichs_cfit`, `demon_cfit`, `DgaussA1_dft_cfit`,
+  `DgaussA2_dft_cfit`, `DgaussA1_dft_xfit`, and `DgaussA2_dft_xfit`.
+
+Backend caveats:
+
+- Strict-JAX molecule construction currently accepts named basis strings from
+  the bundled `.dat` snapshot and converts them to Cartesian AOs.
+- The pure-JAX integral implementation validates angular momentum up to `l <= 3`.
+  Higher angular momentum basis functions should use a PySCF/libcint-backed path
+  unless the target JAX integral path explicitly supports them.
+- Auxiliary RI/JFIT/JKFIT/MP2FIT files are included for density-fitting and
+  reference workflows; they are not always appropriate as primary orbital bases.
+
+## Supported Exchange-Correlation Functionals
+
+TD-GradDFT has three XC layers: a guaranteed local JAX compatibility layer, an
+optional `jax_xc` backend, and neural/trainable functional wrappers.
+
+Guaranteed local JAX parser support:
+
+- Primitive channels: `lda_x`, `lda_c_pw`, `lda_c_vwn`, `lda_c_vwn_rpa`,
+  `gga_x_b88`, `gga_x_pbe`, `gga_x_wpbeh`, `gga_c_lyp`, `gga_c_pbe`, and `hf`.
+- Aliases and composites: `lda`, `svwn`, `svwn_rpa`, `pbe`, `pbe0`, `pbeh`,
+  `hyb_gga_xc_pbeh`, `b3lyp`, `hyb_gga_xc_b3lyp`, `bhandhlyp`,
+  `hyb_gga_xc_bhandhlyp`, `lc_wpbe_local`, `lc-wpbe-local`,
+  `lcwpbe_local`, and `lc_wpbe_semilocal`.
+- Classic helper constructors: `make_lda_functional()`, `make_pbe_functional()`,
+  `make_pbe0_functional()`, and `make_b3lyp_functional()`.
+
+`jax_xc` backend support:
+
+- Installing with `python -m pip install -e ".[upstreams]"` adds
+  `jax-xc>=0.0.12`.
+- `td_graddft.jax_xc_adapter.load_jax_xc()` resolves backends in this order:
+  external `jax_xc`, vendored generated `third_party/jax_xc/generated`, then the
+  local fallback subset above.
+- The adapter exposes `jax_xc` factories for LDA-like adiabatic wrappers through
+  `lda_from_jax_xc(...)` and wraps selected hybrid composite nodes so TD-GradDFT
+  handles exact exchange in the SCF/RSH layer while using semilocal JAX
+  components from `jax_xc`.
+- When a complete upstream or vendored `jax_xc` backend is present, additional
+  libxc-translated semilocal names can be used experimentally if their required
+  grid features are supplied by the calling path. The strict training and TDDFT
+  paths still validate against the guaranteed local subset unless explicitly
+  routed through the adapter.
+
+Range-separated and neural XC support:
+
+- RSH presets: `lc-wpbe` and `wb97x-d`, with aliases such as `LC_WPBE`,
+  `lc_wpbe`, `wb97xd`, `omega-b97x-d`, and `omega_b97x_d`.
+- `lc-wpbe` uses SR-PBE semilocal exchange plus LR-HF exchange and PBE
+  correlation. Defaults: `omega=0.4`, SR-HF fraction `0.0`, LR-HF fraction `1.0`.
+- `wb97x-d` uses a B97-family range-separated hybrid form with dispersion
+  metadata. Defaults: `omega=0.2`, SR-HF fraction `0.222036`, LR-HF fraction
+  `1.0`.
+- Neural XC supports residual and MLP architectures, DM21-style feature modes,
+  HF/PT2 channels, semilocal channel bases from the supported XC specs, and
+  trainable long-range correction heads.
+- Neural RSH supports trainable `omega`, `alpha`, and `beta` parameters, plus
+  atom-centered and GNN parameter heads.
 
 ## Quick Start
 
