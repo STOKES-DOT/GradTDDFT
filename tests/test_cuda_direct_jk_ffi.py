@@ -508,7 +508,7 @@ def test_cuda_rys_env_layout_matches_pyscf_shell_metadata():
         )
 
 
-def test_cuda_rys_pair_mapping_matches_gpu4pyscf_tile_order():
+def test_cuda_rys_pair_mapping_matches_rys_tile_order():
     basis = basis_from_spec("O 0 0 0; H 0 -0.757 0.587; H 0 0.757 0.587", basis="sto-3g")
     shell_layout = cuda_direct_jk._build_joltqc_shell_layout(basis)
     nshell = int(shell_layout.sorted_shell_indices.shape[0])
@@ -939,6 +939,47 @@ def test_cuda_direct_jk_builder_uses_screened_shell_task_ffi_for_cutoff(monkeypa
     assert np.asarray(screened_args[12]).shape == (len(basis.shells), len(basis.shells))
     assert np.asarray(screened_args[17]).ndim == 1
     assert np.asarray(screened_args[17]).size > 0
+    assert np.allclose(np.asarray(j_mat), 1.0)
+    assert np.allclose(np.asarray(k_mat), 2.0)
+
+
+def test_cuda_direct_jk_builder_uses_rys_screening_when_available(monkeypatch, tmp_path):
+    basis = basis_from_spec("H 0 0 0; H 0 0 0.74", basis="sto-3g")
+    npair = basis.nao * (basis.nao + 1) // 2
+    density = np.asarray(
+        [
+            [0.83, 0.21],
+            [0.21, 0.71],
+        ],
+        dtype=np.float64,
+    )
+    calls = []
+
+    monkeypatch.setattr(CudaDirectJKBuilder, "_compile_library", lambda self: tmp_path / "libfake.so")
+    monkeypatch.setattr(CudaDirectJKBuilder, "_compile_and_register", lambda self: None)
+
+    def fake_ffi_call(target_name, result_shape_dtypes, *args, **kwargs):
+        calls.append((target_name, result_shape_dtypes, args, kwargs))
+        if target_name == "td_graddft_cuda_pair_schwarz":
+            return np.arange(npair, dtype=np.float64) + 1.0
+        return np.ones_like(density), 2.0 * np.ones_like(density)
+
+    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+
+    builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
+    builder.has_rys_direct_jk = True
+    j_mat, k_mat = builder.build_jk(density, density_cutoff=1e-8)
+
+    assert [call[0] for call in calls] == [
+        "td_graddft_cuda_pair_schwarz",
+        "td_graddft_cuda_rys_direct_jk",
+    ]
+    rys_args = calls[1][2]
+    assert len(rys_args) == 12
+    assert np.asarray(rys_args[7]).shape == (len(basis.shells), len(basis.shells))
+    assert np.asarray(rys_args[8]).shape == (len(basis.shells), len(basis.shells))
+    assert np.asarray(rys_args[11]).dtype == np.float32
+    assert np.allclose(np.asarray(rys_args[11]), np.asarray([np.log(1e-8)], dtype=np.float32))
     assert np.allclose(np.asarray(j_mat), 1.0)
     assert np.allclose(np.asarray(k_mat), 2.0)
 
@@ -1376,6 +1417,14 @@ def test_cuda_direct_jk_kernel_exposes_joltqc_grouped_ffi_target():
     assert "atomicAdd(k_mat + k * joltqc_nao + i" in joltqc_kernel
 
 
+def test_cuda_rys_dispatch_does_not_use_group_slot_as_pair_order():
+    source = cuda_direct_jk._kernel_source_path().read_text()
+
+    assert "h_pair_offsets.back() != static_cast<int>(pair_ids.dimensions()[0])" in source
+    assert "std::vector<int> h_pair_ids" not in source
+    assert "ij_slot < kl_slot" not in source
+
+
 def test_cuda_direct_jk_kernel_keeps_joltqc_launcher_weak_fallback_external():
     source = cuda_direct_jk._kernel_source_path().read_text()
 
@@ -1725,7 +1774,7 @@ def test_build_prebuilt_cuda_direct_jk_library_reuses_runtime_signature_library(
         joltqc_group_keys=np.asarray([[0, 3], [1, 3]], dtype=np.int32),
         joltqc_group_quartet_keys=np.asarray([[0, 0, 0, 0], [1, 1, 1, 1]], dtype=np.int32),
         joltqc_group_quartet_offsets=np.asarray([0, 1, 2], dtype=np.int32),
-        include_gpu4pyscf_rys=False,
+        include_rys=False,
     )
 
     first_compile_sources = [
@@ -1744,7 +1793,7 @@ def test_build_prebuilt_cuda_direct_jk_library_reuses_runtime_signature_library(
         joltqc_group_keys=np.asarray([[0, 3], [1, 3]], dtype=np.int32),
         joltqc_group_quartet_keys=np.asarray([[1, 1, 1, 1], [0, 0, 0, 0]], dtype=np.int32),
         joltqc_group_quartet_offsets=np.asarray([0, 3, 4], dtype=np.int32),
-        include_gpu4pyscf_rys=False,
+        include_rys=False,
     )
 
     second_compile_sources = [
@@ -1793,7 +1842,7 @@ def test_build_prebuilt_cuda_direct_jk_library_skips_joltqc_codegen_when_cached(
         joltqc_group_keys=group_keys,
         joltqc_group_quartet_keys=quartet_keys,
         joltqc_group_quartet_offsets=quartet_offsets,
-        include_gpu4pyscf_rys=False,
+        include_rys=False,
     )
 
     assert result == library

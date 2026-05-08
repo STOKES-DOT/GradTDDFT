@@ -397,6 +397,7 @@ def test_cached_cuda_direct_jk_builder_keeps_pair_metadata_for_runtime_mapping(m
     class FakeBuilder:
         def __init__(self, basis_arg, **kwargs):
             assert basis_arg is basis
+            self.has_rys_direct_jk = True
             calls.append(kwargs)
 
     monkeypatch.setattr(reference_mod, "CudaDirectJKBuilder", FakeBuilder)
@@ -420,7 +421,7 @@ def test_cached_cuda_direct_jk_builder_keeps_pair_metadata_for_runtime_mapping(m
     reference_mod._cached_cuda_direct_jk_builder(basis, unscreened_config)
     reference_mod._cached_cuda_direct_jk_builder(basis, screened_config)
 
-    assert calls[0]["include_pair_metadata"] is True
+    assert calls[0]["include_pair_metadata"] is False
     assert calls[1]["include_pair_metadata"] is True
 
 

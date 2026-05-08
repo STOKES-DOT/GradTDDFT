@@ -186,7 +186,30 @@ def _cache_cuda_direct_rks_inputs(key: tuple[Any, ...] | None, scf_inputs: Any) 
     _CUDA_DIRECT_RKS_INPUT_CACHE[key] = scf_inputs
 
 
-def _cuda_direct_jk_builder_cache_key(basis: Any, config: RKSConfig) -> tuple[Any, ...]:
+def _cuda_direct_jk_builder_metadata_flags(config: RKSConfig) -> tuple[bool, bool]:
+    rys_fast_path = (
+        config.jk_backend == "direct"
+        and config.direct_jk_engine == "cuda"
+        and float(config.direct_scf_tol) <= 0.0
+    )
+    if rys_fast_path:
+        return False, False
+    return True, True
+
+
+def _cuda_direct_jk_builder_cache_key(
+    basis: Any,
+    config: RKSConfig,
+    *,
+    include_pair_metadata: bool | None = None,
+    include_joltqc_metadata: bool | None = None,
+) -> tuple[Any, ...]:
+    if include_pair_metadata is None or include_joltqc_metadata is None:
+        default_pair, default_joltqc = _cuda_direct_jk_builder_metadata_flags(config)
+        if include_pair_metadata is None:
+            include_pair_metadata = default_pair
+        if include_joltqc_metadata is None:
+            include_joltqc_metadata = default_joltqc
     # The exact full-JoltQC path receives centers through dynamic basis_data, so the
     # builder only owns static shell/layout metadata. Screened direct-SCF builders
     # use geometry-dependent internal basis_data and must not be reused across
@@ -201,19 +224,45 @@ def _cuda_direct_jk_builder_cache_key(basis: Any, config: RKSConfig) -> tuple[An
     return (
         _cuda_direct_basis_cache_key(basis),
         float(config.direct_scf_tol),
+        bool(include_pair_metadata),
+        bool(include_joltqc_metadata),
         geometry_part,
     )
 
 
 def _cached_cuda_direct_jk_builder(basis: Any, config: RKSConfig) -> Any:
-    key = _cuda_direct_jk_builder_cache_key(basis, config)
+    include_pair_metadata, include_joltqc_metadata = _cuda_direct_jk_builder_metadata_flags(config)
+    key = _cuda_direct_jk_builder_cache_key(
+        basis,
+        config,
+        include_pair_metadata=include_pair_metadata,
+        include_joltqc_metadata=include_joltqc_metadata,
+    )
     builder = _CUDA_DIRECT_JK_BUILDER_CACHE.get(key)
     if builder is not None:
         return builder
     builder = CudaDirectJKBuilder(
         basis,
-        include_pair_metadata=True,
+        include_pair_metadata=include_pair_metadata,
+        include_joltqc_metadata=include_joltqc_metadata,
     )
+    if not include_pair_metadata and not bool(getattr(builder, "has_rys_direct_jk", False)):
+        include_pair_metadata = True
+        include_joltqc_metadata = True
+        key = _cuda_direct_jk_builder_cache_key(
+            basis,
+            config,
+            include_pair_metadata=include_pair_metadata,
+            include_joltqc_metadata=include_joltqc_metadata,
+        )
+        cached_builder = _CUDA_DIRECT_JK_BUILDER_CACHE.get(key)
+        if cached_builder is not None:
+            return cached_builder
+        builder = CudaDirectJKBuilder(
+            basis,
+            include_pair_metadata=include_pair_metadata,
+            include_joltqc_metadata=include_joltqc_metadata,
+        )
     if len(_CUDA_DIRECT_JK_BUILDER_CACHE) >= _CUDA_DIRECT_JK_BUILDER_CACHE_MAXSIZE:
         _CUDA_DIRECT_JK_BUILDER_CACHE.pop(next(iter(_CUDA_DIRECT_JK_BUILDER_CACHE)))
     _CUDA_DIRECT_JK_BUILDER_CACHE[key] = builder

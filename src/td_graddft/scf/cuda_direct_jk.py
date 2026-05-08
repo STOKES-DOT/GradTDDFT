@@ -41,13 +41,13 @@ _JOLTQC_DISPATCH_ENV = "TD_GRADDFT_CUDA_JOLTQC_DISPATCH"
 _JOLTQC_FIXED_UNIVERSE_ENV = "TD_GRADDFT_CUDA_JOLTQC_FIXED_UNIVERSE"
 _JOLTQC_FIXED_MAX_L_ENV = "TD_GRADDFT_CUDA_JOLTQC_FIXED_MAX_L"
 _JOLTQC_FIXED_NPRIM_MAX_ENV = "TD_GRADDFT_CUDA_JOLTQC_FIXED_NPRIM_MAX"
-_GPU4PYSCF_RYS_TARGET_NAME = "td_graddft_cuda_gpu4pyscf_rys_direct_jk"
-_GPU4PYSCF_RYS_ENV = "TD_GRADDFT_ENABLE_GPU4PYSCF_RYS"
+_RYS_DIRECT_JK_TARGET_NAME = "td_graddft_cuda_rys_direct_jk"
+_RYS_DIRECT_JK_ENV = "TD_GRADDFT_ENABLE_RYS_DIRECT_JK"
 _DEFAULT_PAIR_ERI_BUILD_CUTOFF = 1.0e-8
 _JOLTQC_GROUP_ALIGNMENT = 4
 _JOLTQC_NPRIM_MAX = 3
 _JOLTQC_BASIS_STRIDE = 12
-_GPU4PYSCF_PAIR_MAPPING_TILE = 6
+_RYS_PAIR_MAPPING_TILE = 6
 _RYS_CHARGE_OF = 0
 _RYS_PTR_COORD = 1
 _RYS_ATM_SLOTS = 6
@@ -561,7 +561,7 @@ _cuda_direct_jk_with_density_vjp.defvjp(
 )
 
 
-def _cuda_gpu4pyscf_rys_direct_jk_primitive(
+def _cuda_rys_direct_jk_primitive(
     density: Array,
     rys_atm: Array,
     rys_bas: Array,
@@ -578,7 +578,7 @@ def _cuda_gpu4pyscf_rys_direct_jk_primitive(
     density_arr = _symmetrize_density_like(density)
     shape = jax.ShapeDtypeStruct(density_arr.shape, jnp.float64)
     j_mat, k_mat = _ffi_call(
-        _GPU4PYSCF_RYS_TARGET_NAME,
+        _RYS_DIRECT_JK_TARGET_NAME,
         (shape, shape),
         density_arr,
         rys_atm,
@@ -598,7 +598,7 @@ def _cuda_gpu4pyscf_rys_direct_jk_primitive(
 
 
 @jax.custom_vjp
-def _cuda_gpu4pyscf_rys_direct_jk_with_density_vjp(
+def _cuda_rys_direct_jk_with_density_vjp(
     density: Array,
     rys_atm: Array,
     rys_bas: Array,
@@ -612,7 +612,7 @@ def _cuda_gpu4pyscf_rys_direct_jk_with_density_vjp(
     rys_pair_ids: Array,
     log_cutoff: Array,
 ) -> tuple[Array, Array]:
-    return _cuda_gpu4pyscf_rys_direct_jk_primitive(
+    return _cuda_rys_direct_jk_primitive(
         density,
         rys_atm,
         rys_bas,
@@ -628,7 +628,7 @@ def _cuda_gpu4pyscf_rys_direct_jk_with_density_vjp(
     )
 
 
-def _cuda_gpu4pyscf_rys_direct_jk_fwd(
+def _cuda_rys_direct_jk_fwd(
     density: Array,
     rys_atm: Array,
     rys_bas: Array,
@@ -642,7 +642,7 @@ def _cuda_gpu4pyscf_rys_direct_jk_fwd(
     rys_pair_ids: Array,
     log_cutoff: Array,
 ):
-    out = _cuda_gpu4pyscf_rys_direct_jk_primitive(
+    out = _cuda_rys_direct_jk_primitive(
         density,
         rys_atm,
         rys_bas,
@@ -676,7 +676,7 @@ def _cuda_gpu4pyscf_rys_direct_jk_fwd(
     )
 
 
-def _cuda_gpu4pyscf_rys_direct_jk_bwd(res, cotangents):
+def _cuda_rys_direct_jk_bwd(res, cotangents):
     (
         density_template,
         rys_atm,
@@ -696,7 +696,7 @@ def _cuda_gpu4pyscf_rys_direct_jk_bwd(res, cotangents):
         j_cotangent = density_template
     if k_cotangent is None:
         k_cotangent = density_template
-    grad_j, _ = _cuda_gpu4pyscf_rys_direct_jk_primitive(
+    grad_j, _ = _cuda_rys_direct_jk_primitive(
         _symmetrize_density_like(j_cotangent),
         rys_atm,
         rys_bas,
@@ -710,7 +710,7 @@ def _cuda_gpu4pyscf_rys_direct_jk_bwd(res, cotangents):
         rys_pair_ids,
         log_cutoff,
     )
-    _, grad_k = _cuda_gpu4pyscf_rys_direct_jk_primitive(
+    _, grad_k = _cuda_rys_direct_jk_primitive(
         _symmetrize_density_like(k_cotangent),
         rys_atm,
         rys_bas,
@@ -743,9 +743,9 @@ def _cuda_gpu4pyscf_rys_direct_jk_bwd(res, cotangents):
     )
 
 
-_cuda_gpu4pyscf_rys_direct_jk_with_density_vjp.defvjp(
-    _cuda_gpu4pyscf_rys_direct_jk_fwd,
-    _cuda_gpu4pyscf_rys_direct_jk_bwd,
+_cuda_rys_direct_jk_with_density_vjp.defvjp(
+    _cuda_rys_direct_jk_fwd,
+    _cuda_rys_direct_jk_bwd,
 )
 
 
@@ -1196,6 +1196,30 @@ class CudaJoltQCQuartetLayout:
     shell_quartets: np.ndarray
 
 
+def _empty_joltqc_basis_layout() -> CudaJoltQCBasisLayout:
+    return CudaJoltQCBasisLayout(
+        basis_data=np.zeros((0, _JOLTQC_BASIS_STRIDE), dtype=np.float64),
+        basis_data_fp32=np.zeros((0, _JOLTQC_BASIS_STRIDE), dtype=np.float32),
+        shell_l=np.zeros((0,), dtype=np.int32),
+        shell_nprims=np.zeros((0,), dtype=np.int32),
+        to_parent_shell=np.zeros((0,), dtype=np.int32),
+        primitive_starts=np.zeros((0,), dtype=np.int32),
+        pad_mask=np.zeros((0,), dtype=bool),
+        group_keys=np.zeros((0, 2), dtype=np.int32),
+        group_offsets=np.zeros((1,), dtype=np.int32),
+        ao_loc=np.zeros((1,), dtype=np.int32),
+        ao_to_parent_ao=np.zeros((0,), dtype=np.int32),
+    )
+
+
+def _empty_joltqc_quartet_layout() -> CudaJoltQCQuartetLayout:
+    return CudaJoltQCQuartetLayout(
+        group_quartet_keys=np.zeros((0, 4), dtype=np.int32),
+        group_quartet_offsets=np.zeros((1,), dtype=np.int32),
+        shell_quartets=np.zeros((0, 4), dtype=np.int32),
+    )
+
+
 @dataclass(frozen=True)
 class CudaRysEnvLayout:
     atm: np.ndarray
@@ -1383,19 +1407,7 @@ def _build_joltqc_shell_layout(basis: CartesianBasis) -> CudaShellLayout:
 def _build_joltqc_basis_layout(basis: CartesianBasis) -> CudaJoltQCBasisLayout:
     shells = tuple(basis.shells)
     if not shells:
-        return CudaJoltQCBasisLayout(
-            basis_data=np.zeros((0, _JOLTQC_BASIS_STRIDE), dtype=np.float64),
-            basis_data_fp32=np.zeros((0, _JOLTQC_BASIS_STRIDE), dtype=np.float32),
-            shell_l=np.zeros((0,), dtype=np.int32),
-            shell_nprims=np.zeros((0,), dtype=np.int32),
-            to_parent_shell=np.zeros((0,), dtype=np.int32),
-            primitive_starts=np.zeros((0,), dtype=np.int32),
-            pad_mask=np.zeros((0,), dtype=bool),
-            group_keys=np.zeros((0, 2), dtype=np.int32),
-            group_offsets=np.zeros((1,), dtype=np.int32),
-            ao_loc=np.zeros((1,), dtype=np.int32),
-            ao_to_parent_ao=np.zeros((0,), dtype=np.int32),
-        )
+        return _empty_joltqc_basis_layout()
 
     split_records: list[tuple[int, int, int, int]] = []
     for shell_id, shell in enumerate(shells):
@@ -1489,11 +1501,7 @@ def _build_joltqc_quartet_layout(
 ) -> CudaJoltQCQuartetLayout:
     nbas = int(basis_layout.basis_data.shape[0])
     if nbas == 0:
-        return CudaJoltQCQuartetLayout(
-            group_quartet_keys=np.zeros((0, 4), dtype=np.int32),
-            group_quartet_offsets=np.zeros((1,), dtype=np.int32),
-            shell_quartets=np.zeros((0, 4), dtype=np.int32),
-        )
+        return _empty_joltqc_quartet_layout()
 
     shell_to_group = np.zeros((nbas,), dtype=np.int32)
     for group_id in range(int(basis_layout.group_keys.shape[0])):
@@ -1506,11 +1514,7 @@ def _build_joltqc_quartet_layout(
         copy=False,
     )
     if nonpad_shells.size == 0:
-        return CudaJoltQCQuartetLayout(
-            group_quartet_keys=np.zeros((0, 4), dtype=np.int32),
-            group_quartet_offsets=np.zeros((1,), dtype=np.int32),
-            shell_quartets=np.zeros((0, 4), dtype=np.int32),
-        )
+        return _empty_joltqc_quartet_layout()
 
     pair_row_pos, pair_col_pos = np.tril_indices(int(nonpad_shells.size))
     pair_i = nonpad_shells[pair_row_pos]
@@ -1788,7 +1792,7 @@ def _make_rys_tril_pair_mappings(
     log_q_matrix: np.ndarray,
     *,
     cutoff: float,
-    tile: int = _GPU4PYSCF_PAIR_MAPPING_TILE,
+    tile: int = _RYS_PAIR_MAPPING_TILE,
 ) -> dict[tuple[int, int], np.ndarray]:
     q_matrix = np.asarray(log_q_matrix, dtype=np.float32)
     if q_matrix.ndim != 2 or q_matrix.shape[0] != q_matrix.shape[1]:
@@ -1942,13 +1946,18 @@ def extract_cuda_ao_system(
     *,
     max_l: int = 2,
     include_pair_metadata: bool = True,
+    include_joltqc_metadata: bool = True,
 ) -> CudaAOSystem:
     """Extract dense Cartesian AO arrays accepted by the CUDA direct-J/K kernel."""
 
     aos = tuple(basis.aos)
     shell_layout = _build_joltqc_shell_layout(basis)
-    joltqc_basis_layout = _build_joltqc_basis_layout(basis)
-    joltqc_quartet_layout = _build_joltqc_quartet_layout(joltqc_basis_layout)
+    if bool(include_joltqc_metadata):
+        joltqc_basis_layout = _build_joltqc_basis_layout(basis)
+        joltqc_quartet_layout = _build_joltqc_quartet_layout(joltqc_basis_layout)
+    else:
+        joltqc_basis_layout = _empty_joltqc_basis_layout()
+        joltqc_quartet_layout = _empty_joltqc_quartet_layout()
     if not aos:
         return CudaAOSystem(
             centers=np.zeros((0, 3), dtype=np.float64),
@@ -2116,15 +2125,15 @@ def _kernel_source_path() -> Path:
     raise FileNotFoundError("Could not locate cuda_direct_jk_kernel.cu.")
 
 
-def _gpu4pyscf_rys_source_root() -> Path:
-    source = Path(__file__).with_name("gpu4pyscf_gvhf_rys")
+def _rys_source_root() -> Path:
+    source = Path(__file__).with_name("rys_reference")
     if source.exists():
         return source
-    raise FileNotFoundError("Could not locate vendored GPU4PySCF gvhf-rys sources.")
+    raise FileNotFoundError("Could not locate vendored Rys reference sources.")
 
 
-def _gpu4pyscf_rys_source_files() -> tuple[Path, ...]:
-    root = _gpu4pyscf_rys_source_root()
+def _rys_source_files() -> tuple[Path, ...]:
+    root = _rys_source_root()
     names = (
         "gvhf-rys/rys_jk_driver.cu",
         "gvhf-rys/rys_roots_dat.cu",
@@ -2157,11 +2166,11 @@ def _library_name_for_arch(
     return f"libtd_graddft_cuda_direct_jk_{digest.hexdigest()[:16]}.so"
 
 
-def _gpu4pyscf_rys_library_name_for_arch(arch: str) -> str:
+def _rys_library_name_for_arch(arch: str) -> str:
     digest = hashlib.sha256()
-    for source in _gpu4pyscf_rys_source_files():
+    for source in _rys_source_files():
         digest.update(source.read_bytes())
-    root = _gpu4pyscf_rys_source_root()
+    root = _rys_source_root()
     for header in (
         root / "gvhf-rys/vhf.cuh",
         root / "gvhf-rys/rys_contract_k.cuh",
@@ -2174,7 +2183,7 @@ def _gpu4pyscf_rys_library_name_for_arch(arch: str) -> str:
         digest.update(header.read_bytes())
     digest.update(str(arch).encode())
     digest.update(" ".join(_nvcc_split_compile_flags()).encode())
-    return f"libtd_graddft_gpu4pyscf_gvhf_rys_{digest.hexdigest()[:16]}.so"
+    return f"libtd_graddft_rys_reference_{digest.hexdigest()[:16]}.so"
 
 
 def _nvcc_split_compile_flags() -> list[str]:
@@ -2219,8 +2228,8 @@ def _truthy_env(name: str, *, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _gpu4pyscf_rys_enabled() -> bool:
-    return _truthy_env(_GPU4PYSCF_RYS_ENV, default=True)
+def _rys_enabled() -> bool:
+    return _truthy_env(_RYS_DIRECT_JK_ENV, default=True)
 
 
 def _joltqc_fixed_universe_config(
@@ -2302,7 +2311,7 @@ def build_prebuilt_cuda_direct_jk_library(
     joltqc_fixed_universe: bool = False,
     joltqc_fixed_max_l: int | None = None,
     joltqc_fixed_nprim_max: int | None = None,
-    include_gpu4pyscf_rys: bool | None = None,
+    include_rys: bool | None = None,
 ) -> Path:
     """Build the CUDA direct-J/K FFI shared library outside SCF runtime."""
 
@@ -2313,10 +2322,10 @@ def build_prebuilt_cuda_direct_jk_library(
         )
     arch_name = _detect_cuda_arch() if str(arch) == "native" else str(arch)
     source = Path(source_path) if source_path is not None else _kernel_source_path()
-    use_gpu4pyscf_rys = (
-        _gpu4pyscf_rys_enabled()
-        if include_gpu4pyscf_rys is None
-        else bool(include_gpu4pyscf_rys)
+    use_rys = (
+        _rys_enabled()
+        if include_rys is None
+        else bool(include_rys)
     )
     joltqc_source_key = None
     joltqc_source_units: list[tuple[str, str]] = []
@@ -2365,8 +2374,8 @@ def build_prebuilt_cuda_direct_jk_library(
     source_key_parts = []
     if joltqc_source_key is not None:
         source_key_parts.append(str(joltqc_source_key))
-    if use_gpu4pyscf_rys:
-        source_key_parts.append(_gpu4pyscf_rys_library_name_for_arch(arch_name))
+    if use_rys:
+        source_key_parts.append(_rys_library_name_for_arch(arch_name))
     combined_source_key = "|".join(source_key_parts) if source_key_parts else None
     library = out_dir / _library_name_for_arch(
         arch_name,
@@ -2376,8 +2385,8 @@ def build_prebuilt_cuda_direct_jk_library(
     if library.exists() and not bool(force):
         return library
     source_files = [str(source)]
-    if use_gpu4pyscf_rys:
-        source_files.extend(str(path) for path in _gpu4pyscf_rys_source_files())
+    if use_rys:
+        source_files.extend(str(path) for path in _rys_source_files())
     if joltqc_source_key is not None:
         if (
             joltqc_codegen is None
@@ -2403,13 +2412,13 @@ def build_prebuilt_cuda_direct_jk_library(
         "--std=c++17",
         "-Xcompiler",
         "-fPIC",
-        *(["-rdc=true"] if use_gpu4pyscf_rys else []),
+        *(["-rdc=true"] if use_rys else []),
         f"-arch={arch_name}",
         *_nvcc_split_compile_flags(),
-        *(["-DTD_GRADDFT_ENABLE_GPU4PYSCF_RYS=1"] if use_gpu4pyscf_rys else []),
+        *(["-DTD_GRADDFT_ENABLE_RYS_DIRECT_JK=1"] if use_rys else []),
         "-I",
         ffi.include_dir(),
-        *(["-I", str(_gpu4pyscf_rys_source_root()), "-I", str(_gpu4pyscf_rys_source_root() / "gvhf-rys")] if use_gpu4pyscf_rys else []),
+        *(["-I", str(_rys_source_root()), "-I", str(_rys_source_root() / "gvhf-rys")] if use_rys else []),
     ]
     if not joltqc_source_units:
         command = [
@@ -2419,13 +2428,13 @@ def build_prebuilt_cuda_direct_jk_library(
             "-shared",
             "-Xcompiler",
             "-fPIC",
-            *(["-rdc=true"] if use_gpu4pyscf_rys else []),
+            *(["-rdc=true"] if use_rys else []),
             f"-arch={arch_name}",
             *_nvcc_split_compile_flags(),
-            *(["-DTD_GRADDFT_ENABLE_GPU4PYSCF_RYS=1"] if use_gpu4pyscf_rys else []),
+            *(["-DTD_GRADDFT_ENABLE_RYS_DIRECT_JK=1"] if use_rys else []),
             "-I",
             ffi.include_dir(),
-            *(["-I", str(_gpu4pyscf_rys_source_root()), "-I", str(_gpu4pyscf_rys_source_root() / "gvhf-rys")] if use_gpu4pyscf_rys else []),
+            *(["-I", str(_rys_source_root()), "-I", str(_rys_source_root() / "gvhf-rys")] if use_rys else []),
             *source_files,
             "-o",
             str(library),
@@ -2491,7 +2500,7 @@ def build_prebuilt_cuda_direct_jk_library(
     link_command = [
         compiler,
         "-shared",
-        *(["-rdc=true", f"-arch={arch_name}"] if use_gpu4pyscf_rys else []),
+        *(["-rdc=true", f"-arch={arch_name}"] if use_rys else []),
         *[str(object_file) for object_file in object_files],
         "-o",
         str(library),
@@ -2510,29 +2519,29 @@ def build_prebuilt_cuda_direct_jk_library(
     return library
 
 
-def build_gpu4pyscf_gvhf_rys_library(
+def build_rys_library(
     output_dir: str | os.PathLike[str],
     *,
     nvcc: str | None = None,
     arch: str = "native",
     force: bool = False,
 ) -> Path:
-    """Build vendored GPU4PySCF gvhf-rys as a fixed CUDA shared library."""
+    """Build the vendored Rys reference sources as a fixed CUDA shared library."""
 
     compiler = nvcc or os.environ.get("TD_GRADDFT_NVCC") or shutil.which("nvcc")
     if compiler is None:
         raise RuntimeError(
-            "GPU4PySCF Rys prebuild requires nvcc. Set TD_GRADDFT_NVCC or put nvcc on PATH."
+            "Rys prebuild requires nvcc. Set TD_GRADDFT_NVCC or put nvcc on PATH."
         )
     arch_name = _detect_cuda_arch() if str(arch) == "native" else str(arch)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    library = out_dir / _gpu4pyscf_rys_library_name_for_arch(arch_name)
+    library = out_dir / _rys_library_name_for_arch(arch_name)
     if library.exists() and not bool(force):
         return library
 
-    root = _gpu4pyscf_rys_source_root()
-    source_files = [str(source) for source in _gpu4pyscf_rys_source_files()]
+    root = _rys_source_root()
+    source_files = [str(source) for source in _rys_source_files()]
     command = [
         compiler,
         "-O3",
@@ -2555,7 +2564,7 @@ def build_gpu4pyscf_gvhf_rys_library(
         subprocess.run(command, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
-            "Failed to prebuild GPU4PySCF gvhf-rys library with command:\n"
+            "Failed to prebuild Rys reference library with command:\n"
             + " ".join(command)
             + "\nstdout:\n"
             + (exc.stdout or "")
@@ -2630,11 +2639,13 @@ class CudaDirectJKBuilder:
         arch: str = "native",
         max_l: int = 2,
         include_pair_metadata: bool = True,
+        include_joltqc_metadata: bool = True,
     ) -> None:
         self.system = extract_cuda_ao_system(
             basis,
             max_l=max_l,
             include_pair_metadata=include_pair_metadata,
+            include_joltqc_metadata=include_joltqc_metadata,
         )
         self.rys_env_layout = _build_rys_env_layout(
             basis,
@@ -2650,7 +2661,7 @@ class CudaDirectJKBuilder:
         self.arch = None if str(arch) == "native" else str(arch)
         self.max_l = int(max_l)
         self.library = self._compile_library()
-        self.has_gpu4pyscf_rys = False
+        self.has_rys_direct_jk = False
         self._compile_and_register()
         self.last_kernel_avg_ms: float | None = None
         self.centers = jnp.asarray(self.system.centers, dtype=jnp.float64)
@@ -2821,18 +2832,18 @@ class CudaDirectJKBuilder:
                 api_version=1,
             )
             _REGISTERED_FFI_TARGETS.add(_SCREENED_FFI_TARGET_NAME)
-        rys_symbol = getattr(lib, "TdGraddftCudaGpu4PyScfRysDirectJkFfi", None)
-        self.has_gpu4pyscf_rys = (
-            rys_symbol is not None or _GPU4PYSCF_RYS_TARGET_NAME in _REGISTERED_FFI_TARGETS
+        rys_symbol = getattr(lib, "TdGraddftCudaRysDirectJkFfi", None)
+        self.has_rys_direct_jk = (
+            rys_symbol is not None or _RYS_DIRECT_JK_TARGET_NAME in _REGISTERED_FFI_TARGETS
         )
-        if rys_symbol is not None and _GPU4PYSCF_RYS_TARGET_NAME not in _REGISTERED_FFI_TARGETS:
+        if rys_symbol is not None and _RYS_DIRECT_JK_TARGET_NAME not in _REGISTERED_FFI_TARGETS:
             ffi.register_ffi_target(
-                _GPU4PYSCF_RYS_TARGET_NAME,
+                _RYS_DIRECT_JK_TARGET_NAME,
                 ffi.pycapsule(rys_symbol),
                 platform="CUDA",
                 api_version=1,
             )
-            _REGISTERED_FFI_TARGETS.add(_GPU4PYSCF_RYS_TARGET_NAME)
+            _REGISTERED_FFI_TARGETS.add(_RYS_DIRECT_JK_TARGET_NAME)
         if _PAIR_SCHWARZ_TARGET_NAME not in _REGISTERED_FFI_TARGETS:
             ffi.register_ffi_target(
                 _PAIR_SCHWARZ_TARGET_NAME,
@@ -2929,6 +2940,16 @@ class CudaDirectJKBuilder:
             self.shell_ao_sizes,
         )
 
+    def build_rys_density_condition(self, density: Array) -> Array:
+        shell_dm_cond = self.build_shell_density_condition(_symmetrize_density_like(density))
+        sorted_idx = jnp.asarray(self.rys_env_layout.sorted_shell_indices, dtype=jnp.int32)
+        if sorted_idx.size == 0:
+            return jnp.zeros((0, 0), dtype=jnp.float32)
+        sorted_dm_cond = shell_dm_cond[sorted_idx[:, None], sorted_idx[None, :]]
+        return jnp.log(jnp.maximum(sorted_dm_cond, jnp.asarray(1.0e-300, dtype=sorted_dm_cond.dtype))).astype(
+            jnp.float32
+        )
+
     def build_joltqc_tile_pairs(self, *, cutoff: float) -> dict[tuple[int, int], np.ndarray]:
         return _make_joltqc_tile_pairs(
             self.system.shell_layout.padded_group_offsets,
@@ -2974,6 +2995,8 @@ class CudaDirectJKBuilder:
 
     def precompute_screening_metadata(self) -> None:
         self.build_pair_schwarz()
+        if bool(self.has_rys_direct_jk):
+            self.build_rys_log_q_matrix()
 
     def build_eri_pair_matrix(self) -> Array:
         self._require_pair_metadata()
@@ -3031,11 +3054,24 @@ class CudaDirectJKBuilder:
             self.joltqc_shell_quartets,
         )
 
-    def build_jk_with_gpu4pyscf_rys(self, density: Array) -> tuple[Array, Array]:
+    def build_jk_with_rys(
+        self,
+        density: Array,
+        *,
+        density_cutoff: float = 0.0,
+    ) -> tuple[Array, Array]:
         pair_layout = self.build_full_rys_pair_mapping_layout()
         nshell = int(self.rys_env_layout.ao_loc.shape[0] - 1)
-        zeros = jnp.zeros((nshell, nshell), dtype=jnp.float32)
-        return _cuda_gpu4pyscf_rys_direct_jk_with_density_vjp(
+        cutoff = float(density_cutoff)
+        if cutoff > 0.0:
+            q_cond = jnp.asarray(self.build_rys_log_q_matrix(), dtype=jnp.float32)
+            dm_cond = self.build_rys_density_condition(density)
+            log_cutoff = jnp.asarray([math.log(cutoff)], dtype=jnp.float32)
+        else:
+            q_cond = jnp.zeros((nshell, nshell), dtype=jnp.float32)
+            dm_cond = jnp.zeros((nshell, nshell), dtype=jnp.float32)
+            log_cutoff = jnp.asarray([-np.inf], dtype=jnp.float32)
+        return _cuda_rys_direct_jk_with_density_vjp(
             density,
             self.rys_atm,
             self.rys_bas,
@@ -3043,11 +3079,11 @@ class CudaDirectJKBuilder:
             self.rys_ao_loc,
             self.rys_ao_to_parent_ao,
             self.rys_group_offsets,
-            zeros,
-            zeros,
+            q_cond,
+            dm_cond,
             jnp.asarray(pair_layout.group_pair_offsets, dtype=jnp.int32),
             jnp.asarray(pair_layout.pair_ids, dtype=jnp.int32),
-            jnp.asarray([-np.inf], dtype=jnp.float32),
+            log_cutoff,
         )
 
     def build_eri_tensor(self) -> Array:
@@ -3071,12 +3107,12 @@ class CudaDirectJKBuilder:
         return jnp.asarray(eri, dtype=jnp.float64)
 
     def build_jk(self, density: Array, *, density_cutoff: float = 0.0) -> tuple[Array, Array]:
-        self._require_pair_metadata()
         npair = self.system.nao * (self.system.nao + 1) // 2
         cutoff = float(density_cutoff)
+        if bool(self.has_rys_direct_jk):
+            return self.build_jk_with_rys(density, density_cutoff=cutoff)
         if cutoff <= 0.0:
-            if bool(self.has_gpu4pyscf_rys):
-                return self.build_jk_with_gpu4pyscf_rys(density)
+            self._require_pair_metadata()
             return _cuda_direct_jk_with_density_vjp(
                 density,
                 self.centers,
@@ -3091,6 +3127,7 @@ class CudaDirectJKBuilder:
                 jnp.asarray([0.0], dtype=jnp.float64),
             )
 
+        self._require_pair_metadata()
         pair_schwarz = self.build_pair_schwarz()
         cutoff_arr = jnp.asarray([math.log(cutoff)], dtype=jnp.float64)
         shell_log_q_matrix = jnp.asarray(self.build_shell_log_q_matrix(), dtype=jnp.float64)

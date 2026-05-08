@@ -28,7 +28,7 @@ def test_build_prebuilt_cuda_direct_jk_library_invokes_nvcc(monkeypatch, tmp_pat
         source_path=source,
         nvcc="/usr/local/cuda/bin/nvcc",
         arch="sm_120",
-        include_gpu4pyscf_rys=False,
+        include_rys=False,
     )
 
     assert library.exists()
@@ -76,13 +76,13 @@ def test_build_prebuilt_cuda_direct_jk_library_reuses_existing_library(monkeypat
         source_path=source,
         nvcc="/usr/local/cuda/bin/nvcc",
         arch="sm_120",
-        include_gpu4pyscf_rys=False,
+        include_rys=False,
     )
 
     assert library == existing
 
 
-def test_build_gpu4pyscf_gvhf_rys_library_invokes_fixed_nvcc_command(monkeypatch, tmp_path):
+def test_build_rys_library_invokes_fixed_nvcc_command(monkeypatch, tmp_path):
     captured = {}
 
     class Result:
@@ -99,14 +99,14 @@ def test_build_gpu4pyscf_gvhf_rys_library_invokes_fixed_nvcc_command(monkeypatch
 
     monkeypatch.setattr(cuda_direct_jk.subprocess, "run", fake_run)
 
-    library = cuda_direct_jk.build_gpu4pyscf_gvhf_rys_library(
+    library = cuda_direct_jk.build_rys_library(
         tmp_path / "pkg",
         nvcc="/usr/local/cuda/bin/nvcc",
         arch="sm_120",
     )
 
     assert library.exists()
-    assert library.name.startswith("libtd_graddft_gpu4pyscf_gvhf_rys_")
+    assert library.name.startswith("libtd_graddft_rys_reference_")
     assert captured["command"][:7] == [
         "/usr/local/cuda/bin/nvcc",
         "-O3",
@@ -122,7 +122,7 @@ def test_build_gpu4pyscf_gvhf_rys_library_invokes_fixed_nvcc_command(monkeypatch
     assert captured["kwargs"]["check"] is True
 
 
-def test_build_prebuilt_cuda_direct_jk_library_can_embed_gpu4pyscf_rys(
+def test_build_prebuilt_cuda_direct_jk_library_can_embed_rys(
     monkeypatch,
     tmp_path,
 ):
@@ -154,13 +154,13 @@ def test_build_prebuilt_cuda_direct_jk_library_can_embed_gpu4pyscf_rys(
         source_path=source,
         nvcc="/usr/local/cuda/bin/nvcc",
         arch="sm_120",
-        include_gpu4pyscf_rys=True,
+        include_rys=True,
     )
 
     joined = " ".join(captured["command"])
     assert library.exists()
     assert "-rdc=true" in captured["command"]
-    assert "-DTD_GRADDFT_ENABLE_GPU4PYSCF_RYS=1" in captured["command"]
+    assert "-DTD_GRADDFT_ENABLE_RYS_DIRECT_JK=1" in captured["command"]
     assert "rys_contract_jk.cu" in joined
     assert "unrolled_rys_jk.cu" in joined
 
@@ -200,7 +200,7 @@ def test_build_prebuilt_cuda_direct_jk_library_accepts_fixed_joltqc_universe(
         joltqc_fixed_universe=True,
         joltqc_fixed_max_l=0,
         joltqc_fixed_nprim_max=1,
-        include_gpu4pyscf_rys=False,
+        include_rys=False,
     )
 
     compile_sources = [

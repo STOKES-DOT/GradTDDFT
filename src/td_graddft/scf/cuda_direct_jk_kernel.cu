@@ -4,7 +4,7 @@
 #include <cmath>
 #include <vector>
 
-#ifdef TD_GRADDFT_ENABLE_GPU4PYSCF_RYS
+#ifdef TD_GRADDFT_ENABLE_RYS_DIRECT_JK
 #include "gvhf-rys/vhf.cuh"
 
 extern "C" int RYS_build_jk(
@@ -101,6 +101,28 @@ __global__ void contract_joltqc_potential_kernel(
         const int parent_j = ao_to_parent_ao[j];
         atomicAdd(j_out + parent_i * nao + parent_j, joltqc_j[idx]);
         atomicAdd(k_out + parent_i * nao + parent_j, joltqc_k[idx]);
+    }
+}
+
+__global__ void permute_rys_potential_kernel(
+    int nao,
+    int sorted_nao,
+    const int* ao_to_parent_ao,
+    const double* sorted_j,
+    const double* sorted_k,
+    double* j_out,
+    double* k_out
+) {
+    const long long total = static_cast<long long>(sorted_nao) * sorted_nao;
+    for (long long idx = blockIdx.x * blockDim.x + threadIdx.x;
+         idx < total;
+         idx += static_cast<long long>(blockDim.x) * gridDim.x) {
+        const int i = static_cast<int>(idx / sorted_nao);
+        const int j = static_cast<int>(idx - static_cast<long long>(i) * sorted_nao);
+        const int parent_i = ao_to_parent_ao[i];
+        const int parent_j = ao_to_parent_ao[j];
+        j_out[parent_i * nao + parent_j] = sorted_j[idx];
+        k_out[parent_i * nao + parent_j] = sorted_k[idx];
     }
 }
 
@@ -2227,8 +2249,8 @@ ffi::Error CudaScreenedDirectJkDispatch(
     return ffi::Error::Success();
 }
 
-#ifdef TD_GRADDFT_ENABLE_GPU4PYSCF_RYS
-ffi::Error CudaGpu4PyScfRysDirectJkDispatch(
+#ifdef TD_GRADDFT_ENABLE_RYS_DIRECT_JK
+ffi::Error CudaRysDirectJkDispatch(
     cudaStream_t stream,
     ffi::Buffer<ffi::F64, 2> density,
     ffi::Buffer<ffi::S32, 2> rys_atm,
@@ -2318,6 +2340,18 @@ ffi::Error CudaGpu4PyScfRysDirectJkDispatch(
     if (nbas > 0 && h_group_offsets.back() != nbas) {
         return ffi::Error::InvalidArgument("group_offsets must end at nbas");
     }
+    if (h_pair_offsets.front() != 0 ||
+        h_pair_offsets.back() != static_cast<int>(pair_ids.dimensions()[0])) {
+        return ffi::Error::InvalidArgument("pair_offsets must span pair_ids");
+    }
+    for (int slot = 0; slot < n_group_pairs; ++slot) {
+        const int start = h_pair_offsets[slot];
+        const int stop = h_pair_offsets[slot + 1];
+        if (start > stop || start < 0 ||
+            stop > static_cast<int>(pair_ids.dimensions()[0])) {
+            return ffi::Error::InvalidArgument("pair_offsets must be monotonic");
+        }
+    }
 
     const size_t out_matrix_bytes = static_cast<size_t>(nao) * nao * sizeof(double);
     const size_t sorted_matrix_bytes =
@@ -2387,7 +2421,6 @@ ffi::Error CudaGpu4PyScfRysDirectJkDispatch(
         cudaFreeAsync(dm_sorted, stream);
         return ffi::Error::Internal(cudaGetErrorString(err));
     }
-
     static bool rys_initialized = false;
     if (!rys_initialized) {
         if (RYS_build_jk_init(kRysShmSize) != 0) {
@@ -2466,7 +2499,7 @@ ffi::Error CudaGpu4PyScfRysDirectJkDispatch(
     }
     finalize_joltqc_potential_kernel<<<sorted_grid, block, 0, stream>>>(
         sorted_nao, vj_sorted, vk_sorted);
-    contract_joltqc_potential_kernel<<<sorted_grid, block, 0, stream>>>(
+    permute_rys_potential_kernel<<<sorted_grid, block, 0, stream>>>(
         nao, sorted_nao, ao_to_parent_ao.typed_data(),
         vj_sorted, vk_sorted, j_out->typed_data(), k_out->typed_data());
     err = cudaGetLastError();
@@ -2848,8 +2881,8 @@ auto CudaScreenedDirectJkBinding() {
         .Ret<F64Buffer2>();
 }
 
-#ifdef TD_GRADDFT_ENABLE_GPU4PYSCF_RYS
-auto CudaGpu4PyScfRysDirectJkBinding() {
+#ifdef TD_GRADDFT_ENABLE_RYS_DIRECT_JK
+auto CudaRysDirectJkBinding() {
     return ffi::Ffi::Bind()
         .Ctx<StreamCtx>()
         .Arg<F64Buffer2>()
@@ -2959,11 +2992,11 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(
     CudaScreenedDirectJkDispatch,
     CudaScreenedDirectJkBinding());
 
-#ifdef TD_GRADDFT_ENABLE_GPU4PYSCF_RYS
+#ifdef TD_GRADDFT_ENABLE_RYS_DIRECT_JK
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
-    TdGraddftCudaGpu4PyScfRysDirectJkFfi,
-    CudaGpu4PyScfRysDirectJkDispatch,
-    CudaGpu4PyScfRysDirectJkBinding());
+    TdGraddftCudaRysDirectJkFfi,
+    CudaRysDirectJkDispatch,
+    CudaRysDirectJkBinding());
 #endif
 
 XLA_FFI_DEFINE_HANDLER_SYMBOL(
