@@ -1,0 +1,48 @@
+"""PySCF-style linear-response namespace for TD-GradDFT."""
+
+from .api import TDA, TDDFT
+from ..tddft import (
+    RestrictedCasidaTDDFT,
+    TDDFTMatrices,
+    TDDFTResult,
+    TDAResult,
+    UnrestrictedCasidaTDDFT,
+    UnrestrictedResponseMatrices,
+    UnrestrictedTDA,
+    UnrestrictedTDAMatrices,
+    UnrestrictedTDDFTResult,
+    UnrestrictedTDAResult,
+    build_restricted_response_matrices,
+    build_unrestricted_response_matrices,
+    build_unrestricted_tda_matrices,
+    gen_tda_vind,
+    gen_tdhf_vind,
+    solve_casida,
+    solve_tda,
+    solve_unrestricted_casida,
+    solve_unrestricted_tda,
+)
+
+__all__ = [
+    "TDA",
+    "TDDFT",
+    "RestrictedCasidaTDDFT",
+    "TDDFTMatrices",
+    "TDDFTResult",
+    "TDAResult",
+    "UnrestrictedCasidaTDDFT",
+    "UnrestrictedResponseMatrices",
+    "UnrestrictedTDA",
+    "UnrestrictedTDAMatrices",
+    "UnrestrictedTDDFTResult",
+    "UnrestrictedTDAResult",
+    "build_restricted_response_matrices",
+    "build_unrestricted_response_matrices",
+    "build_unrestricted_tda_matrices",
+    "gen_tda_vind",
+    "gen_tdhf_vind",
+    "solve_casida",
+    "solve_tda",
+    "solve_unrestricted_casida",
+    "solve_unrestricted_tda",
+]

@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "td-graddft"
+version = "0.1.0"
+description = "Research scaffold for time-dependent differentiable density functional theory in JAX."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [
+  {name = "Codex"},
+]
+dependencies = [
+  "jax>=0.4.14",
+  "jaxlib>=0.4.14",
+  "flax>=0.10.7,<0.11; python_version < '3.11'",
+  "flax>=0.12.0; python_version >= '3.11'",
+  "jaxtyping>=0.2.36",
+  "optax>=0.2.6",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+]
+upstreams = [
+  "jax-xc>=0.0.12",
+  "pyscf>=2.3.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"td_graddft.data" = [
+  "_pyscf_basis_bundle.json",
+  "_lebedev_level*.npz",
+  "pyscf_basis_snapshot/**/*",
+]
+"td_graddft.scf" = [
+  "cuda_direct_jk_kernel.cu",
+  "cuda_one_electron_kernel.cu",
+  "joltqc_port/*.cu",
+  "joltqc_port/*.py",
+  "joltqc_port/*.json",
+  "libtd_graddft_cuda_direct_jk_*.so",
+  "libtd_graddft_cuda_one_electron_*.so",
+]
