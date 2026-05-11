@@ -5,7 +5,7 @@ import optax
 pytestmark = []
 
 from td_graddft import neural_xc
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.training import (
     GroundStateDatum,
     create_train_state_from_molecule,
@@ -47,7 +47,6 @@ def _make_trainable_functional():
         architecture="residual",
         semilocal_xc=("gga_x_pbe", "gga_c_pbe"),
         hidden_dims=(8, 8),
-        energy_mode="graddft_coeff_basis_hf_pt2_heads",
         include_pt2_channel=False,
         name="water_smoke_xc",
     )

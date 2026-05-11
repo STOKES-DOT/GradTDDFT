@@ -1,45 +1,78 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
-from .dm21.functional import make_neural_xc_functional
-
-_ARCHITECTURE_ALIASES = {
-    "residual": "graddft_residual",
-    "graddft_residual": "graddft_residual",
-    "mlp": "simple_mlp",
-    "simple_mlp": "simple_mlp",
-}
+from .components import normalize_semilocal_selection, resolve_component_module
+from .config import Config
+from .factory import make_neural_xc_functional
+from .networks import normalize_architecture, resolve_activation
 
 
-def _normalize_architecture(architecture: str) -> Literal["simple_mlp", "graddft_residual"]:
-    key = str(architecture).lower()
-    try:
-        return _ARCHITECTURE_ALIASES[key]  # type: ignore[return-value]
-    except KeyError as exc:
-        raise ValueError(
-            f"Unsupported architecture={architecture!r}. "
-            "Expected 'residual', 'graddft_residual', 'mlp', or 'simple_mlp'."
-        ) from exc
-
+def _functional_kwargs_from_config(config: Config) -> dict[str, Any]:
+    pt2_mode = str(config.channels.pt2).lower()
+    include_pt2_channel = pt2_mode != "off"
+    allow_experimental_jax_xc = (
+        bool(config.allow_experimental_jax_xc)
+        or bool(config.components.allow_experimental_jax_xc)
+    )
+    return {
+        "non_hf_module": resolve_component_module(config.components),
+        "semilocal_xc": normalize_semilocal_selection(
+            config.components.semilocal,
+            allow_experimental_jax_xc=allow_experimental_jax_xc,
+        ),
+        "n_semilocal_channels": config.components.n_channels,
+        "input_feature_mode": config.input_feature_mode,
+        "hf_input_mode": config.channels.hf,
+        "include_pt2_channel": include_pt2_channel,
+        "pt2_channel_mode": "scaled_projected" if not include_pt2_channel else pt2_mode,
+        "response_hf_mode": config.channels.response_hf,
+        "response_pt2_mode": config.channels.response_pt2,
+        "strict_feature_alignment": config.strict_feature_alignment,
+        "allow_experimental_jax_xc": allow_experimental_jax_xc,
+        "hidden_dims": tuple(int(value) for value in config.network.hidden_dims),
+        "activation": resolve_activation(config.network.activation),
+        "network_architecture": normalize_architecture(config.network.architecture),
+        "squash_offset": float(config.network.squash_offset),
+        "sigmoid_scale_factor": float(config.network.sigmoid_scale_factor),
+        "density_floor": float(config.density_floor),
+        "response_density_floor": config.response_density_floor,
+        "kernel_clip": float(config.kernel_clip),
+        "response_kernel_clip": config.response_kernel_clip,
+        "hfx_channels": int(config.channels.hfx_channels),
+        "name": config.name,
+    }
 
 def make_functional(
     *,
+    config: Config | None = None,
     architecture: str = "residual",
     **kwargs: Any,
 ):
+    if config is not None:
+        if architecture != "residual":
+            raise ValueError(
+                "When config is provided, architecture must be specified inside "
+                "config.network.architecture."
+            )
+        if kwargs:
+            merged = _functional_kwargs_from_config(config)
+            merged.update(kwargs)
+            return make_neural_xc_functional(**merged)
+        return make_neural_xc_functional(**_functional_kwargs_from_config(config))
     return make_neural_xc_functional(
-        network_architecture=_normalize_architecture(architecture),
+        network_architecture=normalize_architecture(architecture),
         **kwargs,
     )
 
 
 def Functional(
     *,
+    config: Config | None = None,
     architecture: str = "residual",
     **kwargs: Any,
 ):
-    return make_functional(architecture=architecture, **kwargs)
+    return make_functional(config=config, architecture=architecture, **kwargs)
 
 
 def make_long_range_correction(

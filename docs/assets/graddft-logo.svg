@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 240" role="img" aria-labelledby="title desc">
+  <title id="title">GradTDDFT logo</title>
+  <desc id="desc">A minimal AI-native GradTDDFT logo with a molecular response mark, neural network motif, gradient-flow arrow, and wordmark.</desc>
+  <defs>
+    <linearGradient id="accent" x1="96" y1="50" x2="230" y2="190" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#f59e0b"/>
+    </linearGradient>
+    <linearGradient id="wave" x1="80" y1="150" x2="262" y2="102" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#14b8a6"/>
+      <stop offset="1" stop-color="#6366f1"/>
+    </linearGradient>
+    <marker id="gradArrow" markerWidth="10" markerHeight="10" refX="7" refY="5" orient="auto">
+      <path d="M2 2 L8 5 L2 8 Z" fill="#f59e0b"/>
+    </marker>
+  </defs>
+
+  <rect width="960" height="240" rx="28" fill="#ffffff"/>
+
+  <g transform="translate(70 36)">
+    <path d="M83 24 L156 66 L156 150 L83 192 L10 150 L10 66 Z"
+          fill="none" stroke="#111827" stroke-width="8" stroke-linejoin="round"/>
+    <path d="M32 143 C66 91 104 160 139 86"
+          fill="none" stroke="url(#wave)" stroke-width="10" stroke-linecap="round"/>
+    <path d="M83 24 L83 192 M10 66 L156 150 M156 66 L10 150"
+          fill="none" stroke="#111827" stroke-width="4" stroke-opacity="0.16"/>
+    <g fill="#ffffff" stroke="#6366f1" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M64 94 L94 116 L64 138 M94 116 L126 96 M94 116 L126 136"
+            fill="none" opacity="0.78"/>
+      <circle cx="64" cy="94" r="6"/>
+      <circle cx="64" cy="138" r="6"/>
+      <circle cx="94" cy="116" r="7"/>
+      <circle cx="126" cy="96" r="6"/>
+      <circle cx="126" cy="136" r="6"/>
+    </g>
+    <circle cx="83" cy="24" r="13" fill="#14b8a6"/>
+    <circle cx="156" cy="66" r="10" fill="#111827"/>
+    <circle cx="156" cy="150" r="13" fill="#f59e0b"/>
+    <circle cx="83" cy="192" r="10" fill="#111827"/>
+    <circle cx="10" cy="150" r="13" fill="#14b8a6"/>
+    <circle cx="10" cy="66" r="10" fill="#111827"/>
+    <path d="M61 143 C83 126 105 103 136 78"
+          fill="none" stroke="url(#accent)" stroke-width="7" stroke-linecap="round"
+          marker-end="url(#gradArrow)"/>
+  </g>
+
+  <g transform="translate(300 67)">
+    <text x="0" y="70" font-family="Inter, Avenir Next, Arial, sans-serif" font-size="72" font-weight="820" letter-spacing="0" fill="#111827">
+      <tspan>Grad</tspan><tspan fill="#14b8a6">TD</tspan><tspan>DFT</tspan>
+    </text>
+    <text x="4" y="116" font-family="Inter, Avenir Next, Arial, sans-serif" font-size="28" font-weight="500" letter-spacing="0" fill="#4b5563">
+      AI-native differentiable TDDFT in JAX
+    </text>
+    <path d="M5 146 C68 116 118 175 178 146 C238 117 288 175 348 146"
+          fill="none" stroke="#14b8a6" stroke-width="6" stroke-linecap="round" opacity="0.88"/>
+  </g>
+</svg>

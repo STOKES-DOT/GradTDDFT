@@ -18,11 +18,9 @@ def test_functional_facade_accepts_hf_pt2_head_configuration():
         architecture="residual",
         semilocal_xc=("gga_x_pbe", "gga_c_pbe"),
         hidden_dims=(8,),
-        energy_mode="graddft_coeff_basis_hf_pt2_heads",
         include_pt2_channel=True,
         pt2_channel_mode="local_exact",
     )
 
-    assert functional.energy_mode == "graddft_coeff_basis_hf_pt2_heads"
     assert functional.include_pt2_channel is True
     assert functional.pt2_channel_mode == "local_exact"

@@ -6,14 +6,14 @@ from typing import Any, Literal
 
 import jax
 
-from .reference import GridReference, RestrictedMoleculeReference
+from .scf.molecules import QuadratureGrid, RestrictedMolecule
 
 
-def put_restricted_reference_on_device(
-    molecule: RestrictedMoleculeReference,
+def put_restricted_molecule_on_device(
+    molecule: RestrictedMolecule,
     device: Any | None = None,
-) -> RestrictedMoleculeReference:
-    """Move a PySCF-derived restricted reference to an explicit JAX device."""
+) -> RestrictedMolecule:
+    """Move a restricted molecule dataclass onto an explicit JAX device."""
 
     if device is None:
         return molecule
@@ -99,20 +99,20 @@ def resolve_execution_device(
     raise ValueError(f"Unsupported execution device preference: {preference!r}")
 
 
-def put_reference_on_device(
+def put_molecule_on_device(
     molecule: Any,
     device: Any | None = None,
 ) -> Any:
-    """Move a reference molecule-like dataclass onto an explicit JAX device.
+    """Move a molecule-like dataclass onto an explicit JAX device.
 
-    Supports both restricted and unrestricted references that share the same
+    Supports both restricted and unrestricted molecules that share the same
     field names used by TD-GradDFT workflow code.
     """
 
     if device is None:
         return molecule
-    if isinstance(molecule, RestrictedMoleculeReference):
-        return put_restricted_reference_on_device(molecule, device=device)
+    if isinstance(molecule, RestrictedMolecule):
+        return put_restricted_molecule_on_device(molecule, device=device)
     if not is_dataclass(molecule):
         return molecule
 
@@ -148,7 +148,7 @@ def put_reference_on_device(
 
     if "grid" in molecule_fields and getattr(molecule, "grid") is not None:
         grid = getattr(molecule, "grid")
-        if isinstance(grid, GridReference):
+        if isinstance(grid, QuadratureGrid):
             updates["grid"] = replace(
                 grid,
                 weights=jax.device_put(grid.weights, device),
@@ -156,3 +156,7 @@ def put_reference_on_device(
             )
 
     return replace(molecule, **updates)
+
+
+put_restricted_reference_on_device = put_restricted_molecule_on_device
+put_reference_on_device = put_molecule_on_device

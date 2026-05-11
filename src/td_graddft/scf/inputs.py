@@ -11,13 +11,15 @@ import numpy as np
 from jaxtyping import Array
 
 from ..data.basis import CartesianBasis, basis_from_molecule_spec
-from ..data.grid import build_molecular_grid, build_molecular_grid_from_spec
+from ..data.grid import build_molecular_grid_from_spec
 from ..data.grid_ao import evaluate_cartesian_ao, evaluate_cartesian_ao_with_derivatives
 from ..data.integrals import (
+    build_libcint_mol,
     build_hcore,
     dipole_matrix,
     eri_pair_matrix_packed,
     eri_tensor,
+    libcint_intor_name,
     overlap_matrix,
     overlap_hcore_matrices,
     precompile_eri_kernels,
@@ -33,15 +35,27 @@ from ..data.molecule import MoleculeSpec, parse_molecule_spec
 from ..df import (
     eri_pair_matrix_to_df_factors_traceable,
     eri_to_df_factors_from_basis,
-    true_df_factors_from_pyscf_mol,
+    true_df_factors_from_libcint_mol,
 )
-from ..jax_libxc import hybrid_coeff, parse_xc, xc_type
+from ..jax_libxc import parse_xc, xc_type
 from .cuda_one_electron import CudaOneElectronBuilder
 from .cuda_direct_jk import cuda_ffi_available
 from .rks import RKSConfig
 from .uks import UKSConfig
 
 _DEFAULT_CUDA_PAIR_ERI_MAX_MIB = 2048.0
+_GRID_AO_INPUT_CACHE_MAXSIZE = 32
+_GRID_AO_INPUT_CACHE: dict[tuple[Any, ...], Any] = {}
+
+
+@dataclass(frozen=True)
+class _GridAOInputBundle:
+    basis: CartesianBasis
+    coords: Array
+    grid_weights: Array
+    ao: Array
+    ao_deriv1: Array
+    ao_laplacian: Array | None
 
 
 @dataclass(frozen=True)
@@ -68,7 +82,7 @@ class RKSIntegralInputs:
     init_mo_energy: Array | None = None
     molecule_charge: int = 0
     geometry_is_traced: bool = False
-    integral_backend: str = "jax"
+    integral_backend: str = "libcint"
     grid_ao_backend: str = "jax"
 
     def as_rks_kwargs(self) -> dict[str, Any]:
@@ -127,7 +141,7 @@ class UKSIntegralInputs:
     total_electrons: int = 0
     molecule_charge: int = 0
     geometry_is_traced: bool = False
-    integral_backend: str = "jax"
+    integral_backend: str = "libcint"
     grid_ao_backend: str = "jax"
 
     def as_uks_kwargs(self) -> dict[str, Any]:
@@ -164,84 +178,6 @@ def _contains_jax_tracer(value: Any) -> bool:
     return False
 
 
-def _intor_name(mol: Any, base: str) -> str:
-    suffix = "_cart" if bool(getattr(mol, "cart", False)) else "_sph"
-    return f"{base}{suffix}"
-
-
-def _pyscf_atom_from_molecule_spec(spec: MoleculeSpec) -> list[tuple[str, tuple[float, float, float]]]:
-    if _contains_jax_tracer(spec.coords_bohr):
-        raise ValueError("PySCF grid/AO construction is not available for traced molecular geometry.")
-    coords_bohr = np.asarray(jax.device_get(spec.coords_bohr), dtype=float)
-    return [
-        (str(symbol), tuple(float(value) for value in coords_bohr[idx]))
-        for idx, symbol in enumerate(spec.symbols)
-    ]
-
-
-def _mo_coeff_guess_from_density_matrix(
-    density_matrix: Any,
-    overlap: Any,
-    *,
-    orthogonalization_eps: float = 1e-10,
-) -> jnp.ndarray:
-    dm = np.asarray(jax.device_get(density_matrix), dtype=float)
-    s = np.asarray(jax.device_get(overlap), dtype=float)
-    eigvals, eigvecs = np.linalg.eigh(0.5 * (s + s.T))
-    clipped = np.maximum(eigvals, float(orthogonalization_eps))
-    x = eigvecs @ np.diag(clipped ** -0.5) @ eigvecs.T
-    dm_ortho_raw = x.T @ dm @ x
-    dm_ortho = 0.5 * (dm_ortho_raw + dm_ortho_raw.T)
-    occ_vals, coeff_ortho = np.linalg.eigh(dm_ortho)
-    order = np.argsort(occ_vals)[::-1]
-    return jnp.asarray(x @ coeff_ortho[:, order])
-
-
-def _eval_grid_ao(
-    mol: Any,
-    basis: CartesianBasis,
-    coords: Any,
-    *,
-    backend: Literal["pyscf", "jax"] = "pyscf",
-) -> tuple[jnp.ndarray, jnp.ndarray]:
-    backend = str(backend).lower()
-    coords_arr = jnp.asarray(coords)
-    if backend == "jax":
-        return evaluate_cartesian_ao_with_derivatives(basis, coords_arr, deriv=1)
-    if backend == "pyscf":
-        try:
-            from pyscf.dft import numint
-        except ModuleNotFoundError as exc:
-            raise ImportError("PySCF is required for backend='pyscf'.") from exc
-        ao_deriv1 = jnp.asarray(numint.eval_ao(mol, np.asarray(coords_arr), deriv=1))
-        return ao_deriv1[0], ao_deriv1
-    raise ValueError(f"Unsupported grid AO backend={backend!r}. Expected 'pyscf' or 'jax'.")
-
-
-def _eval_grid_ao_laplacian(
-    mol: Any,
-    basis: CartesianBasis,
-    coords: Any,
-    *,
-    backend: Literal["pyscf", "jax"] = "pyscf",
-) -> jnp.ndarray:
-    backend = str(backend).lower()
-    coords_arr = jnp.asarray(coords)
-    if backend == "jax":
-        ao_deriv2 = evaluate_cartesian_ao(basis, coords_arr, deriv=2)
-        return ao_deriv2[4]
-    if backend == "pyscf":
-        try:
-            from pyscf.dft import numint
-        except ModuleNotFoundError as exc:
-            raise ImportError("PySCF is required for backend='pyscf'.") from exc
-        ao_deriv2 = jnp.asarray(numint.eval_ao(mol, np.asarray(coords_arr), deriv=2))
-        if ao_deriv2.shape[0] < 10:
-            raise ValueError("PySCF deriv=2 AO evaluation must expose second derivatives.")
-        return ao_deriv2[4] + ao_deriv2[7] + ao_deriv2[9]
-    raise ValueError(f"Unsupported grid AO backend={backend!r}. Expected 'pyscf' or 'jax'.")
-
-
 def _resolve_config(config: RKSConfig | None, xc_spec: str | None) -> tuple[RKSConfig, str]:
     xc_spec_resolved = str(xc_spec if xc_spec is not None else (config.xc_spec if config is not None else "pbe"))
     parse_xc(xc_spec_resolved)
@@ -268,6 +204,118 @@ def _cuda_pair_eri_max_bytes_for_inputs() -> int:
     except ValueError:
         return int(_DEFAULT_CUDA_PAIR_ERI_MAX_MIB * 1024.0 * 1024.0)
     return max(0, int(mib * 1024.0 * 1024.0))
+
+
+def _active_device_cache_key() -> tuple[str, int]:
+    scalar = jnp.asarray(0.0)
+    device = getattr(scalar, "device", None)
+    if device is None:
+        devices = tuple(scalar.devices())
+        device = devices[0] if devices else jax.devices()[0]
+    return (str(getattr(device, "platform", "unknown")), int(getattr(device, "id", -1)))
+
+
+def _grid_ao_input_cache_key(
+    *,
+    spec: MoleculeSpec,
+    basis: Any,
+    max_l: int,
+    grids_level: int,
+    precompute_eri_groups: bool,
+    needs_ao_laplacian: bool,
+) -> tuple[Any, ...]:
+    coords_bohr = np.asarray(jax.device_get(spec.coords_bohr), dtype=np.float64)
+    return (
+        tuple(spec.symbols),
+        str(basis),
+        int(max_l),
+        int(grids_level),
+        bool(precompute_eri_groups),
+        bool(needs_ao_laplacian),
+        coords_bohr.shape,
+        coords_bohr.dtype.str,
+        coords_bohr.tobytes(),
+        _active_device_cache_key(),
+    )
+
+
+def _cache_grid_ao_input_bundle(
+    key: tuple[Any, ...],
+    bundle: _GridAOInputBundle,
+) -> None:
+    if len(_GRID_AO_INPUT_CACHE) >= _GRID_AO_INPUT_CACHE_MAXSIZE:
+        _GRID_AO_INPUT_CACHE.pop(next(iter(_GRID_AO_INPUT_CACHE)))
+    _GRID_AO_INPUT_CACHE[key] = bundle
+
+
+def _build_grid_ao_input_bundle(
+    *,
+    spec: MoleculeSpec,
+    basis: Any,
+    max_l: int,
+    grids_level: int,
+    precompute_eri_groups: bool,
+    needs_ao_laplacian: bool,
+) -> _GridAOInputBundle:
+    basis_cart = basis_from_molecule_spec(
+        spec,
+        basis=basis,
+        max_l=max_l,
+        precompute_eri_groups=precompute_eri_groups,
+    )
+    coords, weights = build_molecular_grid_from_spec(spec, level=grids_level)
+    deriv_order = 2 if needs_ao_laplacian else 1
+    ao, ao_derivs = evaluate_cartesian_ao_with_derivatives(
+        basis_cart,
+        coords,
+        deriv=deriv_order,
+    )
+    if needs_ao_laplacian:
+        ao_deriv1 = ao_derivs[:4]
+        ao_laplacian = ao_derivs[4]
+    else:
+        ao_deriv1 = ao_derivs
+        ao_laplacian = None
+    return _GridAOInputBundle(
+        basis=basis_cart,
+        coords=coords,
+        grid_weights=weights,
+        ao=ao,
+        ao_deriv1=ao_deriv1,
+        ao_laplacian=ao_laplacian,
+    )
+
+
+def _cached_grid_ao_input_bundle(
+    *,
+    spec: MoleculeSpec,
+    basis: Any,
+    max_l: int,
+    grids_level: int,
+    precompute_eri_groups: bool,
+    needs_ao_laplacian: bool,
+) -> _GridAOInputBundle:
+    key = _grid_ao_input_cache_key(
+        spec=spec,
+        basis=basis,
+        max_l=max_l,
+        grids_level=grids_level,
+        precompute_eri_groups=precompute_eri_groups,
+        needs_ao_laplacian=needs_ao_laplacian,
+    )
+    cached = _GRID_AO_INPUT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    bundle = _build_grid_ao_input_bundle(
+        spec=spec,
+        basis=basis,
+        max_l=max_l,
+        grids_level=grids_level,
+        precompute_eri_groups=precompute_eri_groups,
+        needs_ao_laplacian=needs_ao_laplacian,
+    )
+    _cache_grid_ao_input_bundle(key, bundle)
+    return bundle
 
 
 def _libcint_pair_eri_for_direct_cuda(
@@ -343,7 +391,7 @@ def build_rks_integral_inputs(
     cart: bool = True,
     grids_level: int = 0,
     max_l: int = 3,
-    grid_ao_backend: Literal["pyscf", "jax"] = "jax",
+    grid_ao_backend: Literal["jax"] = "jax",
     integral_backend: Literal["jax", "libcint"] = "libcint",
     libcint_geometry_grad_policy: LibcintGeometryGradPolicy = "analytic",
     precompile_eri: bool = False,
@@ -353,7 +401,7 @@ def build_rks_integral_inputs(
     verbose: int = 0,
     **mol_kwargs: Any,
 ) -> RKSIntegralInputs:
-    """Build PySCF-style integral/grid inputs for the restricted KS SCF kernel."""
+    """Build integral/grid inputs for the restricted KS SCF kernel."""
 
     if isinstance(atom, MoleculeSpec):
         charge = int(atom.charge)
@@ -370,9 +418,10 @@ def build_rks_integral_inputs(
             f"Unsupported integral_backend={integral_backend!r}. Expected 'jax' or 'libcint'."
         )
     grid_ao_backend_mode = str(grid_ao_backend).lower()
-    if grid_ao_backend_mode not in {"jax", "pyscf"}:
+    if grid_ao_backend_mode != "jax":
         raise ValueError(
-            f"Unsupported grid_ao_backend={grid_ao_backend!r}. Expected 'jax' or 'pyscf'."
+            f"Unsupported grid_ao_backend={grid_ao_backend!r}. "
+            "Only grid_ao_backend='jax' is supported."
         )
     libcint_grad_policy_mode = str(libcint_geometry_grad_policy).lower()
     if libcint_grad_policy_mode not in {"analytic", "error", "zero"}:
@@ -383,10 +432,10 @@ def build_rks_integral_inputs(
 
     molecule_charge = int(charge)
     geometry_is_traced = False
-    exact_exchange_fraction = float(hybrid_coeff(xc_spec_resolved))
     needs_ao_laplacian = xc_type(xc_spec_resolved) == "MGGA"
     ao_laplacian = None
     dipole_integrals = None
+    precompute_eri_groups = _precompute_eri_groups_for_rks(cfg)
 
     if integral_backend_mode == "libcint":
         if isinstance(atom, MoleculeSpec) and _contains_jax_tracer(atom.coords_bohr):
@@ -399,7 +448,7 @@ def build_rks_integral_inputs(
                 spec,
                 basis=basis,
                 max_l=max_l,
-                precompute_eri_groups=_precompute_eri_groups_for_rks(cfg),
+                precompute_eri_groups=precompute_eri_groups,
             )
             coords_bohr = jnp.asarray(spec.coords_bohr)
             intor_args = (
@@ -488,42 +537,35 @@ def build_rks_integral_inputs(
             init_mo_coeff = None
             init_mo_occ = None
         else:
-            try:
-                from pyscf import dft, gto
-            except ModuleNotFoundError as exc:
-                raise ImportError("PySCF/libcint is required when integral_backend='libcint'.") from exc
-            from ..data.basis import basis_from_pyscf_mol_cart
-
-            if isinstance(atom, MoleculeSpec):
-                molecule_charge = int(atom.charge)
-                atom_for_pyscf = _pyscf_atom_from_molecule_spec(atom)
-                unit_for_pyscf = "Bohr"
-                charge_for_pyscf = int(atom.charge)
-                spin_for_pyscf = int(atom.spin)
-            else:
-                atom_for_pyscf = atom
-                unit_for_pyscf = unit
-                charge_for_pyscf = int(charge)
-                spin_for_pyscf = int(spin)
-            mol = gto.M(
-                atom=atom_for_pyscf,
+            spec = (
+                atom
+                if isinstance(atom, MoleculeSpec)
+                else parse_molecule_spec(atom, unit=unit, charge=charge, spin=spin)
+            )
+            molecule_charge = int(spec.charge)
+            grid_ao_bundle = _cached_grid_ao_input_bundle(
+                spec=spec,
                 basis=basis,
-                unit=unit_for_pyscf,
-                charge=charge_for_pyscf,
-                spin=spin_for_pyscf,
+                max_l=max_l,
+                grids_level=grids_level,
+                precompute_eri_groups=precompute_eri_groups,
+                needs_ao_laplacian=needs_ao_laplacian,
+            )
+            mol = build_libcint_mol(
+                atom=atom,
+                basis=basis,
+                unit=unit,
+                charge=int(charge),
+                spin=int(spin),
                 cart=bool(cart),
                 verbose=int(verbose),
                 **mol_kwargs,
             )
             geometry_anchor = np.asarray(mol.atom_coords(), dtype=float)
-            basis_cart = basis_from_pyscf_mol_cart(
-                mol,
-                max_l=max_l,
-                precompute_eri_groups=_precompute_eri_groups_for_rks(cfg),
-            )
+            basis_cart = grid_ao_bundle.basis
             overlap = bind_libcint_integral_constant(
                 np.asarray(
-                    mol.intor_symmetric(_intor_name(mol, "int1e_ovlp")),
+                    mol.intor_symmetric(libcint_intor_name(mol, "int1e_ovlp")),
                     dtype=float,
                 ),
                 geometry_anchor=geometry_anchor,
@@ -531,10 +573,10 @@ def build_rks_integral_inputs(
                 geometry_grad_policy=libcint_grad_policy_mode,
             )
             hcore_value = np.asarray(
-                mol.intor_symmetric(_intor_name(mol, "int1e_kin")),
+                mol.intor_symmetric(libcint_intor_name(mol, "int1e_kin")),
                 dtype=float,
             ) + np.asarray(
-                mol.intor_symmetric(_intor_name(mol, "int1e_nuc")),
+                mol.intor_symmetric(libcint_intor_name(mol, "int1e_nuc")),
                 dtype=float,
             )
             hcore = bind_libcint_integral_constant(
@@ -546,7 +588,7 @@ def build_rks_integral_inputs(
             if include_dipole_integrals:
                 dipole_integrals = bind_libcint_integral_constant(
                     np.asarray(
-                        mol.intor_symmetric(_intor_name(mol, "int1e_r"), comp=3),
+                        mol.intor_symmetric(libcint_intor_name(mol, "int1e_r"), comp=3),
                         dtype=float,
                     ),
                     geometry_anchor=geometry_anchor,
@@ -559,13 +601,13 @@ def build_rks_integral_inputs(
                     RuntimeWarning,
                     stacklevel=2,
                 )
-            eri_name = _intor_name(mol, "int2e")
+            eri_name = libcint_intor_name(mol, "int2e")
             eri = None
             eri_pair_matrix = None
             df_factors = None
             if cfg.jk_backend == "df":
                 df_factors = bind_libcint_integral_constant(
-                    true_df_factors_from_pyscf_mol(mol),
+                    true_df_factors_from_libcint_mol(mol),
                     geometry_anchor=geometry_anchor,
                     integral_name="df_cholesky_eri",
                     geometry_grad_policy=libcint_grad_policy_mode,
@@ -582,128 +624,38 @@ def build_rks_integral_inputs(
                     geometry_grad_policy=libcint_grad_policy_mode,
                 )
 
-            if grid_ao_backend_mode != "jax":
-                grids = dft.gen_grid.Grids(mol)
-                grids.level = int(grids_level)
-                grids.build()
-                coords = jnp.asarray(grids.coords)
-                weights = jnp.asarray(grids.weights)
-                ao, ao_deriv1 = _eval_grid_ao(
-                    mol,
-                    basis_cart,
-                    coords,
-                    backend=grid_ao_backend,
-                )
-            else:
-                coords, weights, _ = build_molecular_grid(
-                    atom,
-                    unit=unit,
-                    charge=charge,
-                    spin=spin,
-                    level=grids_level,
-                )
-                ao, ao_deriv1 = evaluate_cartesian_ao_with_derivatives(
-                    basis_cart,
-                    coords,
-                    deriv=1,
-                )
-            nuclear_repulsion = float(mol.energy_nuc())
+            coords = grid_ao_bundle.coords
+            weights = grid_ao_bundle.grid_weights
+            ao = grid_ao_bundle.ao
+            ao_deriv1 = grid_ao_bundle.ao_deriv1
+            ao_laplacian = grid_ao_bundle.ao_laplacian
+            nuclear_repulsion = spec.nuclear_repulsion
             init_mo_coeff = None
             init_mo_occ = None
-            if abs(exact_exchange_fraction) > 1e-14:
-                try:
-                    dm_guess = dft.RKS(mol).get_init_guess(mol, key="minao")
-                    init_mo_coeff = _mo_coeff_guess_from_density_matrix(
-                        dm_guess,
-                        overlap,
-                        orthogonalization_eps=cfg.orthogonalization_eps,
-                    )
-                except Exception:
-                    init_mo_coeff = None
-                    init_mo_occ = None
-    elif grid_ao_backend_mode != "jax":
-        try:
-            from pyscf import dft, gto
-        except ModuleNotFoundError as exc:
-            raise ImportError(
-                "PySCF is required when grid_ao_backend!='jax' for spec-based input construction."
-            ) from exc
-        from ..data.basis import basis_from_pyscf_mol_cart
-
-        atom_for_pyscf = _pyscf_atom_from_molecule_spec(atom) if isinstance(atom, MoleculeSpec) else atom
-        unit_for_pyscf = "Bohr" if isinstance(atom, MoleculeSpec) else unit
-        mol = gto.M(
-            atom=atom_for_pyscf,
-            basis=basis,
-            unit=unit_for_pyscf,
-            charge=int(charge),
-            spin=int(spin),
-            cart=bool(cart),
-            verbose=int(verbose),
-            **mol_kwargs,
-        )
-        grids = dft.gen_grid.Grids(mol)
-        grids.level = int(grids_level)
-        grids.build()
-        basis_cart = basis_from_pyscf_mol_cart(
-            mol,
-            max_l=max_l,
-            precompute_eri_groups=_precompute_eri_groups_for_rks(cfg),
-        )
-        overlap, hcore = _overlap_hcore_for_rks_input(
-            basis_cart,
-            cfg,
-            geometry_is_traced=False,
-        )
-        if precompile_eri:
-            _precompile_eri_kernels(
-                basis_cart,
-                engine="jit",
-                chunk_size=int(precompile_eri_chunk_size),
-            )
-        eri = None
-        eri_pair_matrix = None
-        df_factors = None
-        if cfg.jk_backend == "df":
-            df_factors = eri_to_df_factors_from_basis(
-                basis_cart,
-                tol=cfg.df_tol,
-                max_rank=cfg.df_max_rank,
-            )
-        elif cfg.jk_backend != "direct":
-            eri_pair_matrix = eri_pair_matrix_packed(basis_cart)
-
-        coords = jnp.asarray(grids.coords)
-        ao, ao_deriv1 = _eval_grid_ao(
-            mol,
-            basis_cart,
-            coords,
-            backend=grid_ao_backend,
-        )
-        if needs_ao_laplacian:
-            ao_laplacian = _eval_grid_ao_laplacian(
-                mol,
-                basis_cart,
-                coords,
-                backend=grid_ao_backend,
-            )
-        weights = jnp.asarray(grids.weights)
-        nuclear_repulsion = float(mol.energy_nuc())
-        if include_dipole_integrals:
-            dipole_integrals = dipole_matrix(basis_cart)
-        init_mo_coeff = None
-        init_mo_occ = None
     else:
         spec = parse_molecule_spec(atom, unit=unit, charge=charge, spin=spin)
         molecule_charge = int(spec.charge)
         geometry_is_traced = _contains_jax_tracer(spec.coords_bohr)
-        coords, weights = build_molecular_grid_from_spec(spec, level=grids_level)
-        basis_cart = basis_from_molecule_spec(
-            spec,
-            basis=basis,
-            max_l=max_l,
-            precompute_eri_groups=_precompute_eri_groups_for_rks(cfg),
-        )
+        if geometry_is_traced:
+            coords, weights = build_molecular_grid_from_spec(spec, level=grids_level)
+            basis_cart = basis_from_molecule_spec(
+                spec,
+                basis=basis,
+                max_l=max_l,
+                precompute_eri_groups=precompute_eri_groups,
+            )
+        else:
+            grid_ao_bundle = _cached_grid_ao_input_bundle(
+                spec=spec,
+                basis=basis,
+                max_l=max_l,
+                grids_level=grids_level,
+                precompute_eri_groups=precompute_eri_groups,
+                needs_ao_laplacian=needs_ao_laplacian,
+            )
+            basis_cart = grid_ao_bundle.basis
+            coords = grid_ao_bundle.coords
+            weights = grid_ao_bundle.grid_weights
         overlap, hcore = _overlap_hcore_for_rks_input(
             basis_cart,
             cfg,
@@ -726,13 +678,18 @@ def build_rks_integral_inputs(
             )
         elif cfg.jk_backend != "direct":
             eri_pair_matrix = eri_pair_matrix_packed(basis_cart)
-        ao, ao_deriv1 = evaluate_cartesian_ao_with_derivatives(
-            basis_cart,
-            coords,
-            deriv=1,
-        )
-        if needs_ao_laplacian:
-            ao_laplacian = evaluate_cartesian_ao(basis_cart, coords, deriv=2)[4]
+        if geometry_is_traced:
+            ao, ao_deriv1 = evaluate_cartesian_ao_with_derivatives(
+                basis_cart,
+                coords,
+                deriv=1,
+            )
+            if needs_ao_laplacian:
+                ao_laplacian = evaluate_cartesian_ao(basis_cart, coords, deriv=2)[4]
+        else:
+            ao = grid_ao_bundle.ao
+            ao_deriv1 = grid_ao_bundle.ao_deriv1
+            ao_laplacian = grid_ao_bundle.ao_laplacian
         nuclear_repulsion = spec.nuclear_repulsion
         if include_dipole_integrals:
             dipole_integrals = dipole_matrix(basis_cart)
@@ -778,7 +735,7 @@ def build_uks_integral_inputs(
     cart: bool = True,
     grids_level: int = 0,
     max_l: int = 3,
-    grid_ao_backend: Literal["pyscf", "jax"] = "jax",
+    grid_ao_backend: Literal["jax"] = "jax",
     integral_backend: Literal["jax", "libcint"] = "libcint",
     libcint_geometry_grad_policy: LibcintGeometryGradPolicy = "error",
     precompile_eri: bool = False,
@@ -787,7 +744,7 @@ def build_uks_integral_inputs(
     verbose: int = 0,
     **mol_kwargs: Any,
 ) -> UKSIntegralInputs:
-    """Build PySCF-style integral/grid inputs for the unrestricted KS SCF kernel."""
+    """Build integral/grid inputs for the unrestricted KS SCF kernel."""
 
     if isinstance(atom, MoleculeSpec):
         charge = int(atom.charge)
@@ -803,9 +760,10 @@ def build_uks_integral_inputs(
             f"Unsupported integral_backend={integral_backend!r}. Expected 'jax' or 'libcint'."
         )
     grid_ao_backend_mode = str(grid_ao_backend).lower()
-    if grid_ao_backend_mode not in {"jax", "pyscf"}:
+    if grid_ao_backend_mode != "jax":
         raise ValueError(
-            f"Unsupported grid_ao_backend={grid_ao_backend!r}. Expected 'jax' or 'pyscf'."
+            f"Unsupported grid_ao_backend={grid_ao_backend!r}. "
+            "Only grid_ao_backend='jax' is supported."
         )
     libcint_grad_policy_mode = str(libcint_geometry_grad_policy).lower()
     if libcint_grad_policy_mode not in {"analytic", "error", "zero"}:
@@ -883,13 +841,21 @@ def build_uks_integral_inputs(
             ao_laplacian = evaluate_cartesian_ao(basis_cart, coords, deriv=2)[4]
             nuclear_repulsion = spec.nuclear_repulsion
         else:
-            try:
-                from pyscf import dft, gto
-            except ModuleNotFoundError as exc:
-                raise ImportError("PySCF/libcint is required when integral_backend='libcint'.") from exc
-            from ..data.basis import basis_from_pyscf_mol_cart
-
-            mol = gto.M(
+            spec = (
+                atom
+                if isinstance(atom, MoleculeSpec)
+                else parse_molecule_spec(atom, unit=unit, charge=charge, spin=spin)
+            )
+            molecule_charge = int(spec.charge)
+            grid_ao_bundle = _cached_grid_ao_input_bundle(
+                spec=spec,
+                basis=basis,
+                max_l=max_l,
+                grids_level=grids_level,
+                precompute_eri_groups=False,
+                needs_ao_laplacian=True,
+            )
+            mol = build_libcint_mol(
                 atom=atom,
                 basis=basis,
                 unit=unit,
@@ -900,32 +866,28 @@ def build_uks_integral_inputs(
                 **mol_kwargs,
             )
             geometry_anchor = jnp.asarray(mol.atom_coords())
-            basis_cart = basis_from_pyscf_mol_cart(
-                mol,
-                max_l=max_l,
-                precompute_eri_groups=False,
-            )
+            basis_cart = grid_ao_bundle.basis
             overlap = bind_libcint_integral_constant(
-                jnp.asarray(mol.intor_symmetric(_intor_name(mol, "int1e_ovlp"))),
+                jnp.asarray(mol.intor_symmetric(libcint_intor_name(mol, "int1e_ovlp"))),
                 geometry_anchor=geometry_anchor,
                 integral_name="int1e_ovlp",
                 geometry_grad_policy=libcint_grad_policy_mode,
             )
             kinetic = bind_libcint_integral_constant(
-                jnp.asarray(mol.intor_symmetric(_intor_name(mol, "int1e_kin"))),
+                jnp.asarray(mol.intor_symmetric(libcint_intor_name(mol, "int1e_kin"))),
                 geometry_anchor=geometry_anchor,
                 integral_name="int1e_kin",
                 geometry_grad_policy=libcint_grad_policy_mode,
             )
             v_nuc = bind_libcint_integral_constant(
-                jnp.asarray(mol.intor_symmetric(_intor_name(mol, "int1e_nuc"))),
+                jnp.asarray(mol.intor_symmetric(libcint_intor_name(mol, "int1e_nuc"))),
                 geometry_anchor=geometry_anchor,
                 integral_name="int1e_nuc",
                 geometry_grad_policy=libcint_grad_policy_mode,
             )
             hcore = kinetic + v_nuc
             dipole_integrals = bind_libcint_integral_constant(
-                jnp.asarray(mol.intor_symmetric(_intor_name(mol, "int1e_r"), comp=3)),
+                jnp.asarray(mol.intor_symmetric(libcint_intor_name(mol, "int1e_r"), comp=3)),
                 geometry_anchor=geometry_anchor,
                 integral_name="int1e_r",
                 geometry_grad_policy=libcint_grad_policy_mode,
@@ -936,7 +898,7 @@ def build_uks_integral_inputs(
                     RuntimeWarning,
                     stacklevel=2,
                 )
-            eri_name = _intor_name(mol, "int2e")
+            eri_name = libcint_intor_name(mol, "int2e")
             eri = bind_libcint_integral_constant(
                 jnp.asarray(mol.intor(eri_name)),
                 geometry_anchor=geometry_anchor,
@@ -944,94 +906,36 @@ def build_uks_integral_inputs(
                 geometry_grad_policy=libcint_grad_policy_mode,
             )
 
-            if grid_ao_backend_mode != "jax":
-                grids = dft.gen_grid.Grids(mol)
-                grids.level = int(grids_level)
-                grids.build()
-                coords = jnp.asarray(grids.coords)
-                weights = jnp.asarray(grids.weights)
-                ao, ao_deriv1 = _eval_grid_ao(
-                    mol,
-                    basis_cart,
-                    coords,
-                    backend=grid_ao_backend,
-                )
-                ao_laplacian = _eval_grid_ao_laplacian(
-                    mol,
-                    basis_cart,
-                    coords,
-                    backend=grid_ao_backend,
-                )
-            else:
-                coords, weights, _ = build_molecular_grid(
-                    atom,
-                    unit=unit,
-                    charge=charge,
-                    spin=spin,
-                    level=grids_level,
-                )
-                ao_deriv1 = evaluate_cartesian_ao(basis_cart, coords, deriv=1)
-                ao = ao_deriv1[0]
-                ao_laplacian = evaluate_cartesian_ao(basis_cart, coords, deriv=2)[4]
-            nuclear_repulsion = float(mol.energy_nuc())
-    elif grid_ao_backend_mode != "jax":
-        try:
-            from pyscf import dft, gto
-        except ModuleNotFoundError as exc:
-            raise ImportError(
-                "PySCF is required when grid_ao_backend!='jax' for spec-based input construction."
-            ) from exc
-        from ..data.basis import basis_from_pyscf_mol_cart
-
-        mol = gto.M(
-            atom=atom,
-            basis=basis,
-            unit=unit,
-            charge=int(charge),
-            spin=int(spin),
-            cart=bool(cart),
-            verbose=int(verbose),
-            **mol_kwargs,
-        )
-        grids = dft.gen_grid.Grids(mol)
-        grids.level = int(grids_level)
-        grids.build()
-        basis_cart = basis_from_pyscf_mol_cart(mol, max_l=max_l)
-        overlap = overlap_matrix(basis_cart)
-        hcore = build_hcore(basis_cart)
-        if precompile_eri:
-            _precompile_eri_kernels(
-                basis_cart,
-                engine="jit",
-                chunk_size=int(precompile_eri_chunk_size),
-            )
-        eri = eri_tensor(basis_cart)
-        coords = jnp.asarray(grids.coords)
-        ao, ao_deriv1 = _eval_grid_ao(
-            mol,
-            basis_cart,
-            coords,
-            backend=grid_ao_backend,
-        )
-        ao_laplacian = _eval_grid_ao_laplacian(
-            mol,
-            basis_cart,
-            coords,
-            backend=grid_ao_backend,
-        )
-        weights = jnp.asarray(grids.weights)
-        nuclear_repulsion = float(mol.energy_nuc())
-        dipole_integrals = dipole_matrix(basis_cart)
+            coords = grid_ao_bundle.coords
+            weights = grid_ao_bundle.grid_weights
+            ao = grid_ao_bundle.ao
+            ao_deriv1 = grid_ao_bundle.ao_deriv1
+            ao_laplacian = grid_ao_bundle.ao_laplacian
+            nuclear_repulsion = spec.nuclear_repulsion
     else:
         spec = parse_molecule_spec(atom, unit=unit, charge=charge, spin=spin)
         molecule_charge = int(spec.charge)
         geometry_is_traced = _contains_jax_tracer(spec.coords_bohr)
-        coords, weights = build_molecular_grid_from_spec(spec, level=grids_level)
-        basis_cart = basis_from_molecule_spec(
-            spec,
-            basis=basis,
-            max_l=max_l,
-        )
+        if geometry_is_traced:
+            coords, weights = build_molecular_grid_from_spec(spec, level=grids_level)
+            basis_cart = basis_from_molecule_spec(
+                spec,
+                basis=basis,
+                max_l=max_l,
+                precompute_eri_groups=True,
+            )
+        else:
+            grid_ao_bundle = _cached_grid_ao_input_bundle(
+                spec=spec,
+                basis=basis,
+                max_l=max_l,
+                grids_level=grids_level,
+                precompute_eri_groups=True,
+                needs_ao_laplacian=True,
+            )
+            basis_cart = grid_ao_bundle.basis
+            coords = grid_ao_bundle.coords
+            weights = grid_ao_bundle.grid_weights
         overlap = overlap_matrix(basis_cart)
         hcore = build_hcore(basis_cart)
         if precompile_eri:
@@ -1041,9 +945,14 @@ def build_uks_integral_inputs(
                 chunk_size=int(precompile_eri_chunk_size),
             )
         eri = eri_tensor(basis_cart)
-        ao_deriv1 = evaluate_cartesian_ao(basis_cart, coords, deriv=1)
-        ao = ao_deriv1[0]
-        ao_laplacian = evaluate_cartesian_ao(basis_cart, coords, deriv=2)[4]
+        if geometry_is_traced:
+            ao_deriv1 = evaluate_cartesian_ao(basis_cart, coords, deriv=1)
+            ao = ao_deriv1[0]
+            ao_laplacian = evaluate_cartesian_ao(basis_cart, coords, deriv=2)[4]
+        else:
+            ao = grid_ao_bundle.ao
+            ao_deriv1 = grid_ao_bundle.ao_deriv1
+            ao_laplacian = grid_ao_bundle.ao_laplacian
         nuclear_repulsion = spec.nuclear_repulsion
         dipole_integrals = dipole_matrix(basis_cart)
 

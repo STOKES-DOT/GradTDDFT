@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 
 from td_graddft import neural_xc
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.tddft.test_module import (
     LocalHFKhhResponseFunctionalWrapper,
     build_restricted_local_hf_khh_tda_matrix,

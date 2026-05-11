@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from td_graddft.reference import unrestricted_reference_from_spec_with_jax_uks
 from td_graddft.scf import UKSConfig
+from td_graddft.scf.builders import unrestricted_reference_from_spec_with_jax_uks
 from td_graddft.scf.differentiable import _is_unrestricted_reference
 from td_graddft.workflows.core import run_reference_from_spec
 from td_graddft.workflows.types import ReferenceSpecConfig, SimulationConfig

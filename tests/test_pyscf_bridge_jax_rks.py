@@ -2,11 +2,12 @@ import numpy as np
 import pytest
 import types
 
-from td_graddft.reference_legacy import (
+from pyscf_reference import (
     restricted_reference_from_pyscf_spec_with_jax_rks,
     restricted_reference_from_pyscf_with_jax_rks,
 )
-from td_graddft.reference import _charge_center, restricted_reference_from_spec_with_jax_rks
+from td_graddft.scf.builders import restricted_reference_from_spec_with_jax_rks
+from td_graddft.scf.features import _charge_center
 from td_graddft.scf import RKSConfig
 from td_graddft.scf.rks import TraceableRKSResult
 from td_graddft.workflows.core import run_reference
@@ -90,7 +91,7 @@ def test_restricted_reference_from_pyscf_with_jax_rks_jax_grid_ao_matches_pyscf_
     assert np.allclose(ao1, ao1_ref, atol=3e-6, rtol=2e-5)
 
 
-def test_workflow_reference_stage_accepts_jax_rks_backend():
+def test_workflow_reference_stage_rejects_legacy_mf_jax_rks_backend():
     _pyscf_or_skip()
     mf = _make_h2_b3lyp_mf()
 
@@ -103,16 +104,12 @@ def test_workflow_reference_stage_accepts_jax_rks_backend():
         jax_rks_conv_tol=1e-8,
         jax_rks_conv_tol_density=1e-6,
     )
-    reference = run_reference(
-        mf,
-        scf_elapsed_s=0.0,
-        simulation=simulation,
-    )
-
-    assert reference.nstates == 1
-    assert reference.energies_au.shape == (1,)
-    assert reference.oscillator_strengths.shape == (1,)
-    assert reference.molecule.rep_tensor.ndim == 4
+    with pytest.raises(ValueError, match="reference_spec"):
+        run_reference(
+            mf,
+            scf_elapsed_s=0.0,
+            simulation=simulation,
+        )
 
 
 def test_restricted_reference_from_pyscf_spec_with_jax_rks_matches_water_pyscf_energy():
@@ -235,7 +232,7 @@ def test_cuda_direct_reference_skips_response_eri_precompute(monkeypatch):
     from td_graddft.data.integrals import eri_pair_matrix_packed
     from td_graddft.scf.packed_eri import build_jk_from_eri_pair_matrix
     import td_graddft.scf.rks as rks_mod
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
 
     class FakeCudaDirectJKBuilder:
         def __init__(self, basis, **kwargs):
@@ -297,10 +294,49 @@ def test_cuda_direct_reference_skips_response_eri_precompute(monkeypatch):
     assert np.isfinite(float(ref.mf_energy))
 
 
+def test_cuda_direct_jk_builder_does_not_add_nested_jit(monkeypatch):
+    import jax.numpy as jnp
+
+    import td_graddft.scf.rks as rks_mod
+
+    jit_calls = []
+
+    def fake_jit(fn):
+        jit_calls.append(fn.__name__)
+        return fn
+
+    class FakeCudaDirectJKBuilder:
+        def build_jk(self, density, *, density_cutoff=0.0):
+            assert density_cutoff == 0.0
+            density = jnp.asarray(density)
+            return jnp.eye(density.shape[0], dtype=density.dtype), jnp.zeros_like(density)
+
+    monkeypatch.setattr(rks_mod, "cuda_ffi_available", lambda: True)
+    monkeypatch.setattr(rks_mod.jax, "jit", fake_jit)
+
+    jk_builder = rks_mod._make_jk_builder(
+        None,
+        RKSConfig(
+            xc_spec="hf",
+            jk_backend="direct",
+            direct_jk_engine="cuda",
+            direct_scf_tol=0.0,
+        ),
+        direct_basis=object(),
+        direct_cuda_jk_builder=FakeCudaDirectJKBuilder(),
+        with_k=True,
+    )
+    j_mat, k_mat = jk_builder(jnp.eye(2, dtype=jnp.float64))
+
+    assert jit_calls == []
+    assert j_mat.shape == (2, 2)
+    assert k_mat.shape == (2, 2)
+
+
 def test_cached_cuda_direct_runner_uses_prebuilt_runtime_builder(monkeypatch):
     import jax.numpy as jnp
 
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
     from td_graddft.data.basis import basis_from_spec
 
     basis = basis_from_spec("H 0 0 0; H 0 0 0.74", basis="sto-3g")
@@ -314,6 +350,7 @@ def test_cached_cuda_direct_runner_uses_prebuilt_runtime_builder(monkeypatch):
         def __init__(self, direct_basis, **kwargs):
             self.direct_basis = direct_basis
             self.kwargs = kwargs
+            self.has_rys_direct_jk = True
             constructed_builders.append(self)
 
     class FakeJitted:
@@ -384,11 +421,12 @@ def test_cached_cuda_direct_runner_uses_prebuilt_runtime_builder(monkeypatch):
     assert result.total_energy == 0.0
     assert len(constructed_builders) == 1
     assert captured["direct_cuda_jk_builder"] is constructed_builders[0]
-    assert constructed_builders[0].kwargs["include_pair_metadata"] is True
+    assert constructed_builders[0].kwargs["include_pair_metadata"] is False
+    assert constructed_builders[0].kwargs["include_joltqc_metadata"] is False
 
 
 def test_cached_cuda_direct_jk_builder_keeps_pair_metadata_for_runtime_mapping(monkeypatch):
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
     from td_graddft.data.basis import basis_from_spec
 
     basis = basis_from_spec("H 0 0 0; H 0 0 0.74", basis="sto-3g")
@@ -397,6 +435,7 @@ def test_cached_cuda_direct_jk_builder_keeps_pair_metadata_for_runtime_mapping(m
     class FakeBuilder:
         def __init__(self, basis_arg, **kwargs):
             assert basis_arg is basis
+            self.has_rys_direct_jk = True
             calls.append(kwargs)
 
     monkeypatch.setattr(reference_mod, "CudaDirectJKBuilder", FakeBuilder)
@@ -420,14 +459,14 @@ def test_cached_cuda_direct_jk_builder_keeps_pair_metadata_for_runtime_mapping(m
     reference_mod._cached_cuda_direct_jk_builder(basis, unscreened_config)
     reference_mod._cached_cuda_direct_jk_builder(basis, screened_config)
 
-    assert calls[0]["include_pair_metadata"] is True
+    assert calls[0]["include_pair_metadata"] is False
     assert calls[1]["include_pair_metadata"] is True
 
 
-def test_cuda_direct_python_reference_uses_cached_runtime_builder(monkeypatch):
+def test_cuda_direct_lax_reference_uses_cached_runtime_builder(monkeypatch):
     import jax.numpy as jnp
 
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
     from td_graddft.data.basis import basis_from_spec
     from td_graddft.scf.inputs import RKSIntegralInputs
     from td_graddft.scf.rks import RKSResult
@@ -454,11 +493,12 @@ def test_cuda_direct_python_reference_uses_cached_runtime_builder(monkeypatch):
         ao_laplacian=None,
         dipole_integrals=None,
         integral_backend="libcint",
-        grid_ao_backend="pyscf",
+        grid_ao_backend="jax",
     )
 
-    def fake_run_rks_from_integrals(**kwargs):
-        captured.update(kwargs)
+    def fake_run_cached_cuda_direct_rks(inputs_arg, cfg_arg):
+        captured["inputs"] = inputs_arg
+        captured["config"] = cfg_arg
         density = jnp.zeros((nao, nao), dtype=jnp.float64)
         mo_occ = jnp.zeros((nao,), dtype=jnp.float64).at[0].set(2.0)
         return RKSResult(
@@ -473,15 +513,15 @@ def test_cuda_direct_python_reference_uses_cached_runtime_builder(monkeypatch):
             mo_occ=mo_occ,
             density_matrix=density,
             fock_matrix=density,
-            overlap_matrix=kwargs["overlap"],
-            hcore_matrix=kwargs["hcore"],
+            overlap_matrix=inputs_arg.overlap,
+            hcore_matrix=inputs_arg.hcore,
             cycles=1,
         )
 
     monkeypatch.setattr(reference_mod, "cuda_ffi_available", lambda: True)
     monkeypatch.setattr(reference_mod, "build_rks_integral_inputs", lambda **kwargs: scf_inputs)
     monkeypatch.setattr(reference_mod, "_cached_cuda_direct_jk_builder", lambda basis_arg, cfg: cached_builder)
-    monkeypatch.setattr(reference_mod, "run_rks_from_integrals", fake_run_rks_from_integrals)
+    monkeypatch.setattr(reference_mod, "_run_cached_cuda_direct_rks", fake_run_cached_cuda_direct_rks)
 
     ref = reference_mod.restricted_reference_from_spec_with_jax_rks(
         atom="H 0 0 0; H 0 0 0.74",
@@ -497,19 +537,20 @@ def test_cuda_direct_python_reference_uses_cached_runtime_builder(monkeypatch):
             xc_spec="hf",
             jk_backend="direct",
             direct_jk_engine="cuda",
-            iteration_backend="python",
+            iteration_backend="lax",
         ),
-        grid_ao_backend="pyscf",
+        grid_ao_backend="jax",
         integral_backend="libcint",
     )
 
     assert float(ref.mf_energy) == -1.0
-    assert captured["direct_cuda_jk_builder"] is cached_builder
-    assert "direct_joltqc_basis_data" not in captured
+    assert captured["inputs"] is scf_inputs
+    assert captured["config"].iteration_backend == "lax"
+    assert ref.direct_cuda_jk_builder is cached_builder
 
 
-def test_cuda_direct_input_cache_key_is_independent_of_iteration_backend():
-    import td_graddft.reference as reference_mod
+def test_cuda_direct_input_cache_key_is_stable_for_lax_iteration_backend():
+    import td_graddft.scf.builders as reference_mod
     from td_graddft.data.molecule import parse_molecule_spec
 
     atom = parse_molecule_spec("H 0 0 0; H 0 0 0.74", unit="Angstrom")
@@ -523,7 +564,7 @@ def test_cuda_direct_input_cache_key_is_independent_of_iteration_backend():
         cart=True,
         grids_level=0,
         max_l=1,
-        grid_ao_backend="pyscf",
+        grid_ao_backend="jax",
         integral_backend="libcint",
         libcint_geometry_grad_policy="analytic",
         include_dipole_integrals=False,
@@ -532,16 +573,16 @@ def test_cuda_direct_input_cache_key_is_independent_of_iteration_backend():
         verbose=0,
         mol_kwargs={},
     )
-    python_key = reference_mod._cuda_direct_reference_inputs_cache_key(
+    lax_key_a = reference_mod._cuda_direct_reference_inputs_cache_key(
         **base,
         config=RKSConfig(
             xc_spec="hf",
             jk_backend="direct",
             direct_jk_engine="cuda",
-            iteration_backend="python",
+            iteration_backend="lax",
         ),
     )
-    lax_key = reference_mod._cuda_direct_reference_inputs_cache_key(
+    lax_key_b = reference_mod._cuda_direct_reference_inputs_cache_key(
         **base,
         config=RKSConfig(
             xc_spec="hf",
@@ -551,11 +592,11 @@ def test_cuda_direct_input_cache_key_is_independent_of_iteration_backend():
         ),
     )
 
-    assert python_key == lax_key
+    assert lax_key_a == lax_key_b
 
 
 def test_precompiled_cuda_direct_runner_is_reused_for_execution(monkeypatch):
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
 
     scf_inputs = types.SimpleNamespace(name="inputs")
     config = RKSConfig(
@@ -610,7 +651,7 @@ def test_precompiled_cuda_direct_runner_is_reused_for_execution(monkeypatch):
 
 
 def test_cuda_direct_precompile_reuses_existing_compiled_executable(monkeypatch):
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
 
     scf_inputs = types.SimpleNamespace(name="inputs")
     config = RKSConfig(
@@ -662,7 +703,7 @@ def test_cuda_direct_precompile_reuses_existing_compiled_executable(monkeypatch)
 
 
 def test_cuda_direct_reference_precompile_reuses_cached_inputs(monkeypatch):
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
 
     cached_inputs = types.SimpleNamespace(name="cached-inputs")
     config = RKSConfig(
@@ -695,7 +736,7 @@ def test_cuda_direct_reference_precompile_reuses_cached_inputs(monkeypatch):
         basis="sto-3g",
         xc_spec="pbe0",
         rks_config=config,
-        grid_ao_backend="pyscf",
+        grid_ao_backend="jax",
         integral_backend="libcint",
         include_dipole_integrals=False,
     )
@@ -706,7 +747,7 @@ def test_cuda_direct_reference_precompile_reuses_cached_inputs(monkeypatch):
 def test_cuda_direct_grid_bucket_padding_preserves_active_grid_values():
     import jax.numpy as jnp
 
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
     from td_graddft.data.basis import basis_from_spec
     from td_graddft.scf.inputs import RKSIntegralInputs
 
@@ -732,7 +773,7 @@ def test_cuda_direct_grid_bucket_padding_preserves_active_grid_values():
         ao_laplacian=None,
         dipole_integrals=None,
         integral_backend="libcint",
-        grid_ao_backend="pyscf",
+        grid_ao_backend="jax",
     )
 
     padded = reference_mod._bucket_cuda_direct_rks_grid_inputs(
@@ -761,7 +802,7 @@ def test_cuda_direct_grid_bucket_padding_preserves_active_grid_values():
 
 
 def test_cuda_direct_signature_precompile_uses_dummy_args_but_reuses_real_signature(monkeypatch):
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
 
     scf_inputs = types.SimpleNamespace(name="inputs")
     config = RKSConfig(
@@ -912,7 +953,7 @@ def test_restricted_reference_from_spec_with_jax_rks_can_precompile_eri(monkeypa
         calls.append((basis.nao, str(engine), int(chunk_size)))
         return {"compiled_shell_signatures": 0, "compiled_batch_shapes": 0}
 
-    monkeypatch.setattr("td_graddft.reference.precompile_eri_kernels", fake_precompile)
+    monkeypatch.setattr("td_graddft.scf.builders.precompile_eri_kernels", fake_precompile)
 
     ref = restricted_reference_from_spec_with_jax_rks(
         atom="""
@@ -1059,7 +1100,7 @@ def test_restricted_reference_from_spec_with_jax_rks_libcint_skips_precompile(mo
         called["value"] = True
         return {}
 
-    monkeypatch.setattr("td_graddft.reference.precompile_eri_kernels", fake_precompile)
+    monkeypatch.setattr("td_graddft.scf.builders.precompile_eri_kernels", fake_precompile)
 
     with pytest.warns(RuntimeWarning, match="ignored when integral_backend='libcint'"):
         _ = restricted_reference_from_spec_with_jax_rks(

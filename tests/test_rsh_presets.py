@@ -1,6 +1,4 @@
 import numpy as np
-import pytest
-
 from td_graddft.nn_rsh import (
     get_rsh_functional_preset,
     list_rsh_functional_presets,
@@ -8,45 +6,36 @@ from td_graddft.nn_rsh import (
 )
 
 
-def test_lc_wpbe_preset_matches_pyscf_libxc_coefficients():
-    pytest.importorskip("pyscf")
-    from pyscf import dft, gto
-
+def test_lc_wpbe_preset_matches_literature_coefficients():
     preset = get_rsh_functional_preset("lc-wpbe")
     params = preset.default_params
 
-    assert preset.pyscf_xc_name == "LC_WPBE"
+    assert preset.canonical_xc_name == "LC_WPBE"
     assert preset.strict_jax_supported is True
     assert preset.jax_local_xc_spec == "lc_wpbe_local"
     assert np.allclose(
-        tuple(float(x) for x in params.to_pyscf_rsh()),
-        dft.libxc.rsh_coeff("LC_WPBE"),
+        tuple(float(x) for x in params.to_range_separated_coefficients()),
+        (0.4, 1.0, -1.0),
     )
     assert np.allclose(
-        (float(params.omega), float(params.lr_hf_fraction), float(params.sr_hf_fraction)),
-        dft.RKS(gto.M(atom="He 0 0 0", basis="sto-3g", verbose=0))._numint.rsh_and_hybrid_coeff(
-            "LC_WPBE", spin=0
-        ),
+        tuple(float(x) for x in params.to_range_separated_hybrid_coefficients()),
+        (0.4, 1.0, 0.0),
     )
 
 
-def test_wb97xd_preset_matches_pyscf_libxc_coefficients():
-    pytest.importorskip("pyscf")
-    from pyscf import dft, gto
-
+def test_wb97xd_preset_matches_literature_coefficients():
     preset = get_rsh_functional_preset("wb97x-d")
     params = preset.default_params
-    mol = gto.M(atom="He 0 0 0", basis="sto-3g", verbose=0)
 
-    assert preset.pyscf_xc_name == "WB97X_D"
+    assert preset.canonical_xc_name == "WB97X_D"
     assert preset.has_dispersion is True
     assert np.allclose(
-        tuple(float(x) for x in params.to_pyscf_rsh()),
-        dft.libxc.rsh_coeff("WB97X_D"),
+        tuple(float(x) for x in params.to_range_separated_coefficients()),
+        (0.2, 1.0, -0.777964),
     )
     assert np.allclose(
-        (float(params.omega), float(params.lr_hf_fraction), float(params.sr_hf_fraction)),
-        dft.RKS(mol)._numint.rsh_and_hybrid_coeff("WB97X_D", spin=0),
+        tuple(float(x) for x in params.to_range_separated_hybrid_coefficients()),
+        (0.2, 1.0, 0.222036),
     )
 
 

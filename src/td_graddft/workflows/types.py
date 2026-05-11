@@ -13,14 +13,13 @@ from td_graddft.jax_runtime import (
 from td_graddft.neural_xc import (
     DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_MODE,
     DEFAULT_NEURAL_XC_DENSITY_SUPERVISION,
-    DEFAULT_NEURAL_XC_ENERGY_MODE,
     DEFAULT_NEURAL_XC_HF_INPUT_MODE,
     DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
-    GRADDFT_DEFAULT_DM21_HIDDEN_DIMS,
-    GRADDFT_DEFAULT_INPUT_FEATURE_MODE,
-    GRADDFT_DEFAULT_NETWORK_ARCHITECTURE,
+    DEFAULT_INPUT_FEATURE_MODE,
+    DEFAULT_NETWORK_ARCHITECTURE,
+    DEFAULT_NETWORK_HIDDEN_DIMS,
 )
 
 
@@ -70,31 +69,22 @@ class NeuralXCTrainingConfig:
     spectrum_mse_weight: float = 0.0
     spectrum_mae_weight: float = 1.0
     seed: int = 0
-    hidden_dims: tuple[int, ...] = GRADDFT_DEFAULT_DM21_HIDDEN_DIMS
+    hidden_dims: tuple[int, ...] = DEFAULT_NETWORK_HIDDEN_DIMS
     network_architecture: Literal["simple_mlp", "graddft_residual"] = (
-        GRADDFT_DEFAULT_NETWORK_ARCHITECTURE
+        DEFAULT_NETWORK_ARCHITECTURE
     )
     semilocal_xc: str | tuple[str, ...] = DEFAULT_NEURAL_XC_SEMILOCAL_XC
     n_semilocal_channels: int | None = None
-    energy_mode: Literal[
-        "graddft_coeff_basis",
-        "normalized_mixing_basis",
-        "dldh_two_lmf",
-        "graddft_coeff_basis_hf_pt2_heads",
-    ] = DEFAULT_NEURAL_XC_ENERGY_MODE
-    input_feature_mode: Literal["enhanced", "dm21_original"] = GRADDFT_DEFAULT_INPUT_FEATURE_MODE
+    input_feature_mode: Literal["enhanced", "canonical"] = DEFAULT_INPUT_FEATURE_MODE
     hf_input_mode: Literal["total_only", "spin_resolved"] = DEFAULT_NEURAL_XC_HF_INPUT_MODE
-    hf_fraction_mode: Literal["normalized_weights", "hf_coefficient"] = (
-        "normalized_weights"
-    )
     include_pt2_channel: bool = False
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected"
     response_hf_mode: Literal["nonlocal_exchange_only", "local_projected"] = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE
     response_pt2_mode: Literal["nonlocal_correlation_only", "local_projected"] = (
         DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE
     )
-    strict_dm21_feature_alignment: bool = True
-    dm21_hfx_channels: int = 2
+    strict_feature_alignment: bool = True
+    hfx_channels: int = 2
     dm21_hfx_omega_values: tuple[float, ...] = (0.0, 0.4)
     dm21_hfx_chunk_size: int = 512
     functional_name: str = "neural_xc_fit"
@@ -142,7 +132,7 @@ class SimulationConfig:
     occupation_tolerance: float = 1e-8
     scf_backend: str = "jax_rks"
     jax_basis_max_l: int = 3
-    jax_grid_ao_backend: Literal["pyscf", "jax"] = "jax"
+    jax_grid_ao_backend: Literal["jax"] = "jax"
     jax_rhf_max_cycle: int = 80
     jax_rhf_conv_tol: float = 1e-10
     jax_rhf_conv_tol_density: float = 1e-8
@@ -181,8 +171,8 @@ class SimulationConfig:
 
 
 @dataclass(frozen=True)
-class ReferenceSpecConfig:
-    """Spec-driven system definition for strict-JAX reference construction."""
+class MoleculeSpecConfig:
+    """Spec-driven system definition for strict-JAX molecule construction."""
 
     atom: Any
     basis: str
@@ -230,7 +220,7 @@ class OutputPaths:
 
 
 @dataclass(frozen=True)
-class ReferenceRun:
+class MoleculeRun:
     molecule: Any
     nocc: int
     nvir: int
@@ -244,6 +234,10 @@ class ReferenceRun:
     @property
     def reference(self) -> Any:
         return self.molecule
+
+
+ReferenceSpecConfig = MoleculeSpecConfig
+ReferenceRun = MoleculeRun
 
 
 @dataclass(frozen=True)
@@ -294,7 +288,7 @@ class SpectrumRun:
 @dataclass(frozen=True)
 class PipelineRun:
     system_label: str
-    reference: ReferenceRun
+    reference: MoleculeRun
     training: TrainingRun
     neural: NeuralExcitedStateRun
     spectrum: SpectrumRun

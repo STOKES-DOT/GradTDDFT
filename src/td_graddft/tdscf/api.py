@@ -8,19 +8,37 @@ from ..tddft import RestrictedCasidaTDDFT, UnrestrictedCasidaTDDFT, Unrestricted
 from ..tddft._semilocal_response import SemilocalResponseFunctional
 
 
-def _reference_from_source(source: Any) -> Any:
+def _molecule_from_source(source: Any) -> Any:
+    if hasattr(source, "molecule"):
+        molecule = getattr(source, "molecule")
+        if molecule is None:
+            ensure_molecule = getattr(source, "_ensure_molecule", None)
+            if callable(ensure_molecule):
+                return ensure_molecule()
     if hasattr(source, "reference"):
-        reference = getattr(source, "reference")
-        if reference is None:
+        molecule = getattr(source, "reference")
+        if molecule is None:
+            ensure_molecule = getattr(source, "_ensure_molecule", None)
+            if callable(ensure_molecule):
+                return ensure_molecule()
+            ensure_reference = getattr(source, "_ensure_reference", None)
+            if callable(ensure_reference):
+                return ensure_reference()
             raise RuntimeError(
                 "Run ground-state mf.kernel() or mf.run() before launching TD-SCF."
             )
-        return reference
+        return molecule
     return source
 
 
-def _is_unrestricted_reference(reference: Any) -> bool:
-    return hasattr(reference, "nocc_alpha") or hasattr(reference, "nocc_beta")
+_reference_from_source = _molecule_from_source
+
+
+def _is_unrestricted_molecule(molecule: Any) -> bool:
+    return hasattr(molecule, "nocc_alpha") or hasattr(molecule, "nocc_beta")
+
+
+_is_unrestricted_reference = _is_unrestricted_molecule
 
 
 def _xy_from_result(result: Any) -> Any:
@@ -57,7 +75,7 @@ class _BaseTD:
 
     def __init__(
         self,
-        mf_or_reference: Any,
+        mf_or_molecule: Any = None,
         *,
         xc_functional: Any | None = None,
         xc_params: Any | None = None,
@@ -69,8 +87,14 @@ class _BaseTD:
         davidson_tol: float = 1e-6,
         davidson_max_iter: int = 60,
         davidson_max_subspace: int | None = None,
+        **kwargs: Any,
     ) -> None:
-        self.mf = mf_or_reference
+        if mf_or_molecule is None and "mf_or_reference" in kwargs:
+            mf_or_molecule = kwargs.pop("mf_or_reference")
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"Unexpected keyword argument(s): {unexpected}")
+        self.mf = mf_or_molecule
         self.xc_functional = xc_functional
         self.xc_params = xc_params
         self.nstates = nstates
@@ -90,8 +114,12 @@ class _BaseTD:
         self._solver: Any | None = None
 
     @property
+    def molecule(self) -> Any:
+        return _molecule_from_source(self.mf)
+
+    @property
     def reference(self) -> Any:
-        return _reference_from_source(self.mf)
+        return self.molecule
 
     def _resolved_xc_functional(self) -> Any | None:
         if self.xc_functional is not None:
@@ -105,17 +133,17 @@ class _BaseTD:
             return SemilocalResponseFunctional(source_xc)
         return source_xc
 
-    def _common_solver_kwargs(self, reference: Any) -> dict[str, Any]:
+    def _common_solver_kwargs(self, molecule: Any) -> dict[str, Any]:
         return {
-            "molecule": reference,
+            "molecule": molecule,
             "xc_functional": self._resolved_xc_functional(),
             "xc_params": self.xc_params,
             "occupation_tolerance": self.occupation_tolerance,
             "excitation_threshold": self.excitation_threshold,
         }
 
-    def _restricted_solver_kwargs(self, reference: Any) -> dict[str, Any]:
-        kwargs = self._common_solver_kwargs(reference)
+    def _restricted_solver_kwargs(self, molecule: Any) -> dict[str, Any]:
+        kwargs = self._common_solver_kwargs(molecule)
         kwargs.update(
             {
                 "matrix_eps": self.matrix_eps,
@@ -142,7 +170,7 @@ class _BaseTD:
 
     def transition_dipole(self) -> Any:
         return spectra.transition_dipoles(
-            self.reference,
+            self.molecule,
             self._require_result(),
             occupation_tolerance=self.occupation_tolerance,
         )
@@ -152,20 +180,20 @@ class _BaseTD:
 
     def oscillator_strength(self) -> Any:
         return spectra.oscillator_strengths(
-            self.reference,
+            self.molecule,
             self._require_result(),
             occupation_tolerance=self.occupation_tolerance,
         )
 
 
 class TDA(_BaseTD):
-    """PySCF-style TDA driver dispatching restricted and unrestricted references."""
+    """PySCF-style TDA driver dispatching restricted and unrestricted molecules."""
 
     def _build_solver(self) -> Any:
-        reference = self.reference
-        if _is_unrestricted_reference(reference):
-            return UnrestrictedTDA(**self._common_solver_kwargs(reference))
-        return RestrictedCasidaTDDFT(**self._restricted_solver_kwargs(reference))
+        molecule = self.molecule
+        if _is_unrestricted_molecule(molecule):
+            return UnrestrictedTDA(**self._common_solver_kwargs(molecule))
+        return RestrictedCasidaTDDFT(**self._restricted_solver_kwargs(molecule))
 
     def kernel(self, nstates: int | None = None) -> Any:
         nroots = self.nstates if nstates is None else nstates
@@ -185,12 +213,12 @@ class TDDFT(_BaseTD):
     """PySCF-style full Casida TDDFT driver."""
 
     def _build_solver(self) -> Any:
-        reference = self.reference
-        if _is_unrestricted_reference(reference):
-            kwargs = self._common_solver_kwargs(reference)
+        molecule = self.molecule
+        if _is_unrestricted_molecule(molecule):
+            kwargs = self._common_solver_kwargs(molecule)
             kwargs["matrix_eps"] = self.matrix_eps
             return UnrestrictedCasidaTDDFT(**kwargs)
-        return RestrictedCasidaTDDFT(**self._restricted_solver_kwargs(reference))
+        return RestrictedCasidaTDDFT(**self._restricted_solver_kwargs(molecule))
 
     def kernel(self, nstates: int | None = None) -> Any:
         nroots = self.nstates if nstates is None else nstates

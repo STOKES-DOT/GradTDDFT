@@ -1,8 +1,8 @@
 """Core interfaces for TD-GradDFT.
 
 This package re-exports a large surface area. Keep the re-exports lazy so
-submodule imports such as ``import td_graddft.reference`` do not pull the
-entire stack into memory during process startup.
+submodule imports do not pull the entire stack into memory during process
+startup.
 """
 
 from __future__ import annotations
@@ -27,10 +27,9 @@ _NAMESPACE_EXPORTS = {
     "traditional_xc",
 }
 
-_EXPORTS = {
+_PUBLIC_EXPORTS = {
     "AdiabaticDensityFunctional": "xc",
     "BOHR_TO_ANGSTROM": "geomopt",
-    "BoundDM21LikeFunctional": "neural_xc",
     "BoundNeuralXCFunctional": "neural_xc",
     "BoundTrainableRSHFunctional": "dft",
     "BoundRSHFunctionalProtocol": "protocols",
@@ -39,8 +38,7 @@ _EXPORTS = {
     "CartesianAO": "data",
     "CartesianBasis": "data",
     "CoordinateUnit": "geomopt",
-    "DM21LikeFunctional": "neural_xc",
-    "DM21MixingMLP": "neural_xc",
+    "SimpleMixingMLP": "neural_xc",
     "DifferentiableSCF": "scf",
     "DifferentiableSCFConfig": "scf",
     "DifferentiableSCFInfo": "scf",
@@ -51,14 +49,16 @@ _EXPORTS = {
     "Functional": "neural_xc",
     "GeometryOptimizationConfig": "geomopt",
     "GeometryOptimizationResult": "geomopt",
-    "GradDFTResidualMixingMLP": "neural_xc",
-    "GridReference": "reference",
+    "ResidualMixingMLP": "neural_xc",
+    "QuadratureGrid": "scf",
     "GroundStateDatum": "training",
     "GroundStateReference": "types",
     "GroundStateTrainingConfig": "training",
     "HARTREE_TO_EV": "spectra",
     "MissingDependencyError": "upstreams",
     "MoleculeConfig": "api",
+    "MoleculeRun": "workflows",
+    "MoleculeSpecConfig": "workflows",
     "MoleculeReferenceProtocol": "protocols",
     "NeuralExcitedStateRun": "workflows",
     "NeuralXCHybridFunctional": "neural_xc",
@@ -67,7 +67,6 @@ _EXPORTS = {
     "OutputConfig": "workflows",
     "OutputPaths": "workflows",
     "PipelineRun": "workflows",
-    "PySCFRSHSpec": "dft",
     "RHFConfig": "scf",
     "RHFResult": "scf",
     "RSHFunctionalTemplate": "dft",
@@ -77,11 +76,9 @@ _EXPORTS = {
     "RKSResult": "scf",
     "RealTimeState": "types",
     "ResolvedRSHParameters": "dft",
-    "ReferenceRun": "workflows",
-    "ReferenceSpecConfig": "workflows",
     "RestrictedCasidaTDDFT": "tddft",
     "RestrictedFeatureBundle": "jax_libxc",
-    "RestrictedMoleculeReference": "reference",
+    "RestrictedMolecule": "scf",
     "SimulationConfig": "workflows",
     "SpectrumGridConfig": "workflows",
     "SpectrumRun": "workflows",
@@ -98,7 +95,7 @@ _EXPORTS = {
     "UKSConfig": "scf",
     "UKSResult": "scf",
     "UnrestrictedCasidaTDDFT": "tddft",
-    "UnrestrictedMoleculeReference": "reference",
+    "UnrestrictedMolecule": "scf",
     "UnrestrictedResponseMatrices": "tddft",
     "UnrestrictedTDA": "tddft",
     "UnrestrictedTDAMatrices": "tddft",
@@ -111,15 +108,13 @@ _EXPORTS = {
     "LongRangeXCNet": "tddft",
     "b3lyp_component_basis": "jax_libxc",
     "b3lyp_component_coefficients": "jax_libxc",
-    "basis_from_pyscf_mol_cart": "data",
-    "basis_from_pyscf_spec": "data",
     "benzene_experiment_config": "workflows",
     "benzene_legacy_experiment_config": "workflows",
     "benzene_strict_jax_experiment_config": "workflows",
     "build_hcore": "data.integrals",
     "build_long_range_pair_features": "tddft",
     "build_jk_from_df": "df",
-    "build_reference": "api",
+    "build_molecule": "api",
     "build_restricted_response_matrices": "tddft",
     "build_unrestricted_response_matrices": "tddft",
     "build_unrestricted_tda_matrices": "tddft",
@@ -132,8 +127,8 @@ _EXPORTS = {
     "density_on_grid": "training",
     "density_on_grid_spin_resolved": "training",
     "density_stationarity_penalty": "training",
-    "dm21_like_input_features": "features",
-    "dm21_original_input_features": "features",
+    "enhanced_neural_xc_input_features": "features",
+    "canonical_neural_xc_input_features": "features",
     "ensure_hermitian": "realtime",
     "eri_element": "data.integrals",
     "eri_tensor": "data.integrals",
@@ -145,7 +140,6 @@ _EXPORTS = {
     "gen_tda_vind": "tddft",
     "gen_tdhf_vind": "tddft",
     "ground_state_from_grad_dft_molecule": "upstreams",
-    "ground_state_from_pyscf_mean_field": "upstreams",
     "ground_state_mse_loss": "training",
     "has_grad_dft": "upstreams",
     "has_jax_xc": "upstreams",
@@ -172,7 +166,6 @@ _EXPORTS = {
     "make_pbe0_functional": "traditional_xc",
     "make_pbe_functional": "traditional_xc",
     "make_minimal_trainable_rsh_functional": "dft",
-    "make_pyscf_rsh_spec": "dft",
     "make_rks_ground_state_energy_fn": "geomopt",
     "make_self_consistent_predictor": "training",
     "make_self_supervised_rsh_loss": "training",
@@ -191,26 +184,24 @@ _EXPORTS = {
     "predict_ground_state_total_energy": "training",
     "propagate": "realtime",
     "propagate_step": "realtime",
-    "put_reference_on_device": "device",
-    "put_restricted_reference_on_device": "device",
+    "put_molecule_on_device": "device",
+    "put_restricted_molecule_on_device": "device",
     "resolve_coefficient_prior_values": "neural_xc",
     "resolve_execution_device": "device",
     "restricted_grid_features": "features",
-    "restricted_reference_from_pyscf": "reference_legacy",
-    "restricted_reference_from_pyscf_spec_with_jax_rks": "reference_legacy",
-    "restricted_reference_from_pyscf_with_jax_rhf": "reference_legacy",
-    "restricted_reference_from_pyscf_with_jax_rks": "reference_legacy",
-    "restricted_reference_from_spec_with_jax_rks": "reference",
-    "unrestricted_reference_from_spec_with_jax_uks": "reference",
+    "restricted_molecule_from_spec_with_jax_rks": "scf",
+    "unrestricted_molecule_from_spec_with_jax_uks": "scf",
     "run_and_report": "workflows",
     "run_and_report_from_spec": "workflows",
     "run_experiment": "workflows",
     "run_geometry_optimization": "geomopt",
+    "run_molecule_from_spec": "workflows",
     "run_neural_xc_spectrum_pipeline": "workflows",
+    "run_neural_xc_spectrum_pipeline_from_molecule_spec": "workflows",
     "run_neural_xc_spectrum_pipeline_from_spec": "workflows",
     "run_pipeline": "api",
+    "run_pipeline_core_from_molecule_spec": "workflows",
     "run_pipeline_core_from_spec": "workflows",
-    "run_reference_from_spec": "workflows",
     "run_rhf": "scf",
     "run_rhf_from_integrals": "scf",
     "run_rks_from_integrals": "scf",
@@ -227,8 +218,6 @@ _EXPORTS = {
     "solve_unrestricted_tda": "tddft",
     "spin_summed_density_matrix": "upstreams",
     "transition_dipoles": "spectra",
-    "unrestricted_reference_from_pyscf": "reference_legacy",
-    "unrestricted_reference_from_pyscf_with_jax_uks": "reference_legacy",
     "water_experiment_config": "workflows",
     "water_legacy_experiment_config": "workflows",
     "water_strict_jax_experiment_config": "workflows",
@@ -236,7 +225,18 @@ _EXPORTS = {
     "xc_type": "jax_libxc",
 }
 
-__all__ = sorted(_NAMESPACE_EXPORTS) + list(_EXPORTS)
+_LEGACY_EXPORTS = {
+    "ReferenceRun": "workflows",
+    "ReferenceSpecConfig": "workflows",
+    "build_reference": "api",
+    "put_reference_on_device": "device",
+    "put_restricted_reference_on_device": "device",
+    "run_reference_from_spec": "workflows",
+}
+
+_ALL_EXPORTS = _PUBLIC_EXPORTS | _LEGACY_EXPORTS
+
+__all__ = sorted(_NAMESPACE_EXPORTS) + list(_PUBLIC_EXPORTS)
 
 
 def __getattr__(name: str) -> Any:
@@ -244,9 +244,9 @@ def __getattr__(name: str) -> Any:
         module = import_module(f".{name}", __name__)
         globals()[name] = module
         return module
-    if name not in _EXPORTS:
+    if name not in _ALL_EXPORTS:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    module = import_module(f".{_EXPORTS[name]}", __name__)
+    module = import_module(f".{_ALL_EXPORTS[name]}", __name__)
     value = getattr(module, name)
     globals()[name] = value
     return value

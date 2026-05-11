@@ -60,6 +60,8 @@ def test_tda_from_restricted_mf_stores_fields_and_spectra(monkeypatch):
     assert captured["method"] == "tda"
     assert captured["nstates"] == 2
     assert captured["init"]["molecule"] is reference
+    assert td.molecule is reference
+    assert td.reference is td.molecule
     assert captured["init"]["xc_functional"].xc_spec == "pbe"
     np.testing.assert_allclose(np.asarray(td.oscillator_strength()), np.ones(2))
     assert td.transition_dipole().shape == (2, 3)
@@ -102,6 +104,7 @@ def test_tddft_from_raw_restricted_reference_uses_kernel(monkeypatch):
     assert captured["method"] == "kernel"
     assert captured["nstates"] == 3
     assert captured["init"]["molecule"] is reference
+    assert td.molecule is reference
     assert captured["init"]["xc_functional"] is xc_functional
     assert captured["init"]["xc_params"] is xc_params
 

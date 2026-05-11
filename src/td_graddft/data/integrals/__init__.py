@@ -17,8 +17,10 @@ from .one_electron import (
 )
 from .screening import schwarz_bounds
 from .two_electron import eri_element, eri_pair_matrix_packed, eri_tensor, eri_tensor_screened, precompile_eri_kernels
+from .libcint_mol import build_libcint_mol, libcint_intor_name
 
 __all__ = [
+    "build_libcint_mol",
     "overlap_matrix",
     "overlap_hcore_matrices",
     "overlap_element",
@@ -38,4 +40,5 @@ __all__ = [
     "eri_tensor",
     "eri_tensor_screened",
     "schwarz_bounds",
+    "libcint_intor_name",
 ]

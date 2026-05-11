@@ -66,11 +66,14 @@ def test_user_scripts_use_neural_xc_long_range_facade():
     assert offenders == []
 
 
-def test_user_scripts_avoid_old_dm21_like_names():
+def test_user_scripts_avoid_old_neural_xc_names():
     offenders = []
+    legacy_class = "DM21" "Like"
+    legacy_factory = "make_" "dm21_" "like"
+    legacy_snake = "dm21_" "like"
     for path in TOOLS + EXAMPLES:
         text = path.read_text()
-        if "DM21Like" in text or "dm21_like" in text or "make_dm21_like" in text:
+        if legacy_class in text or legacy_snake in text or legacy_factory in text:
             offenders.append(str(path))
 
     assert offenders == []

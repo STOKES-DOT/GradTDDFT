@@ -4,7 +4,7 @@ from ..jax_libxc import b3lyp_component_basis
 from .config import ExperimentConfig, SystemConfig
 from .types import (
     NeuralXCTrainingConfig,
-    ReferenceSpecConfig,
+    MoleculeSpecConfig,
     SimulationConfig,
     SpectrumGridConfig,
 )
@@ -36,45 +36,19 @@ def _benzene_atom_block() -> str:
 
 
 def _make_water_mf(*, basis: str = "sto-3g", xc: str = "b3lyp", grids_level: int = 0):
-    from pyscf import dft, gto
-
-    mol = gto.Mole()
-    mol.atom = _water_atom_block()
-    mol.unit = "Angstrom"
-    mol.basis = basis
-    mol.spin = 0
-    mol.build()
-
-    mf = dft.RKS(mol)
-    mf.xc = xc
-    mf.grids.level = grids_level
-    mf.conv_tol = 1e-10
-    mf.max_cycle = 120
-    mf.kernel()
-    if not mf.converged:
-        raise RuntimeError("PySCF SCF did not converge for the water preset.")
-    return mf
+    del basis, xc, grids_level
+    raise RuntimeError(
+        "Legacy external mean-field presets were removed from the TD-GradDFT runtime. "
+        "Use water_strict_jax_experiment_config instead."
+    )
 
 
 def _make_benzene_mf(*, basis: str = "sto-3g", xc: str = "b3lyp", grids_level: int = 0):
-    from pyscf import dft, gto
-
-    mol = gto.Mole()
-    mol.atom = _benzene_atom_block()
-    mol.unit = "Angstrom"
-    mol.basis = basis
-    mol.spin = 0
-    mol.build()
-
-    mf = dft.RKS(mol)
-    mf.xc = xc
-    mf.grids.level = grids_level
-    mf.conv_tol = 1e-10
-    mf.max_cycle = 120
-    mf.kernel()
-    if not mf.converged:
-        raise RuntimeError("PySCF SCF did not converge for the benzene preset.")
-    return mf
+    del basis, xc, grids_level
+    raise RuntimeError(
+        "Legacy external mean-field presets were removed from the TD-GradDFT runtime. "
+        "Use benzene_strict_jax_experiment_config instead."
+    )
 
 
 def legacy_water_experiment_config(
@@ -158,7 +132,7 @@ def water_strict_jax_experiment_config(
 
     system = SystemConfig(
         name=f"H2O {xc.upper()}/{basis.upper()}",
-        reference_spec=ReferenceSpecConfig(
+        reference_spec=MoleculeSpecConfig(
             atom=_water_atom_block(),
             basis=basis,
             xc=xc,
@@ -207,7 +181,7 @@ def benzene_strict_jax_experiment_config(
 
     system = SystemConfig(
         name=f"Benzene {xc.upper()}/{basis.upper()}",
-        reference_spec=ReferenceSpecConfig(
+        reference_spec=MoleculeSpecConfig(
             atom=_benzene_atom_block(),
             basis=basis,
             xc=xc,

@@ -27,7 +27,6 @@ from .schema import (
     RSHFunctionalTemplate,
     ResolvedRSHParameters,
     SCFXCContributions,
-    make_pyscf_rsh_spec,
 )
 
 
@@ -712,13 +711,6 @@ class BoundTrainableRSHFunctional:
     @property
     def exact_exchange_fraction(self) -> Array:
         return self.resolved_params.exact_exchange_fraction
-
-    def to_pyscf_spec(self):
-        return make_pyscf_rsh_spec(
-            xc_description=self.local_xc_spec,
-            xctype=str(xc_type(self.local_xc_spec)).upper(),
-            resolved_params=self.resolved_params,
-        )
 
     def local_potential(self, density: Array) -> Array:
         del density

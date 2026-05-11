@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/graddft-logo.svg" alt="GradTDDFT logo" width="760">
+</p>
+
 # GradTDDFT / TD-GradDFT
 
 `TD-GradDFT` is a research codebase for time-dependent differentiable density
@@ -142,6 +146,7 @@ export TD_GRADDFT_NVCC=/usr/local/cuda/bin/nvcc
 export TD_GRADDFT_CUDA_ARCH=sm_90
 export TD_GRADDFT_JAX_CACHE_DIR=.jax_cache
 export TD_GRADDFT_CUDA_JK_LIBRARY=/path/to/libtd_graddft_cuda_direct_jk.so
+export TD_GRADDFT_DISABLE_CUDA_RUNTIME_SCF=1  # opt out of cuda_runtime SCF iteration
 ```
 
 If `TD_GRADDFT_CUDA_JK_LIBRARY` points to a prebuilt library, runtime compilation
@@ -365,13 +370,17 @@ mf_direct.kernel()
 
 # CUDA direct J/K when CUDA FFI is available.
 mf_cuda = scf.RKS(mol, xc="pbe0")
-mf_cuda.cuda_direct_scf(execution_device="gpu", precompile=True)
+mf_cuda.cuda_direct_scf(execution_device="gpu")
 mf_cuda.kernel()
 ```
 
 If `execution_device="gpu"` is requested and CUDA FFI is unavailable, the CUDA
 path raises an explicit error. With `execution_device="auto"`, it falls back to
 the non-CUDA path.
+When CUDA FFI is available, `cuda_direct_scf()` defaults to
+`iteration_backend="cuda_runtime"`; pass `iteration_backend="python"` or set
+`TD_GRADDFT_DISABLE_CUDA_RUNTIME_SCF=1` to use the eager Python loop, and pass
+`iteration_backend="lax"` or `precompile=True` for the explicit XLA path.
 
 ### 5. Neural XC Ground-State Training
 

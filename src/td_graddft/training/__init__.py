@@ -38,6 +38,7 @@ from .trainer import (
     make_ground_state_train_step,
     make_runtime_forward_implicit_loss_and_grad,
     make_runtime_forward_implicit_train_step,
+    make_self_consistent_runtime_forward_provider,
 )
 from .excited_state_trainer import (
     ExcitedStateFineTuneConfig,
@@ -82,6 +83,7 @@ __all__ = [
     "make_ground_state_train_step",
     "make_runtime_forward_implicit_loss_and_grad",
     "make_runtime_forward_implicit_train_step",
+    "make_self_consistent_runtime_forward_provider",
     "ExcitedStateFineTuneConfig",
     "ExcitedStateFineTuneResult",
     "ExcitedStateFineTuner",

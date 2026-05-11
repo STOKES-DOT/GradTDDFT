@@ -84,9 +84,9 @@ class GroundStateDatum:
     spectrum_constraint_nstates: int | None = None
 
     @classmethod
-    def from_reference(
+    def from_molecule(
         cls,
-        reference: Any,
+        molecule: Any,
         *,
         target_total_energy: Array | None = None,
         require_hfx: bool = False,
@@ -94,36 +94,38 @@ class GroundStateDatum:
         **kwargs: Any,
     ) -> "GroundStateDatum":
         if require_hfx:
-            if getattr(reference, "hfx_local", None) is None:
+            if getattr(molecule, "hfx_local", None) is None:
                 raise ValueError(
-                    "GroundStateDatum.from_reference(require_hfx=True) requires "
-                    "reference.hfx_local."
+                    "GroundStateDatum.from_molecule(require_hfx=True) requires "
+                    "molecule.hfx_local."
                 )
-            if getattr(reference, "hfx_nu", None) is None:
+            if getattr(molecule, "hfx_nu", None) is None:
                 raise ValueError(
-                    "GroundStateDatum.from_reference(require_hfx=True) requires "
-                    "reference.hfx_nu."
+                    "GroundStateDatum.from_molecule(require_hfx=True) requires "
+                    "molecule.hfx_nu."
                 )
         if functional is not None and bool(getattr(functional, "include_pt2_channel", False)):
-            if getattr(reference, "pt2_local", None) is None:
+            if getattr(molecule, "pt2_local", None) is None:
                 raise ValueError(
                     "Neural XC training with include_pt2_channel=True requires local PT2 "
-                    "features. Build the reference with compute_local_pt2_features=True."
+                    "features. Build the molecule with compute_local_pt2_features=True."
                 )
         target = (
-            getattr(reference, "mf_energy", None)
+            getattr(molecule, "mf_energy", None)
             if target_total_energy is None
             else target_total_energy
         )
         if target is None:
             raise ValueError(
-                "target_total_energy must be provided when reference.mf_energy is missing."
+                "target_total_energy must be provided when molecule.mf_energy is missing."
             )
         return cls(
-            molecule=reference,
+            molecule=molecule,
             target_total_energy=target,
             **kwargs,
         )
+
+    from_reference = from_molecule
 
     @classmethod
     def from_parts(

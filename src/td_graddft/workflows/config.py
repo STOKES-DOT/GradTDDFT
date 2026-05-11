@@ -6,9 +6,9 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from .types import (
+    MoleculeSpecConfig,
     NeuralXCTrainingConfig,
     OutputConfig,
-    ReferenceSpecConfig,
     SimulationConfig,
     SpectrumGridConfig,
 )
@@ -31,7 +31,7 @@ class SystemConfig:
 
     name: str
     mf_builder: Callable[[], Any] | None = None
-    reference_spec: ReferenceSpecConfig | None = None
+    reference_spec: MoleculeSpecConfig | None = None
     output_prefix: str | None = None
     plot_title: str | None = None
     reference_label: str = "PySCF TDDFT"

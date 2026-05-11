@@ -116,7 +116,11 @@ def render_restricted_orbital_surfaces(
         sys.path.insert(0, xyzrender_src)
 
     from xyzrender import load as xr_load, render as xr_render
-    from pyscf.tools import cubegen
+
+    raise RuntimeError(
+        "Orbital cube generation from external PySCF Mole objects is no longer part "
+        "of the TD-GradDFT runtime."
+    )
 
     orbital_dir = outdir / "orbital_surfaces"
     cube_ref_dir = orbital_dir / "cubes" / "reference"
