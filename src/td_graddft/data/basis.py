@@ -670,28 +670,17 @@ def basis_from_pyscf_spec(
     max_l: int = 3,
     **mol_kwargs: Any,
 ) -> CartesianBasis:
-    """Build a JAX cartesian basis directly from PySCF-style molecule/basis inputs.
+    """Build a cartesian basis from molecule/basis inputs without runtime PySCF."""
 
-    This keeps PySCF's basis-library lookup and basis-call syntax while converting
-    the resolved basis into TD-GradDFT's internal cartesian AO representation.
-    """
-
-    try:
-        from pyscf import gto
-    except ModuleNotFoundError as exc:
-        raise ImportError("PySCF is required for basis_from_pyscf_spec.") from exc
-
-    mol = gto.M(
+    del cart, verbose, mol_kwargs
+    return basis_from_spec(
         atom=atom,
         basis=basis,
         unit=unit,
         charge=charge,
         spin=spin,
-        cart=bool(cart),
-        verbose=int(verbose),
-        **mol_kwargs,
+        max_l=max_l,
     )
-    return basis_from_pyscf_mol_cart(mol, max_l=max_l)
 
 
 def basis_from_spec(

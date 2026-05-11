@@ -3,7 +3,7 @@ import os
 import numpy as np
 import pytest
 
-from td_graddft.reference_legacy import unrestricted_reference_from_pyscf_with_jax_uks
+from pyscf_reference import unrestricted_reference_from_pyscf_with_jax_uks
 from td_graddft.scf import UKSConfig
 
 

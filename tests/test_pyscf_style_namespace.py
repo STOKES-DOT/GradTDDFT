@@ -16,10 +16,17 @@ def test_td_graddft_exposes_pyscf_style_namespaces():
         "td_graddft.dft",
         "td_graddft.scf",
         "td_graddft.tdscf",
-        "td_graddft.reference",
     ):
         module = importlib.import_module(name)
         assert module is not None
+
+
+def test_td_graddft_reference_module_is_removed():
+    try:
+        importlib.import_module("td_graddft.reference")
+    except ModuleNotFoundError:
+        return
+    raise AssertionError("td_graddft.reference should not import successfully")
 
 
 def test_dft_namespace_exposes_ks_facades():

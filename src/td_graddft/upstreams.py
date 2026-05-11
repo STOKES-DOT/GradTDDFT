@@ -79,17 +79,3 @@ def ground_state_from_grad_dft_molecule(molecule: Any) -> GroundStateReference:
         metadata=metadata,
     )
 
-
-def ground_state_from_pyscf_mean_field(mf: Any, **kwargs) -> GroundStateReference:
-    """Convert a PySCF mean-field object via GradDFT and wrap the result locally."""
-
-    _require_module(
-        "grad_dft",
-        "Install TD-GradDFT with the '[upstreams]' extra or install GradDFT manually.",
-    )
-    pyscf_interface = _require_module(
-        "grad_dft.interface.pyscf",
-        "GradDFT is installed but its PySCF interface could not be imported.",
-    )
-    molecule = pyscf_interface.molecule_from_pyscf(mf, **kwargs)
-    return ground_state_from_grad_dft_molecule(molecule)

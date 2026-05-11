@@ -19,9 +19,9 @@ from td_graddft.neural_xc import (
     DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_MODE,
     DEFAULT_NEURAL_XC_DENSITY_SUPERVISION,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
-    GRADDFT_DEFAULT_DM21_HIDDEN_DIMS,
-    GRADDFT_DEFAULT_INPUT_FEATURE_MODE,
-    GRADDFT_DEFAULT_NETWORK_ARCHITECTURE,
+    DEFAULT_INPUT_FEATURE_MODE,
+    DEFAULT_NETWORK_ARCHITECTURE,
+    DEFAULT_NETWORK_HIDDEN_DIMS,
 )
 
 
@@ -191,9 +191,9 @@ def test_neural_xc_training_config_defaults_follow_neural_xc_defaults():
     assert config.energy_mae_weight == 1.0
     assert config.orbital_energy_mse_weight == 0.0
     assert config.orbital_energy_mae_weight == 1.0
-    assert config.hidden_dims == GRADDFT_DEFAULT_DM21_HIDDEN_DIMS
-    assert config.network_architecture == GRADDFT_DEFAULT_NETWORK_ARCHITECTURE
-    assert config.input_feature_mode == GRADDFT_DEFAULT_INPUT_FEATURE_MODE
+    assert config.hidden_dims == DEFAULT_NETWORK_HIDDEN_DIMS
+    assert config.network_architecture == DEFAULT_NETWORK_ARCHITECTURE
+    assert config.input_feature_mode == DEFAULT_INPUT_FEATURE_MODE
 
 
 def test_simulation_config_defaults_to_strict_jax_runtime():

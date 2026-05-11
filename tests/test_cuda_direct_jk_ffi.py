@@ -6,8 +6,8 @@ import jax
 import jax.numpy as jnp
 
 from td_graddft.data.basis import basis_from_spec
-from td_graddft.reference import _cuda_direct_basis_cache_key
 from td_graddft.scf import cuda_direct_jk
+from td_graddft.scf.builders import _cuda_direct_basis_cache_key
 from td_graddft.scf.cuda_direct_jk import (
     CudaDirectJKBuilder,
     _primitive_cart_norm,

@@ -87,10 +87,10 @@ class XCTerm:
 
 @dataclass(frozen=True)
 class RSHFunctionalPreset:
-    """Strict literature/PySCF metadata for a named RSH XC functional."""
+    """Strict literature/libxc metadata for a named RSH XC functional."""
 
     name: str
-    pyscf_xc_name: str
+    canonical_xc_name: str
     libxc_id: str
     exchange_form: str
     correlation_form: str
@@ -108,14 +108,14 @@ class RSHFunctionalPreset:
     strict_jax_supported: bool = False
     notes: str = ""
 
-    def to_pyscf_rsh(self) -> tuple[float, float, float]:
+    def to_range_separated_coefficients(self) -> tuple[float, float, float]:
         return (
             self.default_omega,
             self.default_lr_hf_fraction,
             self.default_sr_hf_fraction - self.default_lr_hf_fraction,
         )
 
-    def to_pyscf_rsh_and_hybrid(self) -> tuple[float, float, float]:
+    def to_range_separated_hybrid_coefficients(self) -> tuple[float, float, float]:
         return (
             self.default_omega,
             self.default_lr_hf_fraction,
@@ -186,7 +186,7 @@ class RSHFunctionalPreset:
 _RSH_PRESETS: dict[str, RSHFunctionalPreset] = {
     "lc-wpbe": RSHFunctionalPreset(
         name="lc-wpbe",
-        pyscf_xc_name="LC_WPBE",
+        canonical_xc_name="LC_WPBE",
         libxc_id="HYB_GGA_XC_LC_WPBE",
         exchange_form="SR-PBE exchange plus LR-HF exchange",
         correlation_form="GGA_C_PBE",
@@ -206,7 +206,7 @@ _RSH_PRESETS: dict[str, RSHFunctionalPreset] = {
     ),
     "wb97x-d": RSHFunctionalPreset(
         name="wb97x-d",
-        pyscf_xc_name="WB97X_D",
+        canonical_xc_name="WB97X_D",
         libxc_id="HYB_GGA_XC_WB97X_D",
         exchange_form="SR-B97 exchange plus 22.2036% SR-HF and 100% LR-HF exchange",
         correlation_form="B97 correlation",

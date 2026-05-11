@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import numpy as np
 
-from td_graddft.reference import _restricted_reference_array_packaging
+from td_graddft.scf.builders import _restricted_reference_array_packaging
 
 
 def test_restricted_reference_array_packaging_uses_numpy_for_nontraced_values(monkeypatch):
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
 
     calls = {"stack": 0}
     original_stack = reference_mod.jnp.stack
@@ -38,7 +38,7 @@ def test_restricted_reference_array_packaging_uses_numpy_for_nontraced_values(mo
 
 def test_restricted_reference_array_packaging_keeps_jax_stack_for_traced_values(monkeypatch):
     import jax.numpy as jnp
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
 
     calls = {"stack": 0}
     original_stack = reference_mod.jnp.stack

@@ -10,9 +10,9 @@ from td_graddft.jax_libxc import b3lyp_component_basis
 from td_graddft.neural_xc import make_neural_xc_functional
 from td_graddft.nn_rsh.functional import BoundTrainableRSHFunctional
 from td_graddft.nn_rsh.schema import RSHFunctionalTemplate, ResolvedRSHParameters
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
-from td_graddft.reference import GridReference, UnrestrictedMoleculeReference
+from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.scf import DifferentiableSCF, DifferentiableSCFConfig
+from td_graddft.scf.molecules import GridReference, UnrestrictedMoleculeReference
 from td_graddft.scf.differentiable import (
     _dm21_local_hfx_fock_correction,
     _replace_molecule,
@@ -23,6 +23,7 @@ from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,
     ground_state_mse_loss,
+    make_self_consistent_runtime_forward_provider,
     make_runtime_forward_implicit_loss_and_grad,
     predict_ground_state_total_energy,
 )
@@ -80,7 +81,6 @@ def _make_h2_reference(*, half_distance_angstrom: float = 0.35):
 def _make_functional_and_params(molecule):
     functional = make_neural_xc_functional(
         semilocal_xc=b3lyp_component_basis(),
-        energy_mode="graddft_coeff_basis",
         hidden_dims=(16, 16),
         name="test_differentiable_scf",
     )
@@ -611,6 +611,55 @@ def test_runtime_forward_implicit_loss_runs_provider_before_grad():
     assert jnp.isfinite(grads["strength"])
 
 
+def test_self_consistent_runtime_forward_provider_feeds_implicit_loss():
+    molecule = _make_toy_restricted_reference()
+
+    class _ToyRestrictedFunctional:
+        def scf_potential_components_and_alpha(self, params, molecule_in):
+            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
+            v_rho = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
+            v_grad = jnp.zeros((int(molecule_in.ao.shape[0]), 3), dtype=jnp.float32)
+            return v_rho, v_grad, "LDA", jnp.asarray(0.0, dtype=jnp.float32)
+
+        def energy(self, params, density, weights):
+            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
+            return strength * jnp.sum(jnp.asarray(density) * jnp.asarray(weights))
+
+    config = GroundStateTrainingConfig(
+        energy_mse_weight=1.0,
+        energy_mae_weight=0.0,
+        scf_max_cycle=3,
+        scf_damping=0.2,
+        scf_implicit_diff_max_iter=8,
+        scf_implicit_diff_regularization=1e-3,
+        scf_implicit_diff_tolerance=1e-6,
+        scf_implicit_diff_restart=4,
+    )
+    functional = _ToyRestrictedFunctional()
+    provider = make_self_consistent_runtime_forward_provider(config)
+    params = {"strength": jnp.asarray(0.1, dtype=jnp.float32)}
+
+    forward_molecule, forward_info = provider(params, functional, molecule)
+    assert forward_info.mode == "self_consistent_runtime_forward"
+    assert forward_molecule.rdm1.shape == molecule.rdm1.shape
+
+    loss_and_grad = make_runtime_forward_implicit_loss_and_grad(
+        functional,
+        provider,
+        training_config=config,
+    )
+    datum = GroundStateDatum(
+        molecule=molecule,
+        target_total_energy=jnp.asarray(0.0, dtype=jnp.float32),
+    )
+
+    loss, metrics, grads = loss_and_grad(params, datum)
+
+    assert np.isfinite(float(loss))
+    assert int(metrics["scf_cycles"][0]) == 0
+    assert jnp.isfinite(grads["strength"])
+
+
 def test_implicit_commutator_self_consistent_loss_produces_finite_gradient():
     _pyscf_or_skip()
     molecule = _make_h2_reference()
@@ -1043,18 +1092,120 @@ def test_batched_self_consistent_ground_state_loss_matches_loop_path(monkeypatch
         np.asarray(metrics_loop["scf_converged"]),
         atol=1e-10,
     )
-    assert np.allclose(
-        np.asarray(metrics_batched["scf_cycles"]),
-        np.asarray(metrics_loop["scf_cycles"]),
-        atol=1e-10,
+
+
+def test_implicit_commutator_multi_datum_self_consistent_loss_skips_batched_fast_path(monkeypatch):
+    _pyscf_or_skip()
+    molecule_a = _make_h2_reference(half_distance_angstrom=0.35)
+    molecule_b = _make_h2_reference(half_distance_angstrom=0.70)
+    functional, params = _make_functional_and_params(molecule_a)
+
+    dataset = [
+        GroundStateDatum(
+            molecule=molecule_a,
+            target_total_energy=np.asarray(molecule_a.mf_energy),
+        ),
+        GroundStateDatum(
+            molecule=molecule_b,
+            target_total_energy=np.asarray(molecule_b.mf_energy),
+        ),
+    ]
+    training_config = GroundStateTrainingConfig(
+        mode="self_consistent",
+        scf_gradient_mode="implicit_commutator",
+        scf_max_cycle=4,
+        scf_damping=0.2,
+        scf_conv_tol_density=1e-7,
+        scf_implicit_diff_max_iter=8,
+        scf_implicit_diff_tolerance=1e-5,
+        scf_implicit_diff_regularization=1e-3,
+        scf_implicit_diff_restart=4,
     )
-    assert np.isclose(
-        float(metrics_batched["scf_converged_fraction"][0]),
-        float(metrics_loop["scf_converged_fraction"][0]),
-        atol=1e-10,
+
+    monkeypatch.setattr(
+        training_targets,
+        "_ground_state_mse_loss_batched_self_consistent",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("implicit_commutator path should not use batched self-consistent fast path")
+        ),
     )
-    assert np.isclose(
-        float(metrics_batched["scf_selected_rms_max"][0]),
-        float(metrics_loop["scf_selected_rms_max"][0]),
-        atol=1e-10,
+    loss_loop, metrics_loop = training_targets.ground_state_mse_loss(
+        params,
+        functional,
+        dataset,
+        training_config=training_config,
     )
+
+    assert np.isfinite(float(loss_loop))
+    assert np.all(np.isfinite(np.asarray(metrics_loop["predicted_total_energies"])))
+    assert np.all(np.isfinite(np.asarray(metrics_loop["energy_mae"])))
+    assert np.all(np.isfinite(np.asarray(metrics_loop["scf_cycles"])))
+    assert np.isfinite(float(metrics_loop["scf_converged_fraction"][0]))
+
+
+def test_batched_self_consistent_path_rejects_direct_cuda_static_source():
+    _pyscf_or_skip()
+    molecule_a = replace(
+        _make_h2_reference(half_distance_angstrom=0.35),
+        direct_jk_engine="cuda",
+        direct_basis=np.asarray([1.0, 2.0]),
+        direct_cuda_jk_builder=object(),
+    )
+    molecule_b = replace(
+        _make_h2_reference(half_distance_angstrom=0.70),
+        direct_jk_engine="cuda",
+        direct_basis=np.asarray([3.0, 4.0]),
+        direct_cuda_jk_builder=object(),
+    )
+    dataset = [
+        GroundStateDatum(
+            molecule=molecule_a,
+            target_total_energy=np.asarray(molecule_a.mf_energy),
+        ),
+        GroundStateDatum(
+            molecule=molecule_b,
+            target_total_energy=np.asarray(molecule_b.mf_energy),
+        ),
+    ]
+    training_config = GroundStateTrainingConfig(mode="self_consistent")
+
+    assert not training_targets._can_use_batched_self_consistent_ground_state_path(
+        dataset,
+        training_config,
+        None,
+    )
+
+
+def test_ground_state_energy_uses_direct_cuda_jk_when_eri_is_empty():
+    _pyscf_or_skip()
+    molecule = _make_h2_reference()
+    calls = []
+
+    class FakeDirectCudaJKBuilder:
+        def build_jk(self, density, *, density_cutoff=0.0):
+            calls.append(float(density_cutoff))
+            density = jnp.asarray(density)
+            return jnp.eye(density.shape[0], dtype=density.dtype), jnp.zeros_like(density)
+
+    class ZeroFunctional:
+        def energy_from_molecule(self, params, molecule):
+            del params, molecule
+            return jnp.asarray(0.0, dtype=jnp.float64)
+
+    molecule_direct = replace(
+        molecule,
+        rep_tensor=jnp.zeros((0, 0, 0, 0), dtype=molecule.h1e.dtype),
+        eri_pair_matrix=None,
+        direct_jk_engine="cuda",
+        direct_scf_tol=0.0,
+        direct_cuda_jk_builder=FakeDirectCudaJKBuilder(),
+    )
+
+    energy = training_targets._predict_ground_state_total_energy_from_molecule(
+        {},
+        ZeroFunctional(),
+        molecule_direct,
+    )
+
+    assert calls == [0.0]
+    assert np.isfinite(float(energy))

@@ -6,28 +6,32 @@ from typing import Any, Literal
 import numpy as np
 import jax.numpy as jnp
 
-from .data.basis import basis_from_pyscf_mol_cart
-from .data.integrals import (
+from td_graddft.data.basis import basis_from_pyscf_mol_cart
+from td_graddft.data.integrals import (
     build_hcore,
     dipole_matrix,
     eri_tensor,
     overlap_hcore_matrices,
     overlap_matrix,
 )
-from .jax_libxc import parse_xc
-from .reference import (
-    GridReference,
-    RestrictedMoleculeReference,
-    UnrestrictedMoleculeReference,
-    _charge_center,
-    _eval_grid_ao,
+from td_graddft.jax_libxc import parse_xc
+from td_graddft.neural_xc.inputs import (
     _local_hfx_features_from_basis_dm,
     _local_hfx_features_from_dm,
     _local_pt2_feature_from_restricted_orbitals,
-    _restricted_response_eri_slices_from_mo_tensor,
-    restricted_reference_from_spec_with_jax_rks,
 )
-from .scf import (
+from td_graddft.scf.builders import restricted_reference_from_spec_with_jax_rks
+from td_graddft.scf.features import (
+    _charge_center,
+    _eval_grid_ao,
+    _restricted_response_eri_slices_from_mo_tensor,
+)
+from td_graddft.scf.molecules import (
+    GridReference,
+    RestrictedMoleculeReference,
+    UnrestrictedMoleculeReference,
+)
+from td_graddft.scf import (
     RHFConfig,
     RKSConfig,
     UKSConfig,
@@ -35,7 +39,7 @@ from .scf import (
     run_rks_from_integrals,
     run_uks_from_integrals,
 )
-from .scf.packed_eri import eri_pair_matrix_to_mo_eri_slices
+from td_graddft.scf.packed_eri import eri_pair_matrix_to_mo_eri_slices
 
 
 def _hybrid_fraction_from_mf(mf: Any) -> float:
@@ -59,8 +63,8 @@ def _uses_cuda_direct_jk(cfg: RKSConfig) -> bool:
 
 def _overlap_hcore_for_jax_rks_reference(basis: Any, cfg: RKSConfig) -> tuple[Any, Any]:
     if _uses_cuda_direct_jk(cfg):
-        from .scf.cuda_direct_jk import cuda_ffi_available
-        from .scf.cuda_one_electron import CudaOneElectronBuilder
+        from td_graddft.scf.cuda_direct_jk import cuda_ffi_available
+        from td_graddft.scf.cuda_one_electron import CudaOneElectronBuilder
 
         if cuda_ffi_available():
             return CudaOneElectronBuilder(basis).build_overlap_hcore()
@@ -274,7 +278,7 @@ def restricted_reference_from_pyscf_with_jax_rhf(
     max_l: int = 1,
     rhf_config: RHFConfig | None = None,
     energy_target: float | None = None,
-    grid_ao_backend: Literal["pyscf", "jax"] = "pyscf",
+    grid_ao_backend: Literal["jax"] = "jax",
     compute_local_hfx_features: bool = False,
     compute_local_hfx_aux: bool = False,
     compute_local_pt2_features: bool = False,
@@ -396,7 +400,7 @@ def restricted_reference_from_pyscf_with_jax_rks(
     rks_config: RKSConfig | None = None,
     xc_spec: str | None = None,
     energy_target: float | None = None,
-    grid_ao_backend: Literal["pyscf", "jax"] = "pyscf",
+    grid_ao_backend: Literal["jax"] = "jax",
     compute_local_hfx_features: bool = False,
     compute_local_hfx_aux: bool = False,
     compute_local_pt2_features: bool = False,
@@ -555,7 +559,7 @@ def restricted_reference_from_pyscf_spec_with_jax_rks(
     grids_level: int = 0,
     max_l: int = 3,
     rks_config: RKSConfig | None = None,
-    grid_ao_backend: Literal["pyscf", "jax"] = "jax",
+    grid_ao_backend: Literal["jax"] = "jax",
     energy_target: float | None = None,
     compute_local_hfx_features: bool = False,
     compute_local_hfx_aux: bool = False,
@@ -597,7 +601,7 @@ def unrestricted_reference_from_pyscf_with_jax_uks(
     uks_config: UKSConfig | None = None,
     xc_spec: str | None = None,
     energy_target: float | None = None,
-    grid_ao_backend: Literal["pyscf", "jax"] = "pyscf",
+    grid_ao_backend: Literal["jax"] = "jax",
     compute_local_hfx_features: bool = False,
     compute_local_hfx_aux: bool = False,
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4),

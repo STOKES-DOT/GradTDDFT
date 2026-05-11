@@ -4,7 +4,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from jaxtyping import Array, PyTree
 
-from .nn_rsh.schema import PySCFRSHSpec, ResolvedRSHParameters, SCFXCContributions
+from .nn_rsh.schema import ResolvedRSHParameters, SCFXCContributions
 
 
 @runtime_checkable
@@ -46,10 +46,6 @@ class BoundRSHFunctionalProtocol(Protocol):
 
     def scf_contributions(self, molecule: Any) -> SCFXCContributions:
         """Return all SCF-facing XC contributions for the bound molecule."""
-
-    def to_pyscf_spec(self) -> PySCFRSHSpec:
-        """Return a PySCF-installable XC spec for the resolved parameters."""
-
 
 @runtime_checkable
 class TrainableRSHFunctionalProtocol(Protocol):

@@ -6,12 +6,10 @@ stacks.
 """
 
 from .schema import (
-    PySCFRSHSpec,
     RSHFunctionalTemplate,
     RSHParameterBounds,
     ResolvedRSHParameters,
     SCFXCContributions,
-    make_pyscf_rsh_spec,
 )
 from .presets import (
     RSHFunctionalPreset,
@@ -47,12 +45,10 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
-    "PySCFRSHSpec",
     "RSHFunctionalTemplate",
     "RSHParameterBounds",
     "ResolvedRSHParameters",
     "SCFXCContributions",
-    "make_pyscf_rsh_spec",
     "RSHFunctionalPreset",
     "canonical_rsh_preset_name",
     "get_rsh_functional_preset",

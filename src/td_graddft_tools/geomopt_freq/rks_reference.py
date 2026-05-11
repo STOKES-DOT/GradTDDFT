@@ -7,7 +7,7 @@ from jaxtyping import Array
 
 from td_graddft.data.integrals.libcint_autodiff import LibcintGeometryGradPolicy
 from td_graddft.data.molecule import ANGSTROM_TO_BOHR, MoleculeSpec, parse_molecule_spec
-from td_graddft.reference import restricted_reference_from_spec_with_jax_rks
+from td_graddft.scf.builders import restricted_molecule_from_spec_with_jax_rks
 from td_graddft.scf import RKSConfig
 
 from .objectives import EnergySurface
@@ -57,7 +57,7 @@ def make_rks_ground_state_surface_from_molecule_spec(
     grids_level: int = 0,
     max_l: int = 3,
     rks_config: RKSConfig | None = None,
-    grid_ao_backend: Literal["pyscf", "jax"] = "jax",
+    grid_ao_backend: Literal["jax"] = "jax",
     integral_backend: Literal["jax", "libcint"] = "libcint",
     libcint_geometry_grad_policy: LibcintGeometryGradPolicy = "analytic",
     label: str = "rks_ground_state",
@@ -87,7 +87,7 @@ def make_rks_ground_state_surface_from_molecule_spec(
             spin=spin,
             unit="Bohr",
         )
-        reference = restricted_reference_from_spec_with_jax_rks(
+        reference = restricted_molecule_from_spec_with_jax_rks(
             atom=current,
             basis=basis,
             xc_spec=xc_spec,

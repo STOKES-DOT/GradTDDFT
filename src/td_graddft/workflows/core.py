@@ -13,18 +13,11 @@ import jax.numpy as jnp
 import optax
 
 from td_graddft import neural_xc, tdscf
-from td_graddft.device import put_reference_on_device, resolve_execution_device
+from td_graddft.device import put_molecule_on_device, resolve_execution_device
 from td_graddft.jax_runtime import configure_jax_persistent_cache
-from td_graddft.reference import (
-    restricted_reference_from_spec_with_jax_rks,
-    unrestricted_reference_from_spec_with_jax_uks,
-)
-from td_graddft.reference_legacy import (
-    restricted_reference_from_pyscf,
-    restricted_reference_from_pyscf_with_jax_rhf,
-    restricted_reference_from_pyscf_with_jax_rks,
-    unrestricted_reference_from_pyscf,
-    unrestricted_reference_from_pyscf_with_jax_uks,
+from td_graddft.scf.builders import (
+    restricted_molecule_from_spec_with_jax_rks,
+    unrestricted_molecule_from_spec_with_jax_uks,
 )
 from td_graddft.scf import RHFConfig, RKSConfig, UKSConfig
 from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
@@ -42,10 +35,10 @@ from td_graddft.training import (
 )
 
 from .types import (
+    MoleculeRun,
+    MoleculeSpecConfig,
     NeuralExcitedStateRun,
     NeuralXCTrainingConfig,
-    ReferenceSpecConfig,
-    ReferenceRun,
     SimulationConfig,
     SpectrumGridConfig,
     SpectrumRun,
@@ -111,14 +104,13 @@ def _canonicalize_graddft_ground_state_config(
     aligned = replace(
         config,
         network_architecture="graddft_residual",
-        energy_mode="graddft_coeff_basis",
-        input_feature_mode="dm21_original",
+        input_feature_mode="canonical",
         hf_input_mode="spin_resolved",
         response_hf_mode="nonlocal_exchange_only",
         response_pt2_mode="local_projected",
         density_supervision="spin_resolved",
-        strict_dm21_feature_alignment=True,
-        dm21_hfx_channels=max(int(config.dm21_hfx_channels), 2),
+        strict_feature_alignment=True,
+        hfx_channels=max(int(config.hfx_channels), 2),
         energy_mse_weight=0.0,
         energy_mae_weight=1.0,
         orbital_energy_mse_weight=0.0,
@@ -183,22 +175,6 @@ def _reference_state_dimensions(reference: Any, occupation_tolerance: float) -> 
     return nocc, nvir, nocc * nvir
 
 
-def _mf_state_capacity(mf: Any, occupation_tolerance: float) -> int:
-    mf_mo_occ = jnp.asarray(getattr(mf, "mo_occ"))
-    mf_mo_coeff = jnp.asarray(getattr(mf, "mo_coeff"))
-    if mf_mo_occ.ndim == 1:
-        mf_nocc = int(jnp.count_nonzero(mf_mo_occ > occupation_tolerance))
-        mf_nvir = int(mf_mo_coeff.shape[-1] - mf_nocc)
-        return mf_nocc * mf_nvir
-    if mf_mo_occ.ndim == 2 and mf_mo_occ.shape[0] == 2:
-        mf_nocc_a = int(jnp.count_nonzero(mf_mo_occ[0] > occupation_tolerance))
-        mf_nvir_a = int(mf_mo_coeff.shape[-1] - mf_nocc_a)
-        mf_nocc_b = int(jnp.count_nonzero(mf_mo_occ[1] > occupation_tolerance))
-        mf_nvir_b = int(mf_mo_coeff.shape[-1] - mf_nocc_b)
-        return mf_nocc_a * mf_nvir_a + mf_nocc_b * mf_nvir_b
-    raise ValueError("Unsupported PySCF orbital occupation shape for TDDFT capacity inference.")
-
-
 def _build_reference(
     mf: Any,
     simulation: SimulationConfig,
@@ -209,94 +185,17 @@ def _build_reference(
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
     hfx_chunk_size: int = 512,
 ):
-    backend = simulation.scf_backend.lower()
-    if backend == "pyscf":
-        if int(getattr(mf.mol, "spin", 0)) != 0:
-            return unrestricted_reference_from_pyscf(mf)
-        return restricted_reference_from_pyscf(
-            mf,
-            compute_local_hfx_features=compute_local_hfx_features,
-            compute_local_hfx_aux=compute_local_hfx_aux,
-            compute_local_pt2_features=compute_local_pt2_features,
-            hfx_omega_values=hfx_omega_values,
-            hfx_chunk_size=hfx_chunk_size,
-        )
-    if backend == "jax_rhf":
-        if int(getattr(mf.mol, "spin", 0)) != 0:
-            raise ValueError("jax_rhf backend only supports closed-shell references.")
-        rhf_config = RHFConfig(
-            max_cycle=simulation.jax_rhf_max_cycle,
-            conv_tol=simulation.jax_rhf_conv_tol,
-            conv_tol_density=simulation.jax_rhf_conv_tol_density,
-        )
-        return restricted_reference_from_pyscf_with_jax_rhf(
-            mf,
-            max_l=simulation.jax_basis_max_l,
-            rhf_config=rhf_config,
-            grid_ao_backend=simulation.jax_grid_ao_backend,
-            compute_local_hfx_features=compute_local_hfx_features,
-            compute_local_hfx_aux=compute_local_hfx_aux,
-            compute_local_pt2_features=compute_local_pt2_features,
-            hfx_omega_values=hfx_omega_values,
-            hfx_chunk_size=hfx_chunk_size,
-            # Keep fixed-density training target aligned with the PySCF reference run.
-            energy_target=float(getattr(mf, "e_tot", jnp.nan)),
-        )
-    if backend == "jax_rks":
-        if int(getattr(mf.mol, "spin", 0)) != 0:
-            raise ValueError("jax_rks backend only supports closed-shell references.")
-        rks_config = RKSConfig(
-            xc_spec=simulation.jax_rks_xc_spec or str(getattr(mf, "xc", "pbe")),
-            max_cycle=simulation.jax_rks_max_cycle,
-            conv_tol=simulation.jax_rks_conv_tol,
-            conv_tol_density=simulation.jax_rks_conv_tol_density,
-            damping=simulation.jax_rks_damping,
-            density_floor=simulation.jax_rks_density_floor,
-            potential_clip=simulation.jax_rks_potential_clip,
-            jk_backend=simulation.jax_rks_jk_backend,
-            df_tol=simulation.jax_rks_df_tol,
-            df_max_rank=simulation.jax_rks_df_max_rank,
-        )
-        return restricted_reference_from_pyscf_with_jax_rks(
-            mf,
-            max_l=simulation.jax_basis_max_l,
-            rks_config=rks_config,
-            xc_spec=simulation.jax_rks_xc_spec,
-            grid_ao_backend=simulation.jax_grid_ao_backend,
-            compute_local_hfx_features=compute_local_hfx_features,
-            compute_local_hfx_aux=compute_local_hfx_aux,
-            compute_local_pt2_features=compute_local_pt2_features,
-            hfx_omega_values=hfx_omega_values,
-            hfx_chunk_size=hfx_chunk_size,
-            # Keep fixed-density training target aligned with the PySCF reference run.
-            energy_target=float(getattr(mf, "e_tot", jnp.nan)),
-        )
-    if backend == "jax_uks":
-        uks_config = UKSConfig(
-            xc_spec=simulation.jax_uks_xc_spec or str(getattr(mf, "xc", "pbe")),
-            max_cycle=simulation.jax_uks_max_cycle,
-            conv_tol=simulation.jax_uks_conv_tol,
-            conv_tol_density=simulation.jax_uks_conv_tol_density,
-            damping=simulation.jax_uks_damping,
-            density_floor=simulation.jax_uks_density_floor,
-            potential_clip=simulation.jax_uks_potential_clip,
-        )
-        return unrestricted_reference_from_pyscf_with_jax_uks(
-            mf,
-            max_l=simulation.jax_basis_max_l,
-            uks_config=uks_config,
-            xc_spec=simulation.jax_uks_xc_spec,
-            grid_ao_backend=simulation.jax_grid_ao_backend,
-            compute_local_hfx_features=compute_local_hfx_features,
-            compute_local_hfx_aux=compute_local_hfx_aux,
-            hfx_omega_values=hfx_omega_values,
-            hfx_chunk_size=hfx_chunk_size,
-            # Keep fixed-density training target aligned with the PySCF reference run.
-            energy_target=float(getattr(mf, "e_tot", jnp.nan)),
-        )
+    del (
+        mf,
+        compute_local_hfx_features,
+        compute_local_hfx_aux,
+        compute_local_pt2_features,
+        hfx_omega_values,
+        hfx_chunk_size,
+    )
     raise ValueError(
-        f"Unsupported scf_backend={simulation.scf_backend!r}. "
-        "Expected 'pyscf', 'jax_rhf', 'jax_rks', or 'jax_uks'."
+        "mf_builder workflows were removed from the runtime. Use molecule_spec "
+        f"(or reference_spec for compatibility) instead of scf_backend={simulation.scf_backend!r}."
     )
 
 
@@ -310,66 +209,22 @@ def run_reference(
     compute_local_pt2_features: bool = False,
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
     hfx_chunk_size: int = 512,
-) -> ReferenceRun:
-    """Run PySCF reference TDDFT and prepare a device-ready molecule reference."""
+) -> MoleculeRun:
+    """Reject legacy mean-field-builder reference workflows."""
 
-    t0_ref = time.perf_counter()
-    exec_device = resolve_execution_device(simulation.execution_device)
-    device_context = jax.default_device(exec_device) if exec_device is not None else nullcontext()
-    with device_context:
-        reference = _build_reference(
-            mf,
-            simulation,
-            compute_local_hfx_features=compute_local_hfx_features,
-            compute_local_hfx_aux=compute_local_hfx_aux,
-            compute_local_pt2_features=compute_local_pt2_features,
-            hfx_omega_values=hfx_omega_values,
-            hfx_chunk_size=hfx_chunk_size,
-        )
-    if simulation.move_reference_to_device and exec_device is not None:
-        reference = put_reference_on_device(reference, device=exec_device)
-    reference_build_elapsed_s = time.perf_counter() - t0_ref
-    nocc, nvir, nstates_full = _reference_state_dimensions(
-        reference,
-        simulation.occupation_tolerance,
+    del (
+        scf_elapsed_s,
+        compute_local_hfx_features,
+        compute_local_hfx_aux,
+        compute_local_pt2_features,
+        hfx_omega_values,
+        hfx_chunk_size,
     )
-    mf_nstates_full = _mf_state_capacity(mf, simulation.occupation_tolerance)
-    nstates_cap = min(nstates_full, mf_nstates_full)
-    nstates = nstates_cap if simulation.nstates <= 0 else min(simulation.nstates, nstates_cap)
-
-    if nstates <= 0:
-        energies = jnp.array([])
-        strengths = jnp.array([])
-        elapsed = 0.0
-    else:
-        t0 = time.perf_counter()
-        td = mf.TDDFT()
-        td.nstates = nstates
-        try:
-            td.kernel()
-        except Exception:
-            td = mf.TDA()
-            td.nstates = nstates
-            td.kernel()
-        elapsed = time.perf_counter() - t0
-        energies = jnp.asarray(td.e)
-        strengths = jnp.asarray(td.oscillator_strength())
-
-    return ReferenceRun(
-        molecule=reference,
-        nocc=nocc,
-        nvir=nvir,
-        nstates=nstates,
-        nstates_full=nstates_full,
-        energies_au=energies,
-        oscillator_strengths=strengths,
-        scf_elapsed_s=scf_elapsed_s + reference_build_elapsed_s,
-        tddft_elapsed_s=elapsed,
-    )
+    return _build_reference(mf, simulation)
 
 
-def run_reference_from_spec(
-    spec: ReferenceSpecConfig,
+def run_molecule_from_spec(
+    spec: MoleculeSpecConfig,
     *,
     simulation: SimulationConfig,
     compute_local_hfx_features: bool = False,
@@ -377,13 +232,13 @@ def run_reference_from_spec(
     compute_local_pt2_features: bool = False,
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
     hfx_chunk_size: int = 512,
-) -> ReferenceRun:
-    """Build a strict-JAX reference and excited states directly from molecule specs."""
+) -> MoleculeRun:
+    """Build a strict-JAX molecule and excited states directly from molecule specs."""
 
     backend = str(simulation.scf_backend).lower()
     if backend not in {"jax_rks", "jax_uks"}:
         raise NotImplementedError(
-            "run_reference_from_spec currently supports simulation.scf_backend in "
+            "run_molecule_from_spec currently supports simulation.scf_backend in "
             "{'jax_rks', 'jax_uks'} only."
         )
 
@@ -411,7 +266,7 @@ def run_reference_from_spec(
                 df_tol=simulation.jax_rks_df_tol,
                 df_max_rank=simulation.jax_rks_df_max_rank,
             )
-            reference_kwargs = dict(
+            molecule_kwargs = dict(
                 atom=spec.atom,
                 basis=spec.basis,
                 xc_spec=rks_xc,
@@ -434,7 +289,7 @@ def run_reference_from_spec(
                 precompile_eri_chunk_size=simulation.jax_precompile_eri_chunk_size,
                 verbose=spec.verbose,
             )
-            reference = restricted_reference_from_spec_with_jax_rks(**reference_kwargs)
+            reference = restricted_molecule_from_spec_with_jax_rks(**molecule_kwargs)
             xc_label = rks_xc
         else:
             uks_xc = simulation.jax_uks_xc_spec or str(spec.xc)
@@ -447,7 +302,7 @@ def run_reference_from_spec(
                 density_floor=simulation.jax_uks_density_floor,
                 potential_clip=simulation.jax_uks_potential_clip,
             )
-            reference = unrestricted_reference_from_spec_with_jax_uks(
+            reference = unrestricted_molecule_from_spec_with_jax_uks(
                 atom=spec.atom,
                 basis=spec.basis,
                 xc_spec=uks_xc,
@@ -471,7 +326,7 @@ def run_reference_from_spec(
             )
             xc_label = uks_xc
     if simulation.move_reference_to_device and exec_device is not None:
-        reference = put_reference_on_device(reference, device=exec_device)
+        reference = put_molecule_on_device(reference, device=exec_device)
     scf_elapsed = time.perf_counter() - t0_ref
 
     nocc, nvir, nstates_full = _reference_state_dimensions(
@@ -512,7 +367,7 @@ def run_reference_from_spec(
         strengths = strengths[valid]
         elapsed = time.perf_counter() - t0_td
 
-    return ReferenceRun(
+    return MoleculeRun(
         molecule=reference,
         nocc=nocc,
         nvir=nvir,
@@ -525,8 +380,11 @@ def run_reference_from_spec(
     )
 
 
+run_reference_from_spec = run_molecule_from_spec
+
+
 def train_neural_xc(
-    reference: ReferenceRun,
+    reference: MoleculeRun,
     config: NeuralXCTrainingConfig,
     spectrum_config: SpectrumGridConfig,
 ) -> TrainingRun:
@@ -538,7 +396,6 @@ def train_neural_xc(
         neural_xc.resolve_coefficient_prior_values(
             config.semilocal_xc,
             config.coefficient_prior_values,
-            energy_mode=config.energy_mode,
         )
         if (
             config.coefficient_prior_values is not None
@@ -550,19 +407,17 @@ def train_neural_xc(
         architecture=config.network_architecture,
         semilocal_xc=config.semilocal_xc,
         n_semilocal_channels=config.n_semilocal_channels,
-        energy_mode=config.energy_mode,
         input_feature_mode=config.input_feature_mode,
         hf_input_mode=config.hf_input_mode,
-        hf_fraction_mode=config.hf_fraction_mode,
         include_pt2_channel=config.include_pt2_channel,
         pt2_channel_mode=config.pt2_channel_mode,
         response_hf_mode=config.response_hf_mode,
         response_pt2_mode=config.response_pt2_mode,
-        strict_dm21_feature_alignment=config.strict_dm21_feature_alignment,
+        strict_feature_alignment=config.strict_feature_alignment,
         hidden_dims=config.hidden_dims,
         squash_offset=config.squash_offset,
         sigmoid_scale_factor=config.sigmoid_scale_factor,
-        dm21_hfx_channels=config.dm21_hfx_channels,
+        hfx_channels=config.hfx_channels,
         name=config.functional_name,
     )
     s1_target = None
@@ -601,7 +456,7 @@ def train_neural_xc(
         if int(ref_energies.size) <= 0 or int(ref_strengths.size) <= 0:
             raise ValueError(
                 "oscillator_strength_constraint_weight != 0 but no reference oscillator "
-                "strengths are available. Set simulation.nstates >= 1 so PySCF returns "
+                "strengths are available. Set simulation.nstates >= 1 so the reference run returns "
                 "excitation energies and oscillator strengths."
             )
         oscillator_strength_nstates = min(
@@ -619,7 +474,7 @@ def train_neural_xc(
         if int(ref_energies.size) <= 0 or int(ref_strengths.size) <= 0:
             raise ValueError(
                 "spectrum_constraint_weight != 0 but no reference spectrum is available. "
-                "Set simulation.nstates >= 1 so PySCF returns excitation energies and oscillator strengths."
+                "Set simulation.nstates >= 1 so the reference run returns excitation energies and oscillator strengths."
             )
         spectrum_nstates = min(
             max(1, int(config.spectrum_constraint_nstates)),
@@ -988,7 +843,7 @@ def train_neural_xc(
 
 
 def run_neural_tddft(
-    reference: ReferenceRun,
+    reference: MoleculeRun,
     training: TrainingRun,
     simulation: SimulationConfig,
 ) -> NeuralExcitedStateRun:
@@ -1072,7 +927,7 @@ def run_neural_tddft(
 
 
 def build_spectrum(
-    reference: ReferenceRun,
+    reference: MoleculeRun,
     neural: NeuralExcitedStateRun,
     grid: SpectrumGridConfig,
     simulation: SimulationConfig,
@@ -1139,20 +994,26 @@ def run_pipeline_core(
     simulation_config: SimulationConfig,
     spectrum_config: SpectrumGridConfig,
     mf_builder: Callable[[], Any] | None = None,
-    reference_spec: ReferenceSpecConfig | None = None,
-) -> tuple[ReferenceRun, TrainingRun, NeuralExcitedStateRun, SpectrumRun]:
-    """Run all compute steps from reference construction to Neural_xc spectrum.
+    molecule_spec: MoleculeSpecConfig | None = None,
+    reference_spec: MoleculeSpecConfig | None = None,
+) -> tuple[MoleculeRun, TrainingRun, NeuralExcitedStateRun, SpectrumRun]:
+    """Run all compute steps from molecule construction to Neural_xc spectrum.
 
-    `reference_spec` is the preferred strict-JAX entrypoint. `mf_builder` is kept
-    as a legacy compatibility path.
+    `molecule_spec` is the preferred strict-JAX entrypoint. `reference_spec` is
+    accepted as a compatibility alias. `mf_builder` is kept as a legacy path.
     """
+
+    if molecule_spec is not None:
+        if reference_spec is not None:
+            raise ValueError("Pass only one of molecule_spec or reference_spec.")
+        reference_spec = molecule_spec
 
     aligned_training_config = _canonicalize_graddft_ground_state_config(training_config)
     has_mf_builder = mf_builder is not None
     has_reference_spec = reference_spec is not None
     if has_mf_builder == has_reference_spec:
         raise ValueError(
-            "run_pipeline_core requires exactly one of mf_builder or reference_spec."
+            "run_pipeline_core requires exactly one of mf_builder or molecule_spec/reference_spec."
         )
 
     compute_local_hfx_features = True
@@ -1162,7 +1023,7 @@ def run_pipeline_core(
     hfx_chunk_size = aligned_training_config.dm21_hfx_chunk_size
 
     if reference_spec is not None:
-        reference = run_reference_from_spec(
+        reference = run_molecule_from_spec(
             reference_spec,
             simulation=simulation_config,
             compute_local_hfx_features=compute_local_hfx_features,
@@ -1173,7 +1034,7 @@ def run_pipeline_core(
         )
     else:
         warnings.warn(
-            "mf_builder is a legacy compatibility path. Prefer reference_spec for the strict-JAX runtime.",
+            "mf_builder is a legacy compatibility path. Prefer molecule_spec for the strict-JAX runtime.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -1197,17 +1058,32 @@ def run_pipeline_core(
     return reference, training, neural, spectrum
 
 
-def run_pipeline_core_from_spec(
+def run_pipeline_core_from_molecule_spec(
     *,
-    reference_spec: ReferenceSpecConfig,
+    molecule_spec: MoleculeSpecConfig,
     training_config: NeuralXCTrainingConfig,
     simulation_config: SimulationConfig,
     spectrum_config: SpectrumGridConfig,
-) -> tuple[ReferenceRun, TrainingRun, NeuralExcitedStateRun, SpectrumRun]:
+) -> tuple[MoleculeRun, TrainingRun, NeuralExcitedStateRun, SpectrumRun]:
     """Compatibility wrapper around the spec-driven strict-JAX pipeline path."""
 
     return run_pipeline_core(
-        reference_spec=reference_spec,
+        molecule_spec=molecule_spec,
+        training_config=training_config,
+        simulation_config=simulation_config,
+        spectrum_config=spectrum_config,
+    )
+
+
+def run_pipeline_core_from_spec(
+    *,
+    reference_spec: MoleculeSpecConfig,
+    training_config: NeuralXCTrainingConfig,
+    simulation_config: SimulationConfig,
+    spectrum_config: SpectrumGridConfig,
+) -> tuple[MoleculeRun, TrainingRun, NeuralExcitedStateRun, SpectrumRun]:
+    return run_pipeline_core_from_molecule_spec(
+        molecule_spec=reference_spec,
         training_config=training_config,
         simulation_config=simulation_config,
         spectrum_config=spectrum_config,

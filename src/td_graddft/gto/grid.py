@@ -2,10 +2,12 @@
 
 from ..data.grid import build_molecular_grid
 from ..data.grid_ao import evaluate_cartesian_ao
-from ..reference import GridReference
+from ..scf.molecules import QuadratureGrid
+
+GridReference = QuadratureGrid
 
 __all__ = [
-    "GridReference",
+    "QuadratureGrid",
     "build_molecular_grid",
     "evaluate_cartesian_ao",
 ]

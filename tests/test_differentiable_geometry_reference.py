@@ -10,7 +10,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from td_graddft.data.molecule import MoleculeSpec, parse_molecule_spec
-from td_graddft.reference import (
+from td_graddft.scf.builders import (
     restricted_reference_from_spec_with_jax_rks,
     unrestricted_reference_from_spec_with_jax_uks,
 )

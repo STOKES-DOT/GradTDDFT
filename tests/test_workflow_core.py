@@ -9,20 +9,21 @@ from td_graddft.workflows.core import (
     _resolve_training_scf_gradient_mode,
     build_spectrum,
     run_pipeline_core,
+    run_pipeline_core_from_molecule_spec,
     run_pipeline_core_from_spec,
 )
 from td_graddft.workflows.types import (
+    MoleculeRun,
+    MoleculeSpecConfig,
     NeuralExcitedStateRun,
     NeuralXCTrainingConfig,
-    ReferenceSpecConfig,
-    ReferenceRun,
     SimulationConfig,
     SpectrumGridConfig,
 )
 
 
 def test_build_spectrum_handles_empty_neural_states():
-    reference = ReferenceRun(
+    reference = MoleculeRun(
         molecule=object(),
         nocc=1,
         nvir=1,
@@ -86,8 +87,7 @@ def test_strict_graddft_ground_state_canonicalizes_network_and_loss_shape():
     aligned = _canonicalize_graddft_ground_state_config(config)
 
     assert aligned.network_architecture == "graddft_residual"
-    assert aligned.input_feature_mode == "dm21_original"
-    assert aligned.energy_mode == "graddft_coeff_basis"
+    assert aligned.input_feature_mode == "canonical"
     assert aligned.energy_mse_weight == 0.0
     assert aligned.energy_mae_weight == 1.0
     assert aligned.orbital_energy_mse_weight == 0.0
@@ -154,14 +154,14 @@ def test_run_pipeline_core_canonicalizes_strict_mode_before_reference_build(monk
     assert captured["compute_local_pt2_features"] is False
     assert captured["hfx_omega_values"] == (0.0, 0.4)
     assert captured["hfx_chunk_size"] == 128
-    assert aligned.input_feature_mode == "dm21_original"
+    assert aligned.input_feature_mode == "canonical"
     assert aligned.network_architecture == "graddft_residual"
 
 
 def test_run_pipeline_core_from_spec_uses_strict_jax_reference_path(monkeypatch):
     captured: dict[str, object] = {}
 
-    def fake_run_reference_from_spec(
+    def fake_run_molecule_from_spec(
         spec,
         *,
         simulation,
@@ -185,8 +185,8 @@ def test_run_pipeline_core_from_spec_uses_strict_jax_reference_path(monkeypatch)
         return "training"
 
     monkeypatch.setattr(
-        "td_graddft.workflows.core.run_reference_from_spec",
-        fake_run_reference_from_spec,
+        "td_graddft.workflows.core.run_molecule_from_spec",
+        fake_run_molecule_from_spec,
     )
     monkeypatch.setattr("td_graddft.workflows.core.train_neural_xc", fake_train_neural_xc)
     monkeypatch.setattr(
@@ -198,15 +198,15 @@ def test_run_pipeline_core_from_spec_uses_strict_jax_reference_path(monkeypatch)
         lambda reference, neural, spectrum_config, simulation_config: "spectrum",
     )
 
-    spec = ReferenceSpecConfig(
+    spec = MoleculeSpecConfig(
         atom="H 0 0 0\nH 0 0 0.74",
         basis="sto-3g",
         xc="pbe",
         unit="Angstrom",
     )
     training_config = NeuralXCTrainingConfig(strict_graddft_ground_state=True)
-    reference, training, neural, spectrum = run_pipeline_core_from_spec(
-        reference_spec=spec,
+    reference, training, neural, spectrum = run_pipeline_core_from_molecule_spec(
+        molecule_spec=spec,
         training_config=training_config,
         simulation_config=SimulationConfig(scf_backend="jax_rks", jax_grid_ao_backend="jax"),
         spectrum_config=SpectrumGridConfig(),
@@ -222,14 +222,14 @@ def test_run_pipeline_core_from_spec_uses_strict_jax_reference_path(monkeypatch)
     assert captured["compute_local_hfx_aux"] is False
     assert captured["compute_local_pt2_features"] is False
     assert captured["hfx_omega_values"] == (0.0, 0.4)
-    assert aligned.input_feature_mode == "dm21_original"
+    assert aligned.input_feature_mode == "canonical"
     assert aligned.network_architecture == "graddft_residual"
 
 
 def test_run_pipeline_core_requests_local_pt2_features_when_pt2_channel_enabled(monkeypatch):
     captured: dict[str, object] = {}
 
-    def fake_run_reference_from_spec(
+    def fake_run_molecule_from_spec(
         spec,
         *,
         simulation,
@@ -244,8 +244,8 @@ def test_run_pipeline_core_requests_local_pt2_features_when_pt2_channel_enabled(
         return "reference"
 
     monkeypatch.setattr(
-        "td_graddft.workflows.core.run_reference_from_spec",
-        fake_run_reference_from_spec,
+        "td_graddft.workflows.core.run_molecule_from_spec",
+        fake_run_molecule_from_spec,
     )
     monkeypatch.setattr(
         "td_graddft.workflows.core.train_neural_xc",
@@ -260,7 +260,7 @@ def test_run_pipeline_core_requests_local_pt2_features_when_pt2_channel_enabled(
         lambda reference, neural, spectrum_config, simulation_config: "spectrum",
     )
 
-    spec = ReferenceSpecConfig(
+    spec = MoleculeSpecConfig(
         atom="H 0 0 0\nH 0 0 0.74",
         basis="sto-3g",
         xc="pbe",
@@ -270,8 +270,8 @@ def test_run_pipeline_core_requests_local_pt2_features_when_pt2_channel_enabled(
         include_pt2_channel=True,
         input_feature_mode="enhanced",
     )
-    run_pipeline_core_from_spec(
-        reference_spec=spec,
+    run_pipeline_core_from_molecule_spec(
+        molecule_spec=spec,
         training_config=training_config,
         simulation_config=SimulationConfig(scf_backend="jax_rks", jax_grid_ao_backend="jax"),
         spectrum_config=SpectrumGridConfig(),

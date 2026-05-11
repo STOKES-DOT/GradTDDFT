@@ -13,7 +13,7 @@ from td_graddft.nn_rsh import (
 )
 from td_graddft.nn_rsh.losses import _neutral_frontier_ip_ea_residuals
 from td_graddft.scf import UKSConfig
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,

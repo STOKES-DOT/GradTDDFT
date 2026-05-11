@@ -397,6 +397,41 @@ def _coulomb_energy(density_matrix: Array, rep_tensor: Array) -> Array:
     return 0.5 * jnp.einsum("ij,ij->", density_matrix, potential)
 
 
+def _direct_cuda_jk_from_molecule(
+    molecule: Any,
+    density_matrix: Array,
+) -> tuple[Array, Array] | None:
+    direct_cuda_jk_builder = getattr(molecule, "direct_cuda_jk_builder", None)
+    if direct_cuda_jk_builder is None:
+        return None
+    if str(getattr(molecule, "direct_jk_engine", "") or "") != "cuda":
+        return None
+    threshold = max(float(getattr(molecule, "direct_scf_tol", 0.0) or 0.0), 0.0)
+    return direct_cuda_jk_builder.build_jk(
+        density_matrix,
+        density_cutoff=threshold,
+    )
+
+
+def _coulomb_potential_from_molecule(molecule: Any, density_matrix: Array) -> Array:
+    direct_jk = _direct_cuda_jk_from_molecule(molecule, density_matrix)
+    if direct_jk is not None:
+        return direct_jk[0]
+    return _coulomb_potential(density_matrix, _repulsion_integrals_from_molecule(molecule))
+
+
+def _exchange_potential_from_molecule(molecule: Any, density_matrix: Array) -> Array:
+    direct_jk = _direct_cuda_jk_from_molecule(molecule, density_matrix)
+    if direct_jk is not None:
+        return direct_jk[1]
+    return _exchange_potential(density_matrix, _repulsion_integrals_from_molecule(molecule))
+
+
+def _coulomb_energy_from_molecule(molecule: Any, density_matrix: Array) -> Array:
+    potential = _coulomb_potential_from_molecule(molecule, density_matrix)
+    return 0.5 * jnp.einsum("ij,ij->", density_matrix, potential)
+
+
 def _repulsion_integrals_from_molecule(molecule: Any) -> Array:
     rep_tensor = getattr(molecule, "rep_tensor", None)
     if rep_tensor is not None:
@@ -1029,7 +1064,7 @@ def _default_charged_state_uks_config(
     )
 
 
-def charged_state_uks_from_reference(
+def charged_state_uks_from_molecule(
     molecule: Any,
     bound_xc: Any,
     *,
@@ -1073,7 +1108,7 @@ def charged_state_uks_from_reference(
     )
 
 
-def _charged_spin_molecule_from_reference(
+def _charged_spin_molecule_from_molecule(
     molecule: Any,
     *,
     charge_delta: int,
@@ -1113,7 +1148,7 @@ def _charged_spin_molecule_from_reference(
     return _replace_molecule_copy(molecule, **updates)
 
 
-def charged_state_differentiable_scf_from_reference(
+def charged_state_differentiable_scf_from_molecule(
     molecule: Any,
     bound_xc: Any,
     *,
@@ -1121,7 +1156,7 @@ def charged_state_differentiable_scf_from_reference(
     training_config: GroundStateTrainingConfig | None = None,
     occupation_tolerance: float = 1e-8,
 ) -> tuple[Any, Any]:
-    charged_initial = _charged_spin_molecule_from_reference(
+    charged_initial = _charged_spin_molecule_from_molecule(
         molecule,
         charge_delta=charge_delta,
         occupation_tolerance=occupation_tolerance,
@@ -1158,14 +1193,14 @@ def koopmans_ip_ea_diagnostic(
         occupation_tolerance=occupation_tolerance,
     )
 
-    cation = charged_state_uks_from_reference(
+    cation = charged_state_uks_from_molecule(
         molecule,
         bound_xc,
         charge_delta=1,
         config=cation_config,
         occupation_tolerance=occupation_tolerance,
     )
-    anion = charged_state_uks_from_reference(
+    anion = charged_state_uks_from_molecule(
         molecule,
         bound_xc,
         charge_delta=-1,
@@ -1196,6 +1231,13 @@ def koopmans_ip_ea_diagnostic(
         cation_result=cation,
         anion_result=anion,
     )
+
+
+charged_state_uks_from_reference = charged_state_uks_from_molecule
+_charged_spin_molecule_from_reference = _charged_spin_molecule_from_molecule
+charged_state_differentiable_scf_from_reference = (
+    charged_state_differentiable_scf_from_molecule
+)
 
 
 def _resolve_variational_frontier_state_and_info(
@@ -2268,7 +2310,6 @@ def density_stationarity_penalty(
     ao = jnp.asarray(molecule.ao)
     ao_deriv1 = getattr(molecule, "ao_deriv1", None)
     weights = jnp.asarray(molecule.grid.weights)
-    rep_tensor = _repulsion_integrals_from_molecule(molecule)
     h1e = jnp.asarray(molecule.h1e)
     v_rho, v_grad, v_tau, v_lapl, xc_kind = _grid_xc_potential_components(
         params,
@@ -2304,8 +2345,8 @@ def density_stationarity_penalty(
         xc_kind=kind,
     )
 
-    j_matrix = _coulomb_potential(density_matrix, rep_tensor)
-    k_matrix = _exchange_potential(density_matrix, rep_tensor)
+    j_matrix = _coulomb_potential_from_molecule(molecule, density_matrix)
+    k_matrix = _exchange_potential_from_molecule(molecule, density_matrix)
     alpha = _effective_exact_exchange_fraction(params, functional, molecule)
     fock = h1e + j_matrix - 0.5 * alpha * k_matrix + vxc_matrix
 
@@ -2350,7 +2391,6 @@ def dm21_scf_regularization_delta_energy(
     ao = jnp.asarray(molecule.ao)
     ao_deriv1 = getattr(molecule, "ao_deriv1", None)
     weights = jnp.asarray(molecule.grid.weights)
-    rep_tensor = _repulsion_integrals_from_molecule(molecule)
     h1e = jnp.asarray(molecule.h1e)
     v_rho, v_grad, v_tau, v_lapl, xc_kind = _grid_xc_potential_components(
         params,
@@ -2386,8 +2426,8 @@ def dm21_scf_regularization_delta_energy(
         xc_kind=kind,
     )
 
-    j_matrix = _coulomb_potential(density_matrix, rep_tensor)
-    k_matrix = _exchange_potential(density_matrix, rep_tensor)
+    j_matrix = _coulomb_potential_from_molecule(molecule, density_matrix)
+    k_matrix = _exchange_potential_from_molecule(molecule, density_matrix)
     alpha = _effective_exact_exchange_fraction(params, functional, molecule)
     fock = h1e + j_matrix - 0.5 * alpha * k_matrix + vxc_matrix
 
@@ -2783,7 +2823,7 @@ def _predict_ground_state_total_energy_from_molecule(
     density_matrix = _spin_summed_density_matrix(molecule)
     non_xc = (
         _one_body_energy(density_matrix, molecule.h1e)
-        + _coulomb_energy(density_matrix, _repulsion_integrals_from_molecule(molecule))
+        + _coulomb_energy_from_molecule(molecule, density_matrix)
         + jnp.asarray(molecule.nuclear_repulsion)
     )
     if hasattr(functional, "energy_from_molecule"):
@@ -2829,12 +2869,22 @@ def _pytree_shape_signature(tree: Any) -> tuple[tuple[tuple[int, ...], str], ...
     return tuple(signature)
 
 
+def _has_direct_cuda_jk_static_source(molecule: Any) -> bool:
+    return (
+        getattr(molecule, "direct_cuda_jk_builder", None) is not None
+        or getattr(molecule, "direct_basis", None) is not None
+        or str(getattr(molecule, "direct_jk_engine", "") or "") == "cuda"
+    )
+
+
 def _can_use_batched_self_consistent_ground_state_path(
     dataset: Sequence[GroundStateDatum],
     cfg: GroundStateTrainingConfig,
     predictor: Callable[[PyTree, Any], tuple[Array, Any]] | None,
 ) -> bool:
     if predictor is not None or cfg.mode != "self_consistent":
+        return False
+    if cfg.scf_gradient_mode != "unrolled":
         return False
     if len(dataset) <= 1:
         return False
@@ -2845,6 +2895,8 @@ def _can_use_batched_self_consistent_ground_state_path(
 
     first_molecule = dataset[0].molecule
     if not is_dataclass(first_molecule):
+        return False
+    if _has_direct_cuda_jk_static_source(first_molecule):
         return False
     first_structure = jax.tree_util.tree_structure(first_molecule)
     first_signature = _pytree_shape_signature(first_molecule)
@@ -2865,6 +2917,8 @@ def _can_use_batched_self_consistent_ground_state_path(
         ):
             return False
         if not is_dataclass(datum.molecule):
+            return False
+        if _has_direct_cuda_jk_static_source(datum.molecule):
             return False
         if jax.tree_util.tree_structure(datum.molecule) != first_structure:
             return False

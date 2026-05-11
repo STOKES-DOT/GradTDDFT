@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import jax.numpy as jnp
 
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.spectra import oscillator_strengths, transition_dipoles
 from td_graddft.tddft._semilocal_response import SemilocalResponseFunctional
 from td_graddft.tddft import RestrictedCasidaTDDFT
@@ -340,3 +340,27 @@ def test_transition_dipoles_and_oscillator_strengths_match_pyscf_xy(xc: str):
     assert n >= 3
     np.testing.assert_allclose(pred_mu[:n], ref_mu[:n], atol=2e-7, rtol=1e-6)
     np.testing.assert_allclose(pred_f[:n], ref_f[:n], atol=2e-7, rtol=1e-6)
+
+
+def test_restricted_b3lyp_water_excitation_energies_match_pyscf_reference():
+    _pyscf_or_skip()
+    mf = _make_water_reference("b3lyp")
+    td = mf.TDDFT()
+    td.nstates = 4
+    td.kernel()
+
+    reference = restricted_reference_from_pyscf(mf)
+    solver = RestrictedCasidaTDDFT(
+        molecule=reference,
+        xc_functional=SemilocalResponseFunctional("b3lyp"),
+    )
+    result = solver.kernel(nstates=4)
+
+    pred_energies = np.asarray(result.excitation_energies, dtype=float)
+    pred_osc = np.asarray(oscillator_strengths(reference, result), dtype=float)
+    ref_energies = np.asarray(td.e, dtype=float)[:4]
+    ref_osc = np.asarray(td.oscillator_strength(), dtype=float)[:4]
+
+    assert pred_energies.shape == (4,)
+    np.testing.assert_allclose(pred_energies, ref_energies, atol=8e-4, rtol=2e-3)
+    np.testing.assert_allclose(pred_osc, ref_osc, atol=2e-3, rtol=2e-2)

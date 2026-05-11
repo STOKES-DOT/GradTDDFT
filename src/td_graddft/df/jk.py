@@ -117,12 +117,12 @@ def eri_to_df_factors_from_basis(
     )
 
 
-def true_df_factors_from_pyscf_mol(
+def true_df_factors_from_libcint_mol(
     mol,
     *,
     auxbasis=None,
 ) -> Array:
-    """Build true density-fitting factors from PySCF/libcint 3c2e/2c2e integrals.
+    """Build true density-fitting factors from libcint 3c2e/2c2e integrals.
 
     Returns factors in the existing TD-GradDFT layout:
     ``df_factors[Q, p, q]`` such that
@@ -133,7 +133,7 @@ def true_df_factors_from_pyscf_mol(
         from pyscf import df
     except ModuleNotFoundError as exc:
         raise ImportError(
-            "PySCF is required to build true DF factors from a Mole."
+            "PySCF/libcint is required to build true DF factors from a libcint Mole handle."
         ) from exc
 
     nao = int(mol.nao_nr())

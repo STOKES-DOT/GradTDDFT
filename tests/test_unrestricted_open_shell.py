@@ -5,7 +5,7 @@ import pytest
 
 from td_graddft.data.basis import basis_from_pyscf_mol_cart
 from td_graddft.data.integrals import eri_element, overlap_element
-from td_graddft.reference_legacy import unrestricted_reference_from_pyscf
+from pyscf_reference import unrestricted_reference_from_pyscf
 from td_graddft.spectra import oscillator_strengths
 from td_graddft.tddft import UnrestrictedTDA
 

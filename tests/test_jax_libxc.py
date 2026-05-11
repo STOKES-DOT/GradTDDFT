@@ -58,11 +58,11 @@ def test_jax_libxc_exposes_rsh_functional_presets_directly():
     assert "lc-wpbe" in names
     assert "wb97x-d" in names
     assert canonical_rsh_preset_name("omega_b97x_d") == "wb97x-d"
-    assert lc.pyscf_xc_name == "LC_WPBE"
+    assert lc.canonical_xc_name == "LC_WPBE"
     assert lc.default_sr_hf_fraction == 0.0
     assert lc.default_lr_hf_fraction == 1.0
     assert lc.default_omega == 0.4
-    assert wb.pyscf_xc_name == "WB97X_D"
+    assert wb.canonical_xc_name == "WB97X_D"
     assert wb.default_sr_hf_fraction == 0.222036
     assert wb.default_lr_hf_fraction == 1.0
     assert wb.default_omega == 0.2

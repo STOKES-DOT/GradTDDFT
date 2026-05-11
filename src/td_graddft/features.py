@@ -609,7 +609,7 @@ def restricted_feature_bundle_from_response_variables(
     )
 
 
-def dm21_like_input_features(
+def enhanced_neural_xc_input_features(
     features: RestrictedFeatureBundle,
     semilocal_energy_density: Array,
     *,
@@ -640,16 +640,16 @@ def dm21_like_input_features(
     )
 
 
-def dm21_original_input_features(
+def canonical_neural_xc_input_features(
     features: RestrictedFeatureBundle,
     hfx_a: Array,
     hfx_b: Array,
     *,
     density_floor: float = 1e-12,
 ) -> Array:
-    """DM21-compatible local feature stack used by NeuralNumInt.
+    """Canonical local feature stack used by the neural XC runtime.
 
-    The returned channels follow GradDFT's ``dm21_coefficient_inputs`` order:
+    The returned channels follow the historical coefficient-input order:
     [rho_a, rho_b, norm_grad_rho, norm_grad_rho_a, norm_grad_rho_b,
      tau_a, tau_b, hfx_a(omega*), hfx_b(omega*)].
     """
@@ -669,7 +669,7 @@ def dm21_original_input_features(
         hfx_b = hfx_b[..., None]
     if hfx_a.shape[:-1] != rho_a.shape or hfx_b.shape[:-1] != rho_b.shape:
         raise ValueError(
-            "DM21 HFX features must broadcast to the grid shape "
+            "Local HFX features must broadcast to the grid shape "
             f"(rho={rho_a.shape}, hfx_a={hfx_a.shape}, hfx_b={hfx_b.shape})."
         )
     leading = jnp.stack(

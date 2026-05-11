@@ -31,21 +31,3 @@ def test_resolve_coefficient_prior_values_returns_none_for_other_basis() -> None
     resolved = resolve_coefficient_prior_values(("lda_x", "gga_x_pbe"))
 
     assert resolved is None
-
-
-def test_resolve_coefficient_prior_values_returns_none_for_dldh_mode() -> None:
-    resolved = resolve_coefficient_prior_values(
-        DEFAULT_NEURAL_XC_SEMILOCAL_XC,
-        energy_mode="dldh_two_lmf",
-    )
-
-    assert resolved is None
-
-
-def test_resolve_coefficient_prior_values_returns_none_for_hybrid_head_mode() -> None:
-    resolved = resolve_coefficient_prior_values(
-        DEFAULT_NEURAL_XC_SEMILOCAL_XC,
-        energy_mode="graddft_coeff_basis_hf_pt2_heads",
-    )
-
-    assert resolved is None

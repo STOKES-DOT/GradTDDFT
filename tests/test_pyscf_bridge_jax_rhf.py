@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from td_graddft.reference_legacy import restricted_reference_from_pyscf_with_jax_rhf
+from pyscf_reference import restricted_reference_from_pyscf_with_jax_rhf
 from td_graddft.scf import RHFConfig
 from td_graddft.workflows.core import run_reference
 from td_graddft.workflows.types import SimulationConfig
@@ -58,7 +58,7 @@ def test_restricted_reference_from_pyscf_with_jax_rhf_shapes_and_target_energy()
     assert np.isclose(float(ref.mf_energy), float(mf.e_tot), atol=1e-12, rtol=1e-12)
 
 
-def test_workflow_reference_stage_accepts_jax_rhf_backend():
+def test_workflow_reference_stage_rejects_legacy_mf_jax_rhf_backend():
     _pyscf_or_skip()
     mf = _make_h2_b3lyp_mf()
 
@@ -67,13 +67,9 @@ def test_workflow_reference_stage_accepts_jax_rhf_backend():
         scf_backend="jax_rhf",
         jax_basis_max_l=1,
     )
-    reference = run_reference(
-        mf,
-        scf_elapsed_s=0.0,
-        simulation=simulation,
-    )
-
-    assert reference.nstates == 1
-    assert reference.energies_au.shape == (1,)
-    assert reference.oscillator_strengths.shape == (1,)
-    assert reference.molecule.rep_tensor.ndim == 4
+    with pytest.raises(ValueError, match="reference_spec"):
+        run_reference(
+            mf,
+            scf_elapsed_s=0.0,
+            simulation=simulation,
+        )

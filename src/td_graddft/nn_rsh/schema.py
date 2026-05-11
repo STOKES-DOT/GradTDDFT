@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 import jax.numpy as jnp
 from jaxtyping import Array
@@ -15,16 +15,6 @@ def _as_optional_array(value: Any | None) -> Array | None:
     if value is None:
         return None
     return jnp.asarray(value)
-
-
-def _make_pyscf_eval_xc_callable(xc_description: str) -> Callable[..., Any]:
-    from pyscf.dft.libxc import eval_xc
-
-    def _eval_xc(xc_code: Any, rho: Any, *args: Any, **kwargs: Any) -> Any:
-        del xc_code
-        return eval_xc(xc_description, rho, *args, **kwargs)
-
-    return _eval_xc
 
 
 @dataclass(frozen=True)
@@ -60,8 +50,9 @@ class ResolvedRSHParameters:
     """Canonical internal RSH parameters.
 
     Internally we prefer `(sr_hf_fraction, lr_hf_fraction, omega)` because it
-    maps cleanly to both the paper notation and the PySCF `rsh=(omega, alpha, beta)`
-    convention without overloading the meaning of `alpha/beta`.
+    maps cleanly to both the paper notation and the conventional
+    `(omega, long_range_hf, short_minus_long_hf)` range-separation tuple
+    without overloading the meaning of `alpha/beta`.
     """
 
     sr_hf_fraction: Array
@@ -91,13 +82,8 @@ class ResolvedRSHParameters:
 
         return self.sr_hf_fraction
 
-    def to_pyscf_rsh(self) -> tuple[Array, Array, Array]:
-        """Return `PySCF`'s `(omega, alpha, beta)` tuple.
-
-        PySCF interprets:
-        - `alpha` as the long-range HF fraction
-        - `beta` as the short-range minus long-range HF increment
-        """
+    def to_range_separated_coefficients(self) -> tuple[Array, Array, Array]:
+        """Return `(omega, long_range_hf, short_minus_long_hf)` coefficients."""
 
         return (
             self.omega,
@@ -105,8 +91,8 @@ class ResolvedRSHParameters:
             self.sr_hf_fraction - self.lr_hf_fraction,
         )
 
-    def to_pyscf_rsh_and_hybrid(self) -> tuple[Array, Array, Array]:
-        """Return `PySCF numint.rsh_and_hybrid_coeff` semantics."""
+    def to_range_separated_hybrid_coefficients(self) -> tuple[Array, Array, Array]:
+        """Return `(omega, long_range_hf, short_range_hf)` coefficients."""
 
         return (
             self.omega,
@@ -161,70 +147,9 @@ class SCFXCContributions:
         object.__setattr__(self, "extra_fock_matrix", extra_fock_matrix)
         object.__setattr__(self, "exact_exchange_fraction", exact_exchange_fraction)
 
-
-@dataclass(frozen=True)
-class PySCFRSHSpec:
-    """Portable PySCF-installable XC spec."""
-
-    xc_description: str | Callable[..., Any]
-    xctype: str
-    hyb: float
-    rsh: tuple[float, float, float]
-
-    def expected_rsh_and_hybrid_coeff(self) -> tuple[float, float, float]:
-        omega, alpha, _beta = self.rsh
-        return (float(omega), float(alpha), float(self.hyb))
-
-    def install_into_numint(self, ni: Any) -> Any:
-        from pyscf.dft.libxc import define_xc_
-
-        description = self.xc_description
-        if isinstance(description, str):
-            # PySCF ignores explicit hyb/rsh when `description` is a raw string.
-            # Wrap the local XC description as a callable so the supplied
-            # range-separation coefficients remain authoritative.
-            description = _make_pyscf_eval_xc_callable(description)
-
-        return define_xc_(
-            ni,
-            description,
-            xctype=str(self.xctype),
-            hyb=float(self.hyb),
-            rsh=tuple(float(value) for value in self.rsh),
-        )
-
-    def install_into_mf(self, mf: Any) -> Any:
-        numint = getattr(mf, "_numint", None)
-        if numint is None:
-            raise AttributeError("PySCF mean-field object must define _numint.")
-        mf._numint = self.install_into_numint(numint)
-        return mf
-
-
-def make_pyscf_rsh_spec(
-    *,
-    xc_description: str | Callable[..., Any],
-    xctype: str,
-    resolved_params: ResolvedRSHParameters,
-) -> PySCFRSHSpec:
-    omega, alpha, beta = resolved_params.to_pyscf_rsh()
-    return PySCFRSHSpec(
-        xc_description=xc_description,
-        xctype=str(xctype),
-        hyb=float(jnp.asarray(resolved_params.sr_hf_fraction)),
-        rsh=(
-            float(jnp.asarray(omega)),
-            float(jnp.asarray(alpha)),
-            float(jnp.asarray(beta)),
-        ),
-    )
-
-
 __all__ = [
-    "PySCFRSHSpec",
     "RSHFunctionalTemplate",
     "RSHParameterBounds",
     "ResolvedRSHParameters",
     "SCFXCContributions",
-    "make_pyscf_rsh_spec",
 ]

@@ -8,7 +8,7 @@ from td_graddft.nn_rsh import (
     make_atom_centered_density_descriptor_fn,
     make_gnn_rsh_functional,
 )
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from pyscf_reference import restricted_reference_from_pyscf
 
 
 def _small_gnn_head() -> RSHGNNHead:

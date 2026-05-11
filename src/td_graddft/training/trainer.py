@@ -75,6 +75,34 @@ def _runtime_forward_implicit_config(
     )
 
 
+def make_self_consistent_runtime_forward_provider(
+    training_config: GroundStateTrainingConfig | None = None,
+) -> RuntimeForwardStateProvider:
+    """Create a Python-controlled SCF forward provider for implicit training.
+
+    The returned provider runs the self-consistent primal state before
+    ``jax.value_and_grad``.  Pair it with
+    ``make_runtime_forward_implicit_loss_and_grad`` so the backward pass uses
+    the existing implicit commutator VJP rather than differentiating through
+    SCF iterations.
+    """
+
+    from .targets import _make_differentiable_scf
+
+    cfg = replace(
+        GroundStateTrainingConfig() if training_config is None else training_config,
+        mode="self_consistent",
+        scf_gradient_mode="unrolled",
+    )
+    scf_solver = _make_differentiable_scf(cfg)
+
+    def provider(params: Any, functional: Any, molecule: Any):
+        forward_params = jax.tree_util.tree_map(jax.lax.stop_gradient, params)
+        return scf_solver.run_runtime_forward(molecule, functional, forward_params)
+
+    return provider
+
+
 def _runtime_forward_molecule(
     provider: RuntimeForwardStateProvider,
     params: Any,

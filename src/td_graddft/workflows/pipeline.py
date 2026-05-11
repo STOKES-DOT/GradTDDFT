@@ -8,10 +8,10 @@ from .core import run_pipeline_core
 from .config import ExperimentConfig
 from .reporting import print_run_summary
 from .types import (
+    MoleculeSpecConfig,
     NeuralXCTrainingConfig,
     OutputConfig,
     PipelineRun,
-    ReferenceSpecConfig,
     SimulationConfig,
     SpectrumGridConfig,
 )
@@ -33,11 +33,17 @@ def run_neural_xc_spectrum_pipeline(
     spectrum_config: SpectrumGridConfig,
     output_config: OutputConfig,
     mf_builder: Callable[[], Any] | None = None,
-    reference_spec: ReferenceSpecConfig | None = None,
+    molecule_spec: MoleculeSpecConfig | None = None,
+    reference_spec: MoleculeSpecConfig | None = None,
 ) -> PipelineRun:
-    """Run reference construction, train Neural_xc, and compare absorption spectra."""
+    """Run molecule construction, train Neural_xc, and compare absorption spectra."""
 
     from .reporting import write_outputs
+
+    if molecule_spec is not None:
+        if reference_spec is not None:
+            raise ValueError("Pass only one of molecule_spec or reference_spec.")
+        reference_spec = molecule_spec
 
     reference, training, neural, spectrum = run_pipeline_core(
         training_config=training_config,
@@ -63,10 +69,10 @@ def run_neural_xc_spectrum_pipeline(
     )
 
 
-def run_neural_xc_spectrum_pipeline_from_spec(
+def run_neural_xc_spectrum_pipeline_from_molecule_spec(
     *,
     system_label: str,
-    reference_spec: ReferenceSpecConfig,
+    molecule_spec: MoleculeSpecConfig,
     training_config: NeuralXCTrainingConfig,
     simulation_config: SimulationConfig,
     spectrum_config: SpectrumGridConfig,
@@ -76,7 +82,26 @@ def run_neural_xc_spectrum_pipeline_from_spec(
 
     return run_neural_xc_spectrum_pipeline(
         system_label=system_label,
-        reference_spec=reference_spec,
+        molecule_spec=molecule_spec,
+        training_config=training_config,
+        simulation_config=simulation_config,
+        spectrum_config=spectrum_config,
+        output_config=output_config,
+    )
+
+
+def run_neural_xc_spectrum_pipeline_from_spec(
+    *,
+    system_label: str,
+    reference_spec: MoleculeSpecConfig,
+    training_config: NeuralXCTrainingConfig,
+    simulation_config: SimulationConfig,
+    spectrum_config: SpectrumGridConfig,
+    output_config: OutputConfig,
+) -> PipelineRun:
+    return run_neural_xc_spectrum_pipeline_from_molecule_spec(
+        system_label=system_label,
+        molecule_spec=reference_spec,
         training_config=training_config,
         simulation_config=simulation_config,
         spectrum_config=spectrum_config,
@@ -96,7 +121,7 @@ class ExperimentPipeline:
             output = self.config.output_config_for(system)
             if system.uses_legacy_mf_builder:
                 warnings.warn(
-                    f"SystemConfig(name={system.name!r}) is using legacy mf_builder. Prefer reference_spec for the strict-JAX runtime.",
+                    f"SystemConfig(name={system.name!r}) is using legacy mf_builder. Prefer molecule_spec for the strict-JAX runtime.",
                     DeprecationWarning,
                     stacklevel=2,
                 )
@@ -129,7 +154,8 @@ def run_and_report(
     output_config: OutputConfig,
     print_all_states: bool = True,
     mf_builder: Callable[[], Any] | None = None,
-    reference_spec: ReferenceSpecConfig | None = None,
+    molecule_spec: MoleculeSpecConfig | None = None,
+    reference_spec: MoleculeSpecConfig | None = None,
 ) -> PipelineRun:
     """Convenience wrapper: run pipeline and print a terminal summary."""
 
@@ -140,16 +166,17 @@ def run_and_report(
         spectrum_config=spectrum_config,
         output_config=output_config,
         mf_builder=mf_builder,
+        molecule_spec=molecule_spec,
         reference_spec=reference_spec,
     )
     print_run_summary(run, print_all_states=print_all_states)
     return run
 
 
-def run_and_report_from_spec(
+def run_and_report_from_molecule_spec(
     *,
     system_label: str,
-    reference_spec: ReferenceSpecConfig,
+    molecule_spec: MoleculeSpecConfig,
     training_config: NeuralXCTrainingConfig,
     simulation_config: SimulationConfig,
     spectrum_config: SpectrumGridConfig,
@@ -160,7 +187,28 @@ def run_and_report_from_spec(
 
     return run_and_report(
         system_label=system_label,
-        reference_spec=reference_spec,
+        molecule_spec=molecule_spec,
+        training_config=training_config,
+        simulation_config=simulation_config,
+        spectrum_config=spectrum_config,
+        output_config=output_config,
+        print_all_states=print_all_states,
+    )
+
+
+def run_and_report_from_spec(
+    *,
+    system_label: str,
+    reference_spec: MoleculeSpecConfig,
+    training_config: NeuralXCTrainingConfig,
+    simulation_config: SimulationConfig,
+    spectrum_config: SpectrumGridConfig,
+    output_config: OutputConfig,
+    print_all_states: bool = True,
+) -> PipelineRun:
+    return run_and_report_from_molecule_spec(
+        system_label=system_label,
+        molecule_spec=reference_spec,
         training_config=training_config,
         simulation_config=simulation_config,
         spectrum_config=spectrum_config,

@@ -25,6 +25,12 @@ from .uks import (
     run_uks_from_integrals,
 )
 from .facade import RKS, UKS
+from .builders import (
+    precompile_restricted_cuda_direct_rks_solver,
+    restricted_molecule_from_spec_with_jax_rks,
+    unrestricted_molecule_from_spec_with_jax_uks,
+)
+from .molecules import QuadratureGrid, RestrictedMolecule, UnrestrictedMolecule
 from .inputs import (
     RKSIntegralInputs,
     UKSIntegralInputs,
@@ -44,15 +50,21 @@ __all__ = [
     "RKSConfig",
     "RKSResult",
     "RKS",
+    "QuadratureGrid",
+    "RestrictedMolecule",
+    "UnrestrictedMolecule",
     "RKSIntegralInputs",
     "TraceableRKSResult",
     "UKSIntegralInputs",
     "build_rks_integral_inputs",
     "build_uks_integral_inputs",
+    "precompile_restricted_cuda_direct_rks_solver",
+    "restricted_molecule_from_spec_with_jax_rks",
     "run_rks_from_integrals",
     "run_rks_from_integrals_traceable",
     "UKSConfig",
     "UKSResult",
     "UKS",
+    "unrestricted_molecule_from_spec_with_jax_uks",
     "run_uks_from_integrals",
 ]

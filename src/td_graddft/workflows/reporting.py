@@ -10,11 +10,11 @@ import numpy as np
 from td_graddft.spectra import HARTREE_TO_EV
 
 from .types import (
+    MoleculeRun,
     NeuralExcitedStateRun,
     OutputConfig,
     OutputPaths,
     PipelineRun,
-    ReferenceRun,
     SpectrumRun,
     TrainingRun,
 )
@@ -41,7 +41,7 @@ def build_output_paths(output: OutputConfig) -> OutputPaths:
 
 def write_state_comparison_csv(
     path: Path,
-    reference: ReferenceRun,
+    reference: MoleculeRun,
     neural: NeuralExcitedStateRun,
 ) -> None:
     with path.open("w", newline="") as handle:
@@ -276,7 +276,7 @@ def plot_training_curves(path: Path, training: TrainingRun, *, title: str) -> No
 
 def write_outputs(
     *,
-    reference: ReferenceRun,
+    reference: MoleculeRun,
     training: TrainingRun,
     neural: NeuralExcitedStateRun,
     spectrum: SpectrumRun,

@@ -7,26 +7,29 @@ New scripts should prefer these helpers over legacy bridge-style imports.
 from __future__ import annotations
 
 from .workflows.types import (
+    MoleculeSpecConfig,
     NeuralXCTrainingConfig,
     OutputConfig,
-    ReferenceSpecConfig,
     SimulationConfig,
     SpectrumGridConfig,
 )
 
-MoleculeConfig = ReferenceSpecConfig
+MoleculeConfig = MoleculeSpecConfig
 
 
-def build_reference(
+def build_molecule(
     molecule: MoleculeConfig,
     *,
     simulation: SimulationConfig,
 ):
-    """Build a strict-JAX reference from molecule specs."""
+    """Build a strict-JAX ground-state molecule from molecule specs."""
 
-    from .workflows.core import run_reference_from_spec
+    from .workflows.core import run_molecule_from_spec
 
-    return run_reference_from_spec(molecule, simulation=simulation)
+    return run_molecule_from_spec(molecule, simulation=simulation)
+
+
+build_reference = build_molecule
 
 
 def run_pipeline(
@@ -36,12 +39,12 @@ def run_pipeline(
     simulation: SimulationConfig,
     spectrum: SpectrumGridConfig,
 ):
-    """Run strict-JAX reference -> training -> TDDFT spectrum core pipeline."""
+    """Run strict-JAX molecule -> training -> TDDFT spectrum core pipeline."""
 
-    from .workflows.core import run_pipeline_core_from_spec
+    from .workflows.core import run_pipeline_core_from_molecule_spec
 
-    return run_pipeline_core_from_spec(
-        reference_spec=molecule,
+    return run_pipeline_core_from_molecule_spec(
+        molecule_spec=molecule,
         training_config=training,
         simulation_config=simulation,
         spectrum_config=spectrum,
@@ -57,13 +60,13 @@ def run_spectrum_pipeline(
     spectrum: SpectrumGridConfig,
     output: OutputConfig,
 ):
-    """Run the strict-JAX spectrum pipeline and write outputs."""
+    """Run the strict-JAX molecule spectrum pipeline and write outputs."""
 
-    from .workflows.pipeline import run_neural_xc_spectrum_pipeline_from_spec
+    from .workflows.pipeline import run_neural_xc_spectrum_pipeline_from_molecule_spec
 
-    return run_neural_xc_spectrum_pipeline_from_spec(
+    return run_neural_xc_spectrum_pipeline_from_molecule_spec(
         system_label=system_label,
-        reference_spec=molecule,
+        molecule_spec=molecule,
         training_config=training,
         simulation_config=simulation,
         spectrum_config=spectrum,
@@ -73,7 +76,7 @@ def run_spectrum_pipeline(
 
 __all__ = [
     "MoleculeConfig",
-    "build_reference",
+    "build_molecule",
     "run_pipeline",
     "run_spectrum_pipeline",
 ]

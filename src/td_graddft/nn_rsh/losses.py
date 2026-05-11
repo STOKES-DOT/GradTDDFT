@@ -248,7 +248,7 @@ def make_self_supervised_rsh_loss(
         _predict_ground_state_total_energy_from_molecule,
         _resolve_training_molecule_with_mode,
         _spin_resolved_orbital_blocks,
-        charged_state_differentiable_scf_from_reference,
+        charged_state_differentiable_scf_from_molecule,
         fractional_charge_linearity_penalty,
         koopmans_ip_ea_diagnostic,
     )
@@ -398,7 +398,7 @@ def make_self_supervised_rsh_loss(
                     frozen_bound_functional,
                     neutral_energy_molecule,
                 )
-                cation_molecule, _ = charged_state_differentiable_scf_from_reference(
+                cation_molecule, _ = charged_state_differentiable_scf_from_molecule(
                     parameter_molecule,
                     bound,
                     charge_delta=1,
@@ -408,7 +408,7 @@ def make_self_supervised_rsh_loss(
                     ),
                     occupation_tolerance=active_scf_cfg.occupation_tolerance,
                 )
-                anion_molecule, _ = charged_state_differentiable_scf_from_reference(
+                anion_molecule, _ = charged_state_differentiable_scf_from_molecule(
                     parameter_molecule,
                     bound,
                     charge_delta=-1,

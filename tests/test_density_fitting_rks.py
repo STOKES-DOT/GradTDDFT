@@ -8,11 +8,11 @@ from td_graddft.df import (
     build_jk_from_df,
     build_jk_from_df_orbitals,
     eri_to_df_factors,
-    true_df_factors_from_pyscf_mol,
+    true_df_factors_from_libcint_mol,
 )
-from td_graddft.reference import restricted_reference_from_spec_with_jax_rks
-from td_graddft.reference import _restricted_response_eri_slices_from_mo_tensor
 from td_graddft.scf import RKSConfig, run_rks_from_integrals
+from td_graddft.scf.builders import restricted_reference_from_spec_with_jax_rks
+from td_graddft.scf.features import _restricted_response_eri_slices_from_mo_tensor
 from td_graddft.scf.direct_jk import build_direct_jk_from_basis, build_direct_jk_incremental
 from td_graddft.scf.packed_eri import build_jk_from_eri_pair_matrix, eri_pair_matrix_to_mo_eri_slices
 from td_graddft.tddft import RestrictedCasidaTDDFT
@@ -42,6 +42,23 @@ def _water_mol():
         charge=0,
         verbose=0,
     )
+
+
+def test_rks_rejects_removed_python_iteration_backend():
+    cfg = RKSConfig(xc_spec="hf", iteration_backend="python")  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="only supports the 'lax' iteration backend"):
+        run_rks_from_integrals(
+            overlap=np.eye(1),
+            hcore=np.zeros((1, 1)),
+            eri=np.zeros((1, 1, 1, 1)),
+            nelectron=2,
+            nuclear_repulsion=0.0,
+            ao=np.ones((1, 1)),
+            ao_deriv1=np.zeros((4, 1, 1)),
+            grid_weights=np.ones(1),
+            config=cfg,
+        )
 
 
 def test_df_jk_matches_dense_eri_contractions_for_water():
@@ -129,7 +146,7 @@ def test_df_orbital_jk_matches_density_jk_for_closed_shell_water():
     assert np.allclose(np.asarray(k_orb), np.asarray(k_density), atol=2e-5, rtol=2e-5)
 
 
-def test_true_df_factors_from_pyscf_mol_match_dense_jk_for_water():
+def test_true_df_factors_from_libcint_mol_match_dense_jk_for_water():
     _pyscf_or_skip()
     mol = _water_mol()
     eri = np.asarray(mol.intor("int2e"), dtype=float)
@@ -139,7 +156,7 @@ def test_true_df_factors_from_pyscf_mol_match_dense_jk_for_water():
 
     j_ref = np.einsum("pqrs,rs->pq", eri, density, optimize=True)
     k_ref = np.einsum("prqs,rs->pq", eri, density, optimize=True)
-    factors = true_df_factors_from_pyscf_mol(mol)
+    factors = true_df_factors_from_libcint_mol(mol)
     j_df, k_df = build_jk_from_df(factors, density)
 
     assert np.allclose(np.asarray(j_df), j_ref, atol=3e-4, rtol=3e-4)
@@ -473,23 +490,10 @@ def test_rks_direct_cuda_engine_uses_cuda_direct_jk_builder(monkeypatch):
     assert np.allclose(np.asarray(k_mat), 2.0)
 
 
-def test_rks_direct_cuda_jit_helper_wraps_only_real_cuda_builders(monkeypatch):
+def test_rks_direct_cuda_jit_helper_was_removed():
     from td_graddft.scf import rks as rks_mod
 
-    captured = {}
-
-    def fake_jit(fn):
-        captured["fn"] = fn
-        return "jitted-call"
-
-    monkeypatch.setattr(rks_mod.jax, "jit", fake_jit)
-
-    fn = lambda density: density
-    real_builder = object.__new__(rks_mod.CudaDirectJKBuilder)
-
-    assert rks_mod._jit_if_real_cuda_builder(real_builder, fn) == "jitted-call"
-    assert captured["fn"] is fn
-    assert rks_mod._jit_if_real_cuda_builder(object(), fn) is fn
+    assert not hasattr(rks_mod, "_jit_if_real_cuda_builder")
 
 
 def test_rks_direct_cuda_engine_respects_zero_pair_cache_limit_for_direct_digest(monkeypatch):
@@ -925,7 +929,7 @@ def test_rks_direct_cuda_engine_ignores_pair_cache_limit_for_default_digest(monk
     assert np.allclose(np.asarray(k_mat), 2.0)
 
 
-def test_direct_cuda_jk_builder_uses_incremental_density_difference(monkeypatch):
+def test_direct_cuda_jk_builder_uses_full_density_under_lax(monkeypatch):
     import td_graddft.scf.rks as rks_mod
 
     monkeypatch.setenv("TD_GRADDFT_CUDA_FULL_ERI_MAX_MIB", "0")
@@ -963,7 +967,7 @@ def test_direct_cuda_jk_builder_uses_incremental_density_difference(monkeypatch)
             jk_backend="direct",
             direct_jk_engine="cuda",
             direct_scf_tol=0.0,
-            iteration_backend="python",
+            iteration_backend="lax",
         ),
         direct_basis=basis,
         with_k=True,
@@ -976,10 +980,10 @@ def test_direct_cuda_jk_builder_uses_incremental_density_difference(monkeypatch)
     )
 
     assert captured["basis"] is basis
-    assert np.allclose(np.asarray(captured["density"]), density - density_last)
+    assert np.allclose(np.asarray(captured["density"]), density)
     assert captured["kwargs"]["density_cutoff"] == 0.0
-    assert np.allclose(np.asarray(j_mat), j_last + 1.0)
-    assert np.allclose(np.asarray(k_mat), k_last + 2.0)
+    assert np.allclose(np.asarray(j_mat), 1.0)
+    assert np.allclose(np.asarray(k_mat), 2.0)
 
 
 def test_direct_cuda_jk_builder_disables_incremental_when_screened(monkeypatch):
@@ -1213,7 +1217,7 @@ def test_direct_cuda_jk_builder_falls_back_to_jax_when_cuda_unavailable(monkeypa
     assert np.asarray(k_mat).shape == density.shape
 
 
-def test_rks_python_iteration_backend_matches_pyscf_for_water():
+def test_rks_lax_iteration_backend_matches_pyscf_for_water():
     _pyscf_or_skip()
     from pyscf import dft
 
@@ -1250,7 +1254,7 @@ def test_rks_python_iteration_backend_matches_pyscf_for_water():
         conv_tol_density=1e-6,
         damping=0.15,
         potential_clip=20.0,
-        iteration_backend="python",
+        iteration_backend="lax",
         jk_backend="direct",
         direct_scf_tol=0.0,
     )
@@ -1420,7 +1424,7 @@ def test_strict_jax_libcint_df_reference_for_water_skips_full_eri(monkeypatch):
     _pyscf_or_skip()
     from pyscf import dft, gto
 
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
 
     orig_intor = gto.mole.Mole.intor
 
@@ -1516,7 +1520,7 @@ def test_libcint_df_reference_preserves_df_backend_when_xc_overrides_config(monk
     _pyscf_or_skip()
     from pyscf import gto
 
-    import td_graddft.reference as reference_mod
+    import td_graddft.scf.builders as reference_mod
 
     orig_intor = gto.mole.Mole.intor
 
