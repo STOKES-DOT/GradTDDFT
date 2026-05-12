@@ -1,9 +1,4 @@
-"""Dedicated neural RSH package.
-
-This namespace isolates range-separated-hybrid-specific schemas, trainable
-functionals, and self-supervised objectives from the generic DFT/training
-stacks.
-"""
+"""Dedicated neural RSH package."""
 
 from .schema import (
     RSHFunctionalTemplate,
@@ -34,15 +29,8 @@ from .functional import (
     make_gnn_rsh_functional,
     make_minimal_trainable_rsh_functional,
 )
+from .losses import make_self_supervised_rsh_loss
 from .api import RSH
-
-
-def __getattr__(name: str):
-    if name == "make_self_supervised_rsh_loss":
-        from .losses import make_self_supervised_rsh_loss
-
-        return make_self_supervised_rsh_loss
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "RSHFunctionalTemplate",

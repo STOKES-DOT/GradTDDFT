@@ -5,15 +5,13 @@ from typing import Any, Callable, Sequence
 
 import jax.numpy as jnp
 from jaxtyping import Array
-from ..jax_xc_adapter import (
+from ..jax_libxc import (
     JAXXCFunctionalInfo,
     JAXXCStatus,
-    jax_xc_functional_info,
-    list_jax_xc_functionals,
-)
-from ..jax_libxc import (
     RestrictedFeatureBundle,
     eval_xc_energy_density,
+    jax_xc_functional_info,
+    list_jax_xc_functionals,
     parse_xc,
     resolve_semilocal_xc_specs,
 )

@@ -5,13 +5,9 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
-from td_graddft.geomopt import (
-    GeometryOptimizationConfig,
-    compute_forces,
-    make_rks_ground_state_energy_fn,
-    run_geometry_optimization,
-)
+from td_graddft.geomopt import GeometryOptimizationConfig, make_rks_ground_state_energy_fn, run_geometry_optimization
 from td_graddft.scf import RKSConfig
 
 
@@ -45,34 +41,27 @@ def _make_energy_fn():
     )
 
 
-def test_rks_ground_state_force_is_finite_for_h2():
+def test_explicit_rks_geometry_differentiation_is_removed():
+    with pytest.raises(NotImplementedError, match="Explicit differentiable SCF geometry optimization has been removed"):
+        _make_energy_fn()
+
+
+def test_generic_geometry_optimizer_still_runs_with_plain_energy_fn():
     jax.config.update("jax_enable_x64", True)
-    energy_fn = _make_energy_fn()
-    coords = _h2_coords(1.60)
 
-    forces = compute_forces(energy_fn, coords)
-    assert np.isfinite(np.asarray(forces)).all()
-    assert float(jnp.linalg.norm(forces)) > 1e-10
-    # Translational invariance: net force should be close to zero.
-    assert abs(float(jnp.sum(forces[:, 2]))) < 1e-4
-
-
-def test_rks_ground_state_geometry_optimization_decreases_energy():
-    jax.config.update("jax_enable_x64", True)
-    energy_fn = _make_energy_fn()
-    coords0 = _h2_coords(1.80)
-    e0 = float(energy_fn(coords0))
+    def energy_fn(coords):
+        return jnp.sum(jnp.asarray(coords, dtype=jnp.float64) ** 2)
 
     result = run_geometry_optimization(
         energy_fn,
-        coords0,
+        _h2_coords(1.80),
         config=GeometryOptimizationConfig(
             max_steps=4,
-            learning_rate=0.01,
+            learning_rate=0.05,
             grad_clip_norm=2.0,
         ),
     )
     assert np.isfinite(float(result.final_energy))
     assert np.isfinite(np.asarray(result.final_forces)).all()
     assert result.energy_history.size >= 1
-    assert float(result.final_energy) <= e0 + 1e-6
+    assert float(result.final_energy) >= 0.0

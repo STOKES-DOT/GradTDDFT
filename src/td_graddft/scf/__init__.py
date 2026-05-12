@@ -1,5 +1,6 @@
 """Pure-JAX SCF solvers."""
 
+from . import core
 from .differentiable import (
     DifferentiableSCF,
     DifferentiableSCFConfig,
@@ -15,9 +16,7 @@ from .rhf import (
 from .rks import (
     RKSConfig,
     RKSResult,
-    TraceableRKSResult,
     run_rks_from_integrals,
-    run_rks_from_integrals_traceable,
 )
 from .uks import (
     UKSConfig,
@@ -54,14 +53,13 @@ __all__ = [
     "RestrictedMolecule",
     "UnrestrictedMolecule",
     "RKSIntegralInputs",
-    "TraceableRKSResult",
     "UKSIntegralInputs",
     "build_rks_integral_inputs",
     "build_uks_integral_inputs",
+    "core",
     "precompile_restricted_cuda_direct_rks_solver",
     "restricted_molecule_from_spec_with_jax_rks",
     "run_rks_from_integrals",
-    "run_rks_from_integrals_traceable",
     "UKSConfig",
     "UKSResult",
     "UKS",

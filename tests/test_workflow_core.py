@@ -54,23 +54,14 @@ def test_build_spectrum_handles_empty_neural_states():
     assert math.isnan(spectrum.low_energy_mae_ev)
 
 
-def test_auto_scf_gradient_mode_prefers_unrolled_without_density_constraints():
+def test_training_scf_gradient_mode_is_always_implicit():
     config = NeuralXCTrainingConfig(
-        scf_gradient_mode="auto",
+        scf_gradient_mode="impl",
         density_constraint_weight=0.0,
         stationarity_constraint_weight=0.0,
         training_mode="fixed_density",
     )
-    assert _resolve_training_scf_gradient_mode(config) == "unrolled"
-
-
-def test_auto_scf_gradient_mode_prefers_implicit_with_density_constraints():
-    config = NeuralXCTrainingConfig(
-        scf_gradient_mode="auto",
-        density_constraint_weight=1e-3,
-        training_mode="fixed_density",
-    )
-    assert _resolve_training_scf_gradient_mode(config) == "implicit_commutator"
+    assert _resolve_training_scf_gradient_mode(config) == "impl"
 
 
 def test_strict_graddft_ground_state_canonicalizes_network_and_loss_shape():

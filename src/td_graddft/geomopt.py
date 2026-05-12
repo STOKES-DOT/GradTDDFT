@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Callable, Literal, Sequence
 
 import jax
@@ -8,19 +8,10 @@ import jax.numpy as jnp
 import optax
 from jaxtyping import Array
 
-from .data import (
-    basis_from_molecule_spec,
-    build_molecular_grid_from_spec,
-    evaluate_cartesian_ao,
-)
-from .data.integrals import build_hcore, eri_tensor, overlap_matrix
 from .data.molecule import (
     ANGSTROM_TO_BOHR,
-    MoleculeSpec,
-    atomic_number,
-    nuclear_repulsion_energy,
 )
-from .scf import RKSConfig, run_rks_from_integrals_traceable
+from .scf import RKSConfig
 
 BOHR_TO_ANGSTROM = 1.0 / ANGSTROM_TO_BOHR
 
@@ -159,69 +150,23 @@ def make_rks_ground_state_energy_fn(
     max_l: int = 3,
     rks_config: RKSConfig | None = None,
 ) -> EnergyFunction:
-    """Build differentiable RKS ground-state energy function E(R)."""
+    """Explicit SCF geometry differentiation has been removed."""
 
-    if len(symbols) == 0:
-        raise ValueError("symbols must contain at least one atom.")
-
-    unit = _normalize_coordinate_unit(coordinate_unit)
-    symbols_norm = tuple(str(sym).strip().capitalize() for sym in symbols)
-    charges = jnp.asarray([atomic_number(sym) for sym in symbols_norm], dtype=jnp.float64)
-    cfg = RKSConfig(xc_spec=str(xc_spec), iteration_backend="lax") if rks_config is None else rks_config
-    if cfg.xc_spec != str(xc_spec):
-        cfg = replace(
-            cfg,
-            xc_spec=str(xc_spec),
-        )
-    if cfg.iteration_backend != "lax":
-        cfg = replace(cfg, iteration_backend="lax")
-
-    def energy_fn(coordinates: Array) -> Array:
-        coords_bohr = _coords_to_bohr(coordinates, unit)
-        if int(coords_bohr.shape[0]) != len(symbols_norm):
-            raise ValueError(
-                f"coordinates natom={coords_bohr.shape[0]} does not match symbols natom={len(symbols_norm)}."
-            )
-        spec = MoleculeSpec(
-            symbols=symbols_norm,
-            coords_bohr=coords_bohr,
-            charges=charges,
-            charge=int(charge),
-            spin=int(spin),
-            unit="Bohr",
-        )
-        if int(spec.spin) != 0:
-            raise NotImplementedError("RKS ground-state geometry currently supports closed-shell spin=0 only.")
-
-        basis_cart = basis_from_molecule_spec(
-            spec,
-            basis=str(basis),
-            max_l=int(max_l),
-        )
-        s = overlap_matrix(basis_cart)
-        h1e = build_hcore(basis_cart)
-        eri = eri_tensor(basis_cart)
-        grid_coords, grid_weights = build_molecular_grid_from_spec(
-            spec,
-            level=int(grids_level),
-        )
-        ao_deriv1 = evaluate_cartesian_ao(basis_cart, grid_coords, deriv=1)
-        ao = ao_deriv1[0]
-
-        rks = run_rks_from_integrals_traceable(
-            overlap=s,
-            hcore=h1e,
-            eri=eri,
-            nelectron=int(spec.nelectron),
-            nuclear_repulsion=nuclear_repulsion_energy(spec),
-            ao=ao,
-            ao_deriv1=ao_deriv1,
-            grid_weights=grid_weights,
-            config=cfg,
-        )
-        return jnp.asarray(rks.total_energy, dtype=jnp.float64)
-
-    return energy_fn
+    del (
+        symbols,
+        basis,
+        xc_spec,
+        charge,
+        spin,
+        coordinate_unit,
+        grids_level,
+        max_l,
+        rks_config,
+    )
+    raise NotImplementedError(
+        "Explicit differentiable SCF geometry optimization has been removed. "
+        "Use implicit differential SCF workflows instead."
+    )
 
 
 def run_rks_ground_state_geometry_optimization(

@@ -263,8 +263,8 @@ class GroundStateCoreTrainingConfig:
     scf_require_convergence: bool = False
     scf_stop_gradient_on_unconverged: bool = False
     scf_stop_gradient_rms_threshold: float | None = None
-    scf_gradient_mode: Literal["unrolled", "implicit_commutator"] = "unrolled"
-    scf_implicit_forward_mode: Literal["unrolled", "input_state"] = "unrolled"
+    scf_gradient_mode: Literal["expl", "impl"] = "impl"
+    scf_implicit_forward_mode: Literal["expl", "input_state"] = "input_state"
     scf_implicit_diff_max_iter: int = 24
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
@@ -348,8 +348,8 @@ class GroundStateTrainingConfig:
     scf_require_convergence: bool = False
     scf_stop_gradient_on_unconverged: bool = False
     scf_stop_gradient_rms_threshold: float | None = None
-    scf_gradient_mode: Literal["unrolled", "implicit_commutator"] = "unrolled"
-    scf_implicit_forward_mode: Literal["unrolled", "input_state"] = "unrolled"
+    scf_gradient_mode: Literal["expl", "impl"] = "impl"
+    scf_implicit_forward_mode: Literal["expl", "input_state"] = "input_state"
     scf_implicit_diff_max_iter: int = 24
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4

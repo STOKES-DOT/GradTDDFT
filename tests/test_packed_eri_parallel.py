@@ -5,7 +5,7 @@ import inspect
 import jax.numpy as jnp
 import numpy as np
 
-from td_graddft.scf import packed_eri
+from td_graddft.data.integrals import packed_eri
 
 
 def _pair_index(nao: int) -> np.ndarray:

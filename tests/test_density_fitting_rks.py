@@ -13,8 +13,8 @@ from td_graddft.df import (
 from td_graddft.scf import RKSConfig, run_rks_from_integrals
 from td_graddft.scf.builders import restricted_reference_from_spec_with_jax_rks
 from td_graddft.scf.features import _restricted_response_eri_slices_from_mo_tensor
-from td_graddft.scf.direct_jk import build_direct_jk_from_basis, build_direct_jk_incremental
-from td_graddft.scf.packed_eri import build_jk_from_eri_pair_matrix, eri_pair_matrix_to_mo_eri_slices
+from td_graddft.data.integrals.jax.direct_jk import build_direct_jk_from_basis, build_direct_jk_incremental
+from td_graddft.data.integrals.jax.packed_eri import build_jk_from_eri_pair_matrix, eri_pair_matrix_to_mo_eri_slices
 from td_graddft.tddft import RestrictedCasidaTDDFT
 from td_graddft.tddft._semilocal_response import SemilocalResponseFunctional
 
@@ -47,7 +47,7 @@ def _water_mol():
 def test_rks_rejects_removed_python_iteration_backend():
     cfg = RKSConfig(xc_spec="hf", iteration_backend="python")  # type: ignore[arg-type]
 
-    with pytest.raises(ValueError, match="only supports the 'lax' iteration backend"):
+    with pytest.raises(ValueError, match="supports \\{'runtime', 'lax'\\}"):
         run_rks_from_integrals(
             overlap=np.eye(1),
             hcore=np.zeros((1, 1)),
@@ -249,7 +249,7 @@ def test_direct_no_df_without_screening_uses_packed_jk_path(monkeypatch):
     density = rng.normal(size=(mol.nao_nr(), mol.nao_nr()))
     density = 0.5 * (density + density.T)
 
-    import td_graddft.scf.direct_jk as direct_jk_mod
+    import td_graddft.data.integrals.jax.direct_jk as direct_jk_mod
 
     def _fail_kernel(*args, **kwargs):
         raise AssertionError("unscreened direct J/K should reuse the packed ERI path")
@@ -312,7 +312,7 @@ def test_direct_no_df_shell_screening_skips_screened_quartets(monkeypatch):
     def _fail_kernel(*args, **kwargs):
         raise AssertionError("screened shell quartets should not run the ERI kernel")
 
-    import td_graddft.scf.direct_jk as direct_jk_mod
+    import td_graddft.data.integrals.jax.direct_jk as direct_jk_mod
 
     monkeypatch.setattr(direct_jk_mod, "_run_quartet_kernel_chunked", _fail_kernel)
     shell_pair_bounds = np.zeros((len(basis.shells), len(basis.shells)))
@@ -724,6 +724,65 @@ def test_rks_direct_cuda_engine_reuses_supplied_pair_eri_cache(monkeypatch):
     assert np.allclose(np.asarray(k_mat), 2.0)
 
 
+def test_rks_direct_cuda_supplied_pair_eri_uses_incremental_update(monkeypatch):
+    from td_graddft.scf import rks as rks_mod
+
+    basis = basis_from_pyscf_spec(
+        "H 0 0 0; H 0 0 0.74",
+        basis="sto-3g",
+        unit="Angstrom",
+        cart=True,
+        spin=0,
+        charge=0,
+        max_l=1,
+    )
+    density_last = np.asarray([[0.8, 0.2], [0.2, 0.7]], dtype=np.float64)
+    density = density_last + np.asarray([[0.01, -0.02], [-0.02, 0.03]], dtype=np.float64)
+    j_last = np.full_like(density, 3.0)
+    k_last = np.full_like(density, 4.0)
+    captured = {}
+    supplied_pair = np.arange(
+        (basis.nao * (basis.nao + 1) // 2) ** 2,
+        dtype=np.float64,
+    ).reshape((basis.nao * (basis.nao + 1) // 2,) * 2)
+
+    class FakeCudaDirectJKBuilder:
+        def __init__(self, direct_basis):
+            captured["basis"] = direct_basis
+
+        def build_jk_from_eri_pair_matrix(self, pair_arg, density_arg):
+            captured["pair"] = pair_arg
+            captured["density"] = density_arg
+            return np.ones_like(np.asarray(density_arg)), 2.0 * np.ones_like(np.asarray(density_arg))
+
+    monkeypatch.setattr(rks_mod, "CudaDirectJKBuilder", FakeCudaDirectJKBuilder)
+    monkeypatch.setattr(rks_mod, "cuda_ffi_available", lambda: True)
+
+    builder = rks_mod._make_jk_builder(
+        None,
+        RKSConfig(
+            jk_backend="direct",
+            direct_jk_engine="cuda",
+            direct_scf_incremental=True,
+        ),
+        eri_pair_matrix=supplied_pair,
+        direct_basis=basis,
+        with_k=True,
+    )
+    j_mat, k_mat = builder(
+        density,
+        density_last=density_last,
+        j_last=j_last,
+        k_last=k_last,
+    )
+
+    assert captured["basis"] is basis
+    assert captured["pair"] is supplied_pair
+    assert np.allclose(np.asarray(captured["density"]), density - density_last)
+    assert np.allclose(np.asarray(j_mat), j_last + 1.0)
+    assert np.allclose(np.asarray(k_mat), k_last + 2.0)
+
+
 def test_rks_lax_direct_cuda_defers_initial_fock_build(monkeypatch):
     import td_graddft.scf.rks as rks_mod
 
@@ -929,7 +988,7 @@ def test_rks_direct_cuda_engine_ignores_pair_cache_limit_for_default_digest(monk
     assert np.allclose(np.asarray(k_mat), 2.0)
 
 
-def test_direct_cuda_jk_builder_uses_full_density_under_lax(monkeypatch):
+def test_direct_cuda_jk_builder_uses_incremental_under_lax_unscreened(monkeypatch):
     import td_graddft.scf.rks as rks_mod
 
     monkeypatch.setenv("TD_GRADDFT_CUDA_FULL_ERI_MAX_MIB", "0")
@@ -967,6 +1026,7 @@ def test_direct_cuda_jk_builder_uses_full_density_under_lax(monkeypatch):
             jk_backend="direct",
             direct_jk_engine="cuda",
             direct_scf_tol=0.0,
+            direct_scf_incremental=True,
             iteration_backend="lax",
         ),
         direct_basis=basis,
@@ -980,13 +1040,13 @@ def test_direct_cuda_jk_builder_uses_full_density_under_lax(monkeypatch):
     )
 
     assert captured["basis"] is basis
-    assert np.allclose(np.asarray(captured["density"]), density)
+    assert np.allclose(np.asarray(captured["density"]), density - density_last)
     assert captured["kwargs"]["density_cutoff"] == 0.0
-    assert np.allclose(np.asarray(j_mat), 1.0)
-    assert np.allclose(np.asarray(k_mat), 2.0)
+    assert np.allclose(np.asarray(j_mat), j_last + 1.0)
+    assert np.allclose(np.asarray(k_mat), k_last + 2.0)
 
 
-def test_direct_cuda_jk_builder_disables_incremental_when_screened(monkeypatch):
+def test_direct_cuda_jk_builder_uses_incremental_when_screened(monkeypatch):
     import td_graddft.scf.rks as rks_mod
 
     basis = basis_from_pyscf_spec(
@@ -1018,7 +1078,12 @@ def test_direct_cuda_jk_builder_disables_incremental_when_screened(monkeypatch):
 
     builder = rks_mod._make_jk_builder(
         None,
-        RKSConfig(jk_backend="direct", direct_jk_engine="cuda", direct_scf_tol=1e-8),
+        RKSConfig(
+            jk_backend="direct",
+            direct_jk_engine="cuda",
+            direct_scf_tol=1e-8,
+            direct_scf_incremental=True,
+        ),
         direct_basis=basis,
         with_k=True,
     )
@@ -1030,13 +1095,13 @@ def test_direct_cuda_jk_builder_disables_incremental_when_screened(monkeypatch):
     )
 
     assert captured["basis"] is basis
-    assert np.allclose(np.asarray(captured["density"]), density)
+    assert np.allclose(np.asarray(captured["density"]), density - density_last)
     assert captured["kwargs"]["density_cutoff"] == 1e-8
-    assert np.allclose(np.asarray(j_mat), 1.0)
-    assert np.allclose(np.asarray(k_mat), 2.0)
+    assert np.allclose(np.asarray(j_mat), j_last + 1.0)
+    assert np.allclose(np.asarray(k_mat), k_last + 2.0)
 
 
-def test_direct_cuda_jk_builder_disables_incremental_under_lax(monkeypatch):
+def test_direct_cuda_jk_builder_uses_incremental_under_lax(monkeypatch):
     import td_graddft.scf.rks as rks_mod
 
     monkeypatch.setenv("TD_GRADDFT_CUDA_PAIR_ERI_MAX_MIB", "0")
@@ -1073,6 +1138,7 @@ def test_direct_cuda_jk_builder_disables_incremental_under_lax(monkeypatch):
             jk_backend="direct",
             direct_jk_engine="cuda",
             direct_scf_tol=0.0,
+            direct_scf_incremental=True,
             iteration_backend="lax",
         ),
         direct_basis=basis,
@@ -1086,10 +1152,10 @@ def test_direct_cuda_jk_builder_disables_incremental_under_lax(monkeypatch):
     )
 
     assert captured["basis"] is basis
-    assert np.allclose(np.asarray(captured["density"]), density)
+    assert np.allclose(np.asarray(captured["density"]), density - density_last)
     assert captured["kwargs"]["density_cutoff"] == 0.0
-    assert np.allclose(np.asarray(j_mat), 1.0)
-    assert np.allclose(np.asarray(k_mat), 2.0)
+    assert np.allclose(np.asarray(j_mat), j_last + 1.0)
+    assert np.allclose(np.asarray(k_mat), k_last + 2.0)
 
 
 def test_direct_cuda_jk_builder_precomputes_screening_metadata_for_lax_screened(monkeypatch):

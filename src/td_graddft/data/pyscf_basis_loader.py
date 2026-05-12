@@ -181,6 +181,7 @@ def _parse_nwchem_block(lines: list[str]) -> list[list[object]]:
     return basis_sorted
 
 
+@lru_cache(maxsize=256)
 def load_basis_from_snapshot(basisname: str, symbol: str) -> list[list[object]]:
     root = _snapshot_root()
     name = _format_basis_name(basisname)

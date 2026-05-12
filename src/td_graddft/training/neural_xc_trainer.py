@@ -97,7 +97,7 @@ class NeuralXCTrainer:
             )
         if training_config is None:
             config = GroundStateTrainingConfig(
-                scf_gradient_mode=scf_gradient_mode or "implicit_commutator",
+                scf_gradient_mode=scf_gradient_mode or "impl",
             )
         elif scf_gradient_mode is None:
             config = training_config

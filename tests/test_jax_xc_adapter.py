@@ -173,6 +173,38 @@ def test_jax_xc_functional_info_classifies_active_mgga_names_dynamically(monkeyp
     assert {"mgga_x_demo", "hyb_mgga_xc_demo"} <= {info.name for info in experimental}
 
 
+def test_jax_libxc_and_adapter_share_functional_metadata_surface(monkeypatch):
+    from td_graddft import jax_libxc, jax_xc_adapter
+
+    class FakeModule:
+        __version__ = "fake"
+
+        @staticmethod
+        def gga_x_rpbe(*, polarized=False):
+            del polarized
+            return lambda rho_fn, r, mo_fn=None: rho_fn(r) * 0.0
+
+    monkeypatch.setattr(
+        jax_xc_adapter,
+        "load_jax_xc",
+        lambda: (jax_xc_adapter._SafeJAXXCModule(FakeModule()), "upstream"),
+    )
+
+    adapter_info = jax_xc_adapter.jax_xc_functional_info("gga_x_rpbe")
+    libxc_info = jax_libxc.jax_xc_functional_info("gga_x_rpbe")
+    adapter_names = tuple(
+        info.name for info in jax_xc_adapter.list_jax_xc_functionals(status="experimental")
+    )
+    libxc_names = tuple(
+        info.name for info in jax_libxc.list_jax_xc_functionals(status="experimental")
+    )
+
+    assert jax_xc_adapter.JAXXCFunctionalInfo is jax_libxc.JAXXCFunctionalInfo
+    assert jax_xc_adapter.JAXXCStatus == jax_libxc.JAXXCStatus
+    assert adapter_info == libxc_info
+    assert adapter_names == libxc_names
+
+
 def test_eval_jax_xc_from_restricted_features_requires_experimental_opt_in(monkeypatch):
     from td_graddft import jax_xc_adapter
     from td_graddft.jax_libxc import RestrictedFeatureBundle

@@ -11,17 +11,17 @@ from jax import core as jax_core
 from jax.lax import Precision
 from jaxtyping import Array, PyTree
 
+from ..data.integrals import build_direct_jk_from_basis, build_jk_from_eri_pair_matrix, shell_pair_schwarz_bounds
 from ..nn_rsh.schema import SCFXCContributions
+from .core import _build_density_from_occ, _diagonalize_fock, _orthogonalizer
 from .rks import (
     _PYSCF_LIKE_DIIS_SPACE,
     _apply_level_shift,
-    _build_density_from_occ,
+    _build_jk,
     _commutator_error,
     _diis_extrapolate_lax,
     _vxc_matrix_from_grid_potential,
 )
-from .direct_jk import build_direct_jk_from_basis, shell_pair_schwarz_bounds
-from .packed_eri import build_jk_from_eri_pair_matrix
 
 
 def _replace_molecule(molecule: Any, **updates: Any) -> Any:
@@ -66,8 +66,6 @@ def _host_array_if_concrete(value: Any) -> np.ndarray | None:
 def _is_unrestricted_reference(molecule: Any) -> bool:
     if getattr(molecule, "nocc_alpha", None) is not None or getattr(molecule, "nocc_beta", None) is not None:
         return True
-    if getattr(molecule, "nocc", None) is not None:
-        return False
 
     mo_occ = _host_array_if_concrete(molecule.mo_occ)
     if mo_occ is not None and mo_occ.ndim == 2 and mo_occ.shape[0] == 2 and not np.allclose(mo_occ[0], mo_occ[1]):
@@ -78,6 +76,8 @@ def _is_unrestricted_reference(molecule: Any) -> bool:
     mo_coeff = _host_array_if_concrete(molecule.mo_coeff)
     if mo_coeff is not None and mo_coeff.ndim == 3 and mo_coeff.shape[0] == 2 and not np.allclose(mo_coeff[0], mo_coeff[1]):
         return True
+    if getattr(molecule, "nocc", None) is not None:
+        return False
     return False
 
 
@@ -419,19 +419,7 @@ def _coulomb_exchange_matrices(
             "DifferentiableSCF requires full AO ERI or packed AO-pair ERI data "
             "to build Coulomb/exchange matrices."
         )
-    j_mat = jnp.einsum(
-        "pqrs,rs->pq",
-        rep,
-        density,
-        precision=Precision.HIGHEST,
-    )
-    k_mat = jnp.einsum(
-        "prqs,rs->pq",
-        rep,
-        density,
-        precision=Precision.HIGHEST,
-    )
-    return j_mat, k_mat
+    return _build_jk(rep, density)
 
 
 def _direct_cuda_coulomb_exchange_matrices(
@@ -811,26 +799,7 @@ def _restricted_hfx_features_from_nu(
     exx_grid = exx.T
     return jnp.stack([exx_grid, exx_grid], axis=0)
 
-
-def _orthogonalizer(overlap: Array, eps: float) -> Array:
-    eigvals, eigvecs = jnp.linalg.eigh(overlap)
-    clipped = jnp.maximum(eigvals, eps)
-    return eigvecs @ jnp.diag(clipped ** -0.5) @ eigvecs.T
-
-
-def _diagonalize_fock(fock: Array, x: Array, eigenvalue_jitter: float = 0.0) -> tuple[Array, Array]:
-    f_ortho = x.T @ fock @ x
-    f_ortho = 0.5 * (f_ortho + f_ortho.T)
-    if eigenvalue_jitter != 0.0:
-        shift = jnp.arange(f_ortho.shape[0], dtype=f_ortho.dtype) * eigenvalue_jitter
-        f_ortho = f_ortho + jnp.diag(shift)
-    mo_energy, coeff_ortho = jnp.linalg.eigh(f_ortho)
-    mo_coeff = x @ coeff_ortho
-    return mo_energy, mo_coeff
-
-
-def _build_density(mo_coeff: Array, mo_occ: Array) -> Array:
-    return _build_density_from_occ(mo_coeff, mo_occ)
+_build_density = _build_density_from_occ
 
 
 @dataclass(frozen=True)
@@ -838,8 +807,8 @@ class DifferentiableSCFConfig:
     """Configuration for fixed-density / self-consistent differentiable SCF."""
 
     mode: Literal["fixed_density", "self_consistent"] = "fixed_density"
-    gradient_mode: Literal["unrolled", "implicit_commutator"] = "unrolled"
-    implicit_forward_mode: Literal["unrolled", "input_state"] = "unrolled"
+    gradient_mode: Literal["expl", "impl"] = "expl"
+    implicit_forward_mode: Literal["expl", "input_state"] = "input_state"
     max_cycle: int = 12
     damping: float = 0.25
     level_shift: float = 0.0
@@ -857,6 +826,20 @@ class DifferentiableSCFConfig:
     implicit_diff_tolerance: float = 1e-6
     implicit_diff_regularization: float = 1e-3
     implicit_diff_restart: int = 12
+
+    def __post_init__(self) -> None:
+        _valid_gradient_modes = {"expl", "impl"}
+        if self.gradient_mode not in _valid_gradient_modes:
+            raise ValueError(
+                f"gradient_mode must be one of {_valid_gradient_modes}, "
+                f"got {self.gradient_mode!r}."
+            )
+        _valid_forward_modes = {"expl", "input_state"}
+        if self.implicit_forward_mode not in _valid_forward_modes:
+            raise ValueError(
+                f"implicit_forward_mode must be one of {_valid_forward_modes}, "
+                f"got {self.implicit_forward_mode!r}."
+            )
 
 
 @dataclass(frozen=True)
@@ -941,14 +924,14 @@ class DifferentiableSCF:
         xc_params: PyTree,
     ) -> tuple[Any, DifferentiableSCFInfo]:
         mode = str(self.config.implicit_forward_mode)
-        if mode == "unrolled":
-            unrolled_cfg = replace(
+        if mode == "expl":
+            expl_cfg = replace(
                 self.config,
-                gradient_mode="unrolled",
-                implicit_forward_mode="unrolled",
+                gradient_mode="expl",
+                implicit_forward_mode="expl",
             )
-            unrolled_solver = DifferentiableSCF(unrolled_cfg)
-            return unrolled_solver._full_scf(
+            expl_solver = DifferentiableSCF(expl_cfg)
+            return expl_solver._full_scf(
                 molecule,
                 xc_functional,
                 jax.lax.stop_gradient(xc_params),
@@ -957,7 +940,7 @@ class DifferentiableSCF:
             density = _spin_summed_density_matrix(molecule)
             return molecule, self._implicit_input_state_info(density)
         raise ValueError(
-            "implicit_forward_mode must be 'unrolled' or 'input_state', "
+            "implicit_forward_mode must be 'expl' or 'input_state', "
             f"got {self.config.implicit_forward_mode!r}."
         )
 
@@ -968,14 +951,14 @@ class DifferentiableSCF:
         xc_params: PyTree,
     ) -> tuple[Any, DifferentiableSCFInfo]:
         mode = str(self.config.implicit_forward_mode)
-        if mode == "unrolled":
-            unrolled_cfg = replace(
+        if mode == "expl":
+            expl_cfg = replace(
                 self.config,
-                gradient_mode="unrolled",
-                implicit_forward_mode="unrolled",
+                gradient_mode="expl",
+                implicit_forward_mode="expl",
             )
-            unrolled_solver = DifferentiableSCF(unrolled_cfg)
-            return unrolled_solver._full_scf_unrestricted(
+            expl_solver = DifferentiableSCF(expl_cfg)
+            return expl_solver._full_scf_unrestricted(
                 molecule,
                 xc_functional,
                 jax.lax.stop_gradient(xc_params),
@@ -984,7 +967,7 @@ class DifferentiableSCF:
             density = _spin_resolved_density_matrix(molecule)
             return molecule, self._implicit_input_state_info(density)
         raise ValueError(
-            "implicit_forward_mode must be 'unrolled' or 'input_state', "
+            "implicit_forward_mode must be 'expl' or 'input_state', "
             f"got {self.config.implicit_forward_mode!r}."
         )
 
@@ -995,14 +978,14 @@ class DifferentiableSCF:
         xc_params: PyTree,
     ) -> tuple[Any, DifferentiableSCFInfo]:
         if _is_unrestricted_reference(molecule):
-            if self.config.gradient_mode == "implicit_commutator":
+            if self.config.gradient_mode == "impl":
                 return self._full_scf_implicit_commutator_unrestricted(
                     molecule,
                     xc_functional,
                     xc_params,
                 )
             return self._full_scf_unrestricted(molecule, xc_functional, xc_params)
-        if self.config.gradient_mode == "implicit_commutator":
+        if self.config.gradient_mode == "impl":
             return self._full_scf_implicit_commutator(molecule, xc_functional, xc_params)
         if getattr(molecule, "h1e", None) is None:
             raise AttributeError("Molecule-like object must define h1e for self-consistent mode.")
@@ -1278,7 +1261,7 @@ class DifferentiableSCF:
 
         This is intended for two-stage training: the forward SCF state is built
         outside ``jax.value_and_grad``, then the implicit commutator VJP consumes
-        that state as ``implicit_forward_mode='input_state'``.  The current
+        that state as ``implicit_forward_mode='input_state'`` (``gradient_mode='impl'``).  The current
         runtime forward path is restricted closed-shell only.
         """
 

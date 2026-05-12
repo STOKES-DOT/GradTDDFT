@@ -2,227 +2,24 @@ from __future__ import annotations
 
 import importlib
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 
-from .jax_libxc import RestrictedFeatureBundle, _eval_xc_per_particle
+from .jax_libxc import (
+    JAXXCFunctionalInfo,
+    JAXXCStatus,
+    RestrictedFeatureBundle,
+    SAFE_JAX_XC_WRAPPED_COMPOSITES,
+    _eval_xc_per_particle,
+    jax_xc_functional_info,
+    list_jax_xc_functionals,
+)
 from .xc_backend.vendor import vendored_jax_xc_info
 
 _JAX_XC_IMPORT_ERRORS = (ImportError, OSError)
-
-_HybridTerm = tuple[float, str, dict[str, float]]
-
-_SAFE_HYBRID_COMPOSITES: dict[str, tuple[_HybridTerm, ...]] = {
-    "pbe0": (
-        (0.75, "gga_x_pbe", {}),
-        (1.0, "gga_c_pbe", {}),
-    ),
-    "pbeh": (
-        (0.75, "gga_x_pbe", {}),
-        (1.0, "gga_c_pbe", {}),
-    ),
-    "hyb_gga_xc_pbeh": (
-        (0.75, "gga_x_pbe", {}),
-        (1.0, "gga_c_pbe", {}),
-    ),
-    "hyb_gga_xc_pbe0_13": (
-        (0.75, "gga_x_pbe", {}),
-        (1.0, "gga_c_pbe", {}),
-    ),
-    "b3lyp": (
-        (0.08, "lda_x", {}),
-        (0.72, "gga_x_b88", {}),
-        (0.19, "lda_c_vwn_rpa", {}),
-        (0.81, "gga_c_lyp", {}),
-    ),
-    "hyb_gga_xc_b3lyp": (
-        (0.08, "lda_x", {}),
-        (0.72, "gga_x_b88", {}),
-        (0.19, "lda_c_vwn_rpa", {}),
-        (0.81, "gga_c_lyp", {}),
-    ),
-    "b3pw91": (
-        (0.08, "lda_x", {}),
-        (0.72, "gga_x_b88", {}),
-        (0.19, "lda_c_pw", {}),
-        (0.81, "gga_c_pw91", {}),
-    ),
-    "hyb_gga_xc_b3pw91": (
-        (0.08, "lda_x", {}),
-        (0.72, "gga_x_b88", {}),
-        (0.19, "lda_c_pw", {}),
-        (0.81, "gga_c_pw91", {}),
-    ),
-    "bhandhlyp": (
-        (0.5, "gga_x_b88", {}),
-        (1.0, "gga_c_lyp", {}),
-    ),
-    "hyb_gga_xc_bhandhlyp": (
-        (0.5, "gga_x_b88", {}),
-        (1.0, "gga_c_lyp", {}),
-    ),
-    "hyb_gga_xc_hse03": (
-        (1.0, "gga_x_wpbeh", {"_omega": 0.0}),
-        (-0.25, "gga_x_wpbeh", {"_omega": 0.18898815748423098}),
-        (1.0, "gga_c_pbe", {}),
-    ),
-    "hyb_gga_xc_hse06": (
-        (1.0, "gga_x_wpbeh", {"_omega": 0.0}),
-        (-0.25, "gga_x_wpbeh", {"_omega": 0.11}),
-        (1.0, "gga_c_pbe", {}),
-    ),
-    "hyb_gga_xc_cam_b3lyp": (
-        (0.35, "gga_x_b88", {}),
-        (0.46, "gga_x_ityh", {"_omega": 0.33}),
-        (0.19, "lda_c_vwn", {}),
-        (0.81, "gga_c_lyp", {}),
-    ),
-}
-
-JAXXCStatus = Literal["strict", "wrapped", "experimental", "unavailable"]
-
-
-@dataclass(frozen=True)
-class JAXXCFunctionalInfo:
-    name: str
-    status: JAXXCStatus
-    family: str
-    reason: str
-    children: tuple[str, ...] = ()
-
-
-_STRICT_FUNCTIONALS = {
-    "lda_x",
-    "lda_c_pw",
-    "lda_c_vwn",
-    "lda_c_vwn_rpa",
-    "gga_x_b88",
-    "gga_x_pbe",
-    "gga_x_wpbeh",
-    "gga_c_lyp",
-    "gga_c_pbe",
-}
-
-_EXPERIMENTAL_FUNCTIONALS = {
-    "gga_x_rpbe",
-    "gga_x_wc",
-    "gga_x_pw91",
-    "hyb_gga_xc_b97",
-    "hyb_gga_xc_b97_1",
-    "hyb_gga_xc_wb97x",
-}
-
-_KNOWN_MISMATCH_FUNCTIONALS = {
-    "hyb_gga_xc_b97",
-    "hyb_gga_xc_b97_1",
-    "hyb_gga_xc_wb97x",
-}
-
-
-def _is_mgga_name(name: str) -> bool:
-    return name.startswith("mgga_") or name.startswith("hyb_mgga_")
-
-
-def _family_from_name(name: str) -> str:
-    if name.startswith("lda_"):
-        return "LDA"
-    if _is_mgga_name(name):
-        return "MGGA"
-    if name.startswith("gga_"):
-        return "GGA"
-    if name.startswith("hyb_gga_"):
-        return "HYB_GGA"
-    return "unknown"
-
-
-def _active_jax_xc_has(name: str) -> bool:
-    module, _ = load_jax_xc()
-    return hasattr(module, name)
-
-
-def _active_jax_xc_names() -> set[str]:
-    module, _ = load_jax_xc()
-    raw_module = getattr(module, "_module", module)
-    names = {name for name in dir(raw_module) if not name.startswith("_")}
-    mapping = getattr(raw_module, "_MAPPING", None)
-    if mapping is not None:
-        names.update(str(name) for name in mapping)
-    names.update(_SAFE_HYBRID_COMPOSITES)
-    return names
-
-
-def jax_xc_functional_info(name: str) -> JAXXCFunctionalInfo:
-    canonical = str(name).strip().lower()
-    if canonical in _STRICT_FUNCTIONALS:
-        return JAXXCFunctionalInfo(
-            name=canonical,
-            status="strict",
-            family=_family_from_name(canonical),
-            reason="Implemented by TD-GradDFT's strict local JAX evaluator.",
-        )
-    if canonical in _SAFE_HYBRID_COMPOSITES:
-        children = tuple(child for _, child, _ in _SAFE_HYBRID_COMPOSITES[canonical])
-        return JAXXCFunctionalInfo(
-            name=canonical,
-            status="wrapped",
-            family=_family_from_name(canonical),
-            reason="Reconstructed by TD-GradDFT from safe semilocal child components.",
-            children=children,
-        )
-    if canonical in _EXPERIMENTAL_FUNCTIONALS and _active_jax_xc_has(canonical):
-        reason = "Available from jax_xc but not validated for Neural XC training."
-        if canonical in _KNOWN_MISMATCH_FUNCTIONALS:
-            reason = (
-                "B97-family jax_xc output has benchmark mismatches against PySCF/libxc; "
-                "explicit experimental opt-in is required."
-            )
-        return JAXXCFunctionalInfo(
-            name=canonical,
-            status="experimental",
-            family=_family_from_name(canonical),
-            reason=reason,
-        )
-    if _is_mgga_name(canonical) and _active_jax_xc_has(canonical):
-        reason = (
-            "MGGA functional is available from jax_xc and requires an orbital-derived "
-            "tau/mo_fn bridge; explicit experimental opt-in is required."
-        )
-        if canonical.startswith("hyb_mgga_"):
-            reason = (
-                "Hybrid MGGA functional is available from jax_xc as an experimental "
-                "local channel; TD-GradDFT does not infer exact-exchange fractions "
-                "from this name."
-            )
-        return JAXXCFunctionalInfo(
-            name=canonical,
-            status="experimental",
-            family="MGGA",
-            reason=reason,
-        )
-    return JAXXCFunctionalInfo(
-        name=canonical,
-        status="unavailable",
-        family=_family_from_name(canonical),
-        reason="No strict, wrapped, or active jax_xc implementation is available.",
-    )
-
-
-def list_jax_xc_functionals(status: JAXXCStatus | None = None) -> tuple[JAXXCFunctionalInfo, ...]:
-    active_mgga = {name for name in _active_jax_xc_names() if _is_mgga_name(name)}
-    names = sorted(
-        _STRICT_FUNCTIONALS
-        | set(_SAFE_HYBRID_COMPOSITES)
-        | _EXPERIMENTAL_FUNCTIONALS
-        | active_mgga
-    )
-    infos = tuple(jax_xc_functional_info(name) for name in names)
-    if status is None:
-        return infos
-    return tuple(info for info in infos if info.status == status)
 
 
 def _raise_if_not_allowed(
@@ -372,12 +169,12 @@ class _SafeJAXXCModule:
         self.__version__ = getattr(module, "__version__", None)
 
     def __getattr__(self, name: str):
-        if name in _SAFE_HYBRID_COMPOSITES:
+        if name in SAFE_JAX_XC_WRAPPED_COMPOSITES:
             return self._hybrid_factory(name)
         return getattr(self._module, name)
 
     def _hybrid_factory(self, name: str):
-        terms = _SAFE_HYBRID_COMPOSITES[name]
+        terms = SAFE_JAX_XC_WRAPPED_COMPOSITES[name]
         module = self._module
         raw_factory = getattr(module, name, None)
 

@@ -3,7 +3,7 @@ import pytest
 
 from td_graddft.data.basis import basis_from_spec
 from td_graddft.data.integrals import eri_pair_matrix_packed
-from td_graddft.scf.packed_eri import build_jk_from_eri_pair_matrix
+from td_graddft.data.integrals.jax.packed_eri import build_jk_from_eri_pair_matrix
 from td_graddft_tools.gpu_s_shell_direct_jk import (
     cpu_s_shell_direct_jk,
     cpu_sp_direct_jk_from_basis,

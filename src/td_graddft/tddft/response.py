@@ -12,7 +12,7 @@ from jaxtyping import Array
 
 from ..df import df_factors_to_mo_eri_slices
 from ..features import restricted_transition_response_features
-from ..scf.packed_eri import eri_pair_matrix_to_mo_eri_slices
+from ..data.integrals import eri_pair_matrix_to_mo_eri_slices
 from ..xc import AdiabaticDensityFunctional
 from ._utils import (
     _density_on_grid,

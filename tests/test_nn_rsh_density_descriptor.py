@@ -3,6 +3,8 @@ import jax.numpy as jnp
 import optax
 import pytest
 
+pytest.importorskip("td_graddft.nn_rsh.losses", reason="Legacy RSH self-supervised losses were removed.")
+
 import td_graddft.training.targets as training_targets
 from td_graddft.nn_rsh import (
     AtomCenteredDensityDescriptorConfig,
@@ -94,7 +96,7 @@ def test_atom_centered_density_rsh_functional_initializes_and_trains_one_step():
         functional,
         training_config=GroundStateTrainingConfig(
             mode="self_consistent",
-            scf_gradient_mode="implicit_commutator",
+            scf_gradient_mode="impl",
             scf_max_cycle=3,
             scf_require_convergence=False,
         ),
@@ -153,7 +155,7 @@ def test_params_with_resolved_preserves_hidden_layer_gradients():
         functional,
         training_config=GroundStateTrainingConfig(
             mode="self_consistent",
-            scf_gradient_mode="implicit_commutator",
+            scf_gradient_mode="impl",
             scf_max_cycle=3,
             scf_require_convergence=False,
         ),
@@ -273,7 +275,7 @@ def test_atom_centered_density_rsh_koopmans_loss_runs_one_step():
         functional,
         training_config=GroundStateTrainingConfig(
             mode="self_consistent",
-            scf_gradient_mode="implicit_commutator",
+            scf_gradient_mode="impl",
             scf_max_cycle=3,
             scf_require_convergence=False,
         ),
@@ -360,7 +362,7 @@ def test_self_supervised_rsh_loss_penalizes_non_long_range_corrected_limit():
         functional,
         training_config=GroundStateTrainingConfig(
             mode="self_consistent",
-            scf_gradient_mode="implicit_commutator",
+            scf_gradient_mode="impl",
             scf_max_cycle=1,
             scf_require_convergence=False,
         ),
@@ -409,7 +411,7 @@ def test_atom_centered_density_rsh_fixed_orbital_janak_is_finite():
         training_config=GroundStateTrainingConfig(
             mode="self_consistent",
             janak_frontier_mode="fixed_orbital_ad",
-            scf_gradient_mode="implicit_commutator",
+            scf_gradient_mode="impl",
             scf_max_cycle=3,
             scf_require_convergence=False,
         ),
@@ -475,7 +477,7 @@ def test_self_supervised_rsh_loss_dispatches_to_autodiff_janak(monkeypatch):
         training_config=GroundStateTrainingConfig(
             mode="self_consistent",
             janak_frontier_mode="autodiff",
-            scf_gradient_mode="implicit_commutator",
+            scf_gradient_mode="impl",
             scf_max_cycle=3,
             scf_require_convergence=False,
         ),

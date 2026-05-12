@@ -8,6 +8,9 @@ from jaxtyping import Array
 
 from ..data.basis import CartesianBasis
 from ..data.integrals import build_hcore, eri_tensor, overlap_matrix
+from .core import _build_density_closed_shell as _build_density
+from .core import _diagonalize_fock, _orthogonalizer
+from .rks import _build_jk
 
 
 @dataclass(frozen=True)
@@ -55,28 +58,8 @@ def nuclear_repulsion_energy(atom_coords: Array, atom_charges: Array) -> Array:
             enuc = enuc + charges[i] * charges[j] / rij
     return enuc
 
-
-def _orthogonalizer(s: Array, eps: float) -> Array:
-    eigvals, eigvecs = jnp.linalg.eigh(s)
-    clipped = jnp.maximum(eigvals, eps)
-    return eigvecs @ jnp.diag(clipped ** -0.5) @ eigvecs.T
-
-
-def _diagonalize_fock(fock: Array, x: Array) -> tuple[Array, Array]:
-    f_ortho = x.T @ fock @ x
-    mo_energy, coeff_ortho = jnp.linalg.eigh(0.5 * (f_ortho + f_ortho.T))
-    mo_coeff = x @ coeff_ortho
-    return mo_energy, mo_coeff
-
-
-def _build_density(mo_coeff: Array, nocc: int) -> Array:
-    occ = mo_coeff[:, :nocc]
-    return 2.0 * (occ @ occ.T)
-
-
 def _build_fock(hcore: Array, eri: Array, density: Array) -> Array:
-    j_mat = jnp.einsum("pqrs,rs->pq", eri, density)
-    k_mat = jnp.einsum("prqs,rs->pq", eri, density)
+    j_mat, k_mat = _build_jk(eri, density)
     return hcore + j_mat - 0.5 * k_mat
 
 

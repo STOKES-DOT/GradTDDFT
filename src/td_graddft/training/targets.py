@@ -16,7 +16,7 @@ from ..scf import (
     UKSConfig,
     run_uks_from_integrals,
 )
-from ..scf.packed_eri import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix
+from ..data.integrals import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix
 from ..scf.rks import _vxc_matrix_from_grid_potential
 from ..spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
 from ..tddft import RestrictedCasidaTDDFT
@@ -903,10 +903,7 @@ def _fractional_branch_training_config(
 def _strict_janak_branch_training_config(
     training_config: GroundStateTrainingConfig | None,
 ) -> GroundStateTrainingConfig:
-    cfg = _fractional_branch_training_config(training_config)
-    if cfg.scf_gradient_mode != "unrolled":
-        cfg = replace(cfg, scf_gradient_mode="unrolled")
-    return cfg
+    return _fractional_branch_training_config(training_config)
 
 
 @dataclass(frozen=True)
@@ -2882,49 +2879,8 @@ def _can_use_batched_self_consistent_ground_state_path(
     cfg: GroundStateTrainingConfig,
     predictor: Callable[[PyTree, Any], tuple[Array, Any]] | None,
 ) -> bool:
-    if predictor is not None or cfg.mode != "self_consistent":
-        return False
-    if cfg.scf_gradient_mode != "unrolled":
-        return False
-    if len(dataset) <= 1:
-        return False
-    if cfg.self_consistent_energy_weight != 0.0:
-        return False
-    if cfg.coefficient_prior_weight != 0.0 or cfg.fractional_linearity_weight != 0.0:
-        return False
-
-    first_molecule = dataset[0].molecule
-    if not is_dataclass(first_molecule):
-        return False
-    if _has_direct_cuda_jk_static_source(first_molecule):
-        return False
-    first_structure = jax.tree_util.tree_structure(first_molecule)
-    first_signature = _pytree_shape_signature(first_molecule)
-    for datum in dataset:
-        if (
-            datum.density_constraint_weight != 0.0
-            or datum.xc_potential_constraint_weight != 0.0
-            or datum.xc_kernel_constraint_weight != 0.0
-            or datum.stationarity_constraint_weight != 0.0
-            or datum.dm21_scf_regularization_weight != 0.0
-            or datum.orbital_energy_constraint_weight != 0.0
-            or datum.janak_frontier_constraint_weight != 0.0
-            or datum.s1_constraint_weight != 0.0
-            or datum.first_excited_total_energy_constraint_weight != 0.0
-            or datum.excitation_constraint_weight != 0.0
-            or datum.oscillator_strength_constraint_weight != 0.0
-            or datum.spectrum_constraint_weight != 0.0
-        ):
-            return False
-        if not is_dataclass(datum.molecule):
-            return False
-        if _has_direct_cuda_jk_static_source(datum.molecule):
-            return False
-        if jax.tree_util.tree_structure(datum.molecule) != first_structure:
-            return False
-        if _pytree_shape_signature(datum.molecule) != first_signature:
-            return False
-    return True
+    del dataset, cfg, predictor
+    return False
 
 
 def _ground_state_mse_loss_batched_self_consistent(

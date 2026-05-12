@@ -29,9 +29,9 @@ from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,
     create_train_state_from_molecule,
-    ground_state_mse_loss,
+    make_ground_state_eval,
+    make_ground_state_predictor,
     make_ground_state_train_step,
-    predict_ground_state_total_energy,
 )
 
 from .types import (
@@ -64,15 +64,9 @@ def _compiled_lorentzian_spectrum():
 
 def _resolve_training_scf_gradient_mode(
     config: NeuralXCTrainingConfig,
-) -> Literal["unrolled", "implicit_commutator"]:
-    if config.scf_gradient_mode in {"unrolled", "implicit_commutator"}:
-        return config.scf_gradient_mode
-    requires_stable_scf_gradients = (
-        float(config.density_constraint_weight) != 0.0
-        or float(config.stationarity_constraint_weight) != 0.0
-        or str(config.training_mode) == "self_consistent"
-    )
-    return "implicit_commutator" if requires_stable_scf_gradients else "unrolled"
+) -> Literal["impl"]:
+    del config
+    return "impl"
 
 
 def _canonicalize_graddft_ground_state_config(
@@ -613,9 +607,10 @@ def train_neural_xc(
         optimizer,
     )
     train_step = make_ground_state_train_step(functional, training_config=gs_training)
+    eval_loss = make_ground_state_eval(functional, training_config=gs_training)
     fallback_train_step = None
-    if config.recover_nonfinite_steps and selected_scf_gradient_mode != "implicit_commutator":
-        fallback_training = replace(gs_training, scf_gradient_mode="implicit_commutator")
+    if config.recover_nonfinite_steps and selected_scf_gradient_mode != "impl":
+        fallback_training = replace(gs_training, scf_gradient_mode="impl")
         fallback_train_step = make_ground_state_train_step(
             functional,
             training_config=fallback_training,
@@ -633,22 +628,10 @@ def train_neural_xc(
     )
     if use_jit_train:
         compiled_train_step = jax.jit(lambda current_state: train_step(current_state, datum))
-        compiled_eval = jax.jit(
-            lambda params: ground_state_mse_loss(
-                params,
-                functional,
-                datum,
-                training_config=gs_training,
-            )
-        )
+        compiled_eval = jax.jit(lambda params: eval_loss(params, datum))
     else:
         compiled_train_step = lambda current_state: train_step(current_state, datum)
-        compiled_eval = lambda params: ground_state_mse_loss(
-            params,
-            functional,
-            datum,
-            training_config=gs_training,
-        )
+        compiled_eval = lambda params: eval_loss(params, datum)
 
     initial_loss, initial_metrics = compiled_eval(state.params)
     initial_loss = float(initial_loss)
@@ -679,7 +662,7 @@ def train_neural_xc(
     fallback_recoveries = 0
     guard_post_update = (
         gs_training.mode == "self_consistent"
-        and selected_scf_gradient_mode == "implicit_commutator"
+        and selected_scf_gradient_mode == "impl"
     )
     for step in range(1, config.steps + 1):
         prev_state = state
@@ -803,14 +786,11 @@ def train_neural_xc(
         min_loss_step = config.steps
         best_params = state.params
 
-    trained_energy = float(
-        predict_ground_state_total_energy(
-            best_params,
-            functional,
-            reference.molecule,
-            training_config=gs_training,
-        )
+    trained_energy_predictor = make_ground_state_predictor(
+        functional,
+        training_config=gs_training,
     )
+    trained_energy = float(trained_energy_predictor(best_params, reference.molecule)[0])
     trained_hybrid_fraction = float(
         functional.effective_exchange_fraction(best_params, reference.molecule)
     )

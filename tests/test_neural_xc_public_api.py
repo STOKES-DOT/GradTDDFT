@@ -9,9 +9,8 @@ from td_graddft.neural_xc.defaults import (
     DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
 )
-from td_graddft.scf.packed_eri import build_j_from_eri_pair_matrix
+from td_graddft.data.integrals.jax.packed_eri import build_j_from_eri_pair_matrix
 import td_graddft.training.neural_xc_trainer as neural_xc_trainer_module
-import td_graddft.training.rsh_optimizer as rsh_optimizer_module
 
 
 def test_neural_xc_config_drives_generic_functional_constructor():
@@ -156,6 +155,7 @@ def test_rsh_public_constructor_builds_trainable_functional():
 
     assert isinstance(functional, nn_rsh.TrainableRSHFunctional)
     assert functional.template.name == "lc-wpbe"
+    assert functional.head_type == "gnn"
 
 
 def test_rsh_public_constructor_uses_strict_lc_wpbe_local_spec_by_default():
@@ -167,6 +167,11 @@ def test_rsh_public_constructor_uses_strict_lc_wpbe_local_spec_by_default():
 def test_rsh_public_constructor_rejects_unknown_trainable_parameter():
     with pytest.raises(ValueError, match="Unsupported RSH trainable parameter"):
         nn_rsh.RSH("lc-wpbe").trainable(params=("gamma",))
+
+
+def test_rsh_public_constructor_rejects_presets_without_jax_local_decomposition():
+    with pytest.raises(NotImplementedError, match="does not yet define a JAX-local semilocal decomposition"):
+        nn_rsh.RSH("wb97x-d").trainable()
 
 
 def test_training_result_and_separate_trainers_expose_expected_history_keys():
@@ -217,65 +222,18 @@ def test_neural_xc_trainer_positive_steps_require_ground_state_data():
         neural_trainer.kernel(steps=1)
 
 
-def test_rsh_optimizer_runs_positive_steps_through_self_supervised_loss(monkeypatch):
-    build_calls = []
-    training_configs = []
-
-    def _fake_self_supervised_loss(functional, **kwargs):
-        build_calls.append(kwargs)
-
-        def _loss(params, active_functional, data, *, training_config=None, predictor=None):
-            training_configs.append(training_config)
-            del data, predictor
-            resolved = active_functional.resolve_parameters(params)
-            target_omega = jnp.asarray(0.22, dtype=jnp.float32)
-            value = (resolved.omega - target_omega) ** 2
-            return value, {
-                "loss": value,
-                "omega": jnp.asarray([resolved.omega]),
-                "sr_hf_fraction": jnp.asarray([resolved.sr_hf_fraction]),
-                "lr_hf_fraction": jnp.asarray([resolved.lr_hf_fraction]),
-                "koopmans_ip_mae": jnp.asarray([value]),
-                "koopmans_lumo_ea_mae": jnp.asarray([value + 0.1]),
-            }
-
-        return _loss
-
-    monkeypatch.setattr(
-        rsh_optimizer_module,
-        "make_self_supervised_rsh_loss",
-        _fake_self_supervised_loss,
-    )
+def test_rsh_optimizer_positive_steps_require_explicit_callable_loss():
     functional = nn_rsh.RSH("lc-wpbe").trainable()
     molecule = object()
-    result = training.RSHOptimizer(
-        functional=functional,
-        molecules=[molecule],
-    ).kernel(
-        steps=8,
-        learning_rate=0.5,
-        loss="koopmans_ip_ea",
-    )
-
-    assert len(result.history["loss"]) == 8
-    assert result.history["loss"][-1] < result.history["loss"][0]
-    assert result.params is not None
-    assert result.final_metrics["omega"] == result.history["omega"][-1]
-    assert set(result.history) == {
-        "loss",
-        "omega",
-        "alpha",
-        "beta",
-        "ip_error",
-        "ea_error",
-    }
-    assert build_calls
-    assert build_calls[0]["koopmans_ip_weight"] == 1.0
-    assert build_calls[0]["koopmans_ea_weight"] == 0.0
-    assert build_calls[0]["koopmans_lumo_ea_weight"] == 1.0
-    assert training_configs
-    assert training_configs[0].mode == "self_consistent"
-    assert training_configs[0].scf_gradient_mode == "implicit_commutator"
+    with pytest.raises(NotImplementedError, match="Built-in RSH self-supervised losses were removed"):
+        training.RSHOptimizer(
+            functional=functional,
+            molecules=[molecule],
+        ).kernel(
+            steps=8,
+            learning_rate=0.5,
+            loss="koopmans_ip_ea",
+        )
 
 
 def test_rsh_optimizer_positive_steps_require_at_least_one_molecule():
@@ -391,7 +349,7 @@ def test_neural_xc_trainer_accepts_explicit_training_config(monkeypatch):
     )
     cfg = training.GroundStateTrainingConfig(
         mode="self_consistent",
-        scf_gradient_mode="implicit_commutator",
+        scf_gradient_mode="impl",
     )
     trainer = training.NeuralXCTrainer(
         functional=_toy_trainable_density_functional(),

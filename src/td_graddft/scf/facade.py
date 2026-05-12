@@ -1,110 +1,39 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-import os
-from pathlib import Path
 from typing import Any, Literal
 
 import jax
 
 from ..data.molecule import MoleculeSpec
-from ..jax_runtime import (
-    DEFAULT_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS,
-    DEFAULT_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES,
-    configure_jax_persistent_cache,
-)
+from ..jax_runtime import configure_jax_persistent_cache
+from .core import _contains_jax_tracer, _hashable_static_value
+from ..data.integrals import cuda_ffi_available
 from .builders import (
+    _configure_cuda_jax_cache as _configure_cuda_jax_cache_impl,
+    _make_cuda_direct_reference_solver,
+    build_restricted_reference_from_facade,
+    build_restricted_scf_result_from_facade,
+    build_unrestricted_reference_from_facade,
     precompile_restricted_cuda_direct_rks_solver,
     restricted_molecule_from_spec_with_jax_rks,
     unrestricted_molecule_from_spec_with_jax_uks,
 )
 from .inputs import build_rks_integral_inputs
-from .rks import RKSConfig, run_rks_from_integrals, run_rks_from_integrals_traceable
+from .rks import RKSConfig, run_rks_from_integrals
 from .uks import UKSConfig
-from .cuda_direct_jk import cuda_ffi_available
 
 precompile_restricted_cuda_direct_rks_reference = precompile_restricted_cuda_direct_rks_solver
 restricted_reference_from_spec_with_jax_rks = restricted_molecule_from_spec_with_jax_rks
 unrestricted_reference_from_spec_with_jax_uks = unrestricted_molecule_from_spec_with_jax_uks
 
 
-def _hashable_static_value(value: Any) -> Any:
-    try:
-        hash(value)
-    except TypeError:
-        return repr(value)
-    return value
-
-
-@dataclass(frozen=True)
-class _CudaDirectReferenceSolver:
-    """HQC-style fixed-structure CUDA-direct RKS solver."""
-
-    static_kwargs: dict[str, Any]
-
-    def __call__(self, spec: MoleculeSpec) -> Any:
-        return restricted_reference_from_spec_with_jax_rks(atom=spec, **self.static_kwargs)
-
-    def precompile(self, spec: MoleculeSpec) -> Any:
-        return precompile_restricted_cuda_direct_rks_reference(
-            atom=spec,
-            **self.static_kwargs,
-        )
-
-
-def _make_cuda_direct_reference_solver(**static_kwargs: Any) -> _CudaDirectReferenceSolver:
-    """Build an HQC-style fixed-structure RKS solver callable."""
-
-    return _CudaDirectReferenceSolver(static_kwargs=dict(static_kwargs))
-
-
-def _contains_jax_tracer(value: Any) -> bool:
-    if isinstance(value, jax.core.Tracer):
-        return True
-    if isinstance(value, MoleculeSpec):
-        return _contains_jax_tracer((value.coords_bohr, value.charges))
-    if isinstance(value, dict):
-        return any(_contains_jax_tracer(item) for item in value.values())
-    if isinstance(value, (tuple, list)):
-        return any(_contains_jax_tracer(item) for item in value)
-    return False
-
-
 def _configure_cuda_jax_cache() -> None:
-    if os.environ.get("TD_GRADDFT_DISABLE_JAX_CACHE", "").lower() in {"1", "true", "yes", "on"}:
-        return
-    cache_dir = os.environ.get("TD_GRADDFT_JAX_CACHE_DIR")
-    if cache_dir is None or not cache_dir.strip():
-        cache_dir = str(Path.home() / ".cache" / "td_graddft" / "jax")
-    min_compile_time = float(
-        os.environ.get(
-            "TD_GRADDFT_JAX_CACHE_MIN_COMPILE_SECS",
-            DEFAULT_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS,
-        )
-    )
-    min_entry_size = int(
-        os.environ.get(
-            "TD_GRADDFT_JAX_CACHE_MIN_ENTRY_SIZE_BYTES",
-            DEFAULT_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES,
-        )
-    )
-    try:
-        configure_jax_persistent_cache(
-            cache_dir=cache_dir,
-            min_compile_time_secs=min_compile_time,
-            min_entry_size_bytes=min_entry_size,
-        )
-    except OSError:
-        return
+    return _configure_cuda_jax_cache_impl(configure_fn=configure_jax_persistent_cache)
 
 
-def _differentiable_rks_config(config: RKSConfig) -> RKSConfig:
-    return replace(config, jk_backend="full", direct_jk_engine="jax")
-
-
-def _default_cuda_direct_iteration_backend(*, precompile: bool) -> Literal["lax"]:
-    del precompile
-    return "lax"
+def _configure_jax_cache() -> None:
+    return _configure_cuda_jax_cache_impl(configure_fn=configure_jax_persistent_cache)
 
 
 @dataclass
@@ -122,12 +51,17 @@ class _BaseKS:
     geometry_grad_policy: Literal["analytic", "error", "zero"] = "analytic"
     grid_ao_backend: Literal["jax"] = "jax"
     execution_device: Literal["auto", "cpu", "gpu"] = "auto"
+    init_guess: Any = "minao"
+    chkfile: str | None = None
+    sap_basis: Any | None = None
+    init_guess_chkfile_project: bool | None = None
 
     e_tot: Any | None = None
     converged: bool | None = None
     mo_energy: Any | None = None
     mo_coeff: Any | None = None
     mo_occ: Any | None = None
+    cycles: int | None = None
     reference: Any | None = None
 
     def run(self) -> "_BaseKS":
@@ -158,6 +92,7 @@ class _BaseKS:
         self.mo_energy = getattr(reference, "mo_energy", None)
         self.mo_coeff = getattr(reference, "mo_coeff", None)
         self.mo_occ = getattr(reference, "mo_occ", None)
+        self.cycles = getattr(reference, "cycles", None)
         self.converged = bool(getattr(reference, "converged", True))
 
     def _sync_from_scf_result(self, result: Any) -> None:
@@ -166,6 +101,7 @@ class _BaseKS:
         self.mo_energy = getattr(result, "mo_energy", None)
         self.mo_coeff = getattr(result, "mo_coeff", None)
         self.mo_occ = getattr(result, "mo_occ", None)
+        self.cycles = getattr(result, "cycles", None)
         self.converged = bool(getattr(result, "converged", True))
 
     def _put_on_requested_device(self, reference: Any) -> Any:
@@ -197,7 +133,6 @@ class RKS(_BaseKS):
     df_max_rank: int | None = None
     direct_scf_tol: float = 0.0
     direct_scf_incremental: bool = True
-    iteration_backend: Literal["lax"] = "lax"
     compute_local_hfx_features: bool = False
     compute_local_hfx_aux: bool = False
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4)
@@ -219,7 +154,7 @@ class RKS(_BaseKS):
             df_max_rank=self.df_max_rank,
             direct_scf_tol=self.direct_scf_tol,
             direct_scf_incremental=self.direct_scf_incremental,
-            iteration_backend=self.iteration_backend,
+            iteration_backend="runtime",
         )
 
     def _cuda_direct_solver_key(
@@ -268,6 +203,8 @@ class RKS(_BaseKS):
         if self._cuda_direct_reference_solver is not None and key == self._cuda_direct_reference_solver_key:
             return self._cuda_direct_reference_solver
         solver = _make_cuda_direct_reference_solver(
+            reference_builder=restricted_reference_from_spec_with_jax_rks,
+            precompile_builder=precompile_restricted_cuda_direct_rks_reference,
             basis=self.mol.basis,
             xc_spec=self.xc,
             unit=self.mol.unit,
@@ -293,89 +230,55 @@ class RKS(_BaseKS):
 
     def _build_reference(self, spec: MoleculeSpec) -> Any:
         geometry_is_traced = _contains_jax_tracer(spec)
-        rks_config = self._config()
-        integral_backend = self.integral_backend
-        include_dipole_integrals = not (
-            self.jk_backend == "direct" and self.direct_jk_engine == "cuda"
-        )
-        if geometry_is_traced:
-            rks_config = _differentiable_rks_config(rks_config)
-            integral_backend = "libcint"
-            include_dipole_integrals = True
-        if (
-            not geometry_is_traced
-            and self.jk_backend == "direct"
-            and self.direct_jk_engine == "cuda"
-            and cuda_ffi_available()
-        ):
-            solver = self._get_cuda_direct_reference_solver(
-                spec,
-                rks_config=rks_config,
-                integral_backend=integral_backend,
-                include_dipole_integrals=include_dipole_integrals,
-            )
-            return solver(spec)
-        reference = restricted_reference_from_spec_with_jax_rks(
-            atom=spec,
-            basis=self.mol.basis,
-            xc_spec=self.xc,
-            unit=self.mol.unit,
-            charge=self.mol.charge,
-            spin=self.mol.spin,
-            cart=self.mol.cart,
+        return build_restricted_reference_from_facade(
+            spec,
+            mol=self.mol,
+            xc=self.xc,
             grids_level=self.grids_level,
             max_l=self.max_l,
-            rks_config=rks_config,
-            grid_ao_backend="jax" if geometry_is_traced else self.grid_ao_backend,
-            integral_backend=integral_backend,
-            libcint_geometry_grad_policy=self.geometry_grad_policy,
+            integral_backend=self.integral_backend,
+            geometry_grad_policy=self.geometry_grad_policy,
+            grid_ao_backend=self.grid_ao_backend,
+            rks_config=self._config(),
             compute_local_hfx_features=self.compute_local_hfx_features,
             compute_local_hfx_aux=self.compute_local_hfx_aux,
             hfx_omega_values=self.hfx_omega_values,
             hfx_chunk_size=self.hfx_chunk_size,
-            include_dipole_integrals=include_dipole_integrals,
-            verbose=self.mol.verbose,
+            include_dipole_integrals=not (
+                self.jk_backend == "direct" and self.direct_jk_engine == "cuda"
+            ),
+            init_guess=self.init_guess,
+            chkfile=self.chkfile,
+            sap_basis=self.sap_basis,
+            init_guess_chkfile_project=self.init_guess_chkfile_project,
+            geometry_is_traced=geometry_is_traced,
+            reference_builder=restricted_reference_from_spec_with_jax_rks,
+            cuda_direct_solver_getter=self._get_cuda_direct_reference_solver,
+            cuda_available=cuda_ffi_available(),
         )
-        return reference
 
     def _build_scf_result(self, spec: MoleculeSpec) -> Any:
-        geometry_is_traced = _contains_jax_tracer(spec)
-        rks_config = self._config()
-        integral_backend = self.integral_backend
-        if geometry_is_traced:
-            rks_config = _differentiable_rks_config(rks_config)
-            integral_backend = "libcint"
-        scf_inputs = build_rks_integral_inputs(
-            atom=spec,
-            basis=self.mol.basis,
-            config=rks_config,
-            xc_spec=self.xc,
-            unit=self.mol.unit,
-            charge=self.mol.charge,
-            spin=self.mol.spin,
-            cart=self.mol.cart,
+        return build_restricted_scf_result_from_facade(
+            spec,
+            mol=self.mol,
+            xc=self.xc,
             grids_level=self.grids_level,
             max_l=self.max_l,
-            grid_ao_backend="jax" if geometry_is_traced else self.grid_ao_backend,
-            integral_backend=integral_backend,
-            libcint_geometry_grad_policy=self.geometry_grad_policy,
-            include_dipole_integrals=False,
-            verbose=self.mol.verbose,
-        )
-        rks_runner = (
-            run_rks_from_integrals_traceable
-            if scf_inputs.geometry_is_traced
-            and scf_inputs.integral_backend in {"jax", "libcint"}
-            and scf_inputs.grid_ao_backend == "jax"
-            else run_rks_from_integrals
-        )
-        rks_kwargs = scf_inputs.as_rks_kwargs()
-        return rks_runner(
-            **rks_kwargs,
-            config=rks_config,
+            integral_backend=self.integral_backend,
+            geometry_grad_policy=self.geometry_grad_policy,
+            grid_ao_backend=self.grid_ao_backend,
+            rks_config=self._config(),
+            init_guess=self.init_guess,
+            chkfile=self.chkfile,
+            sap_basis=self.sap_basis,
+            init_guess_chkfile_project=self.init_guess_chkfile_project,
+            geometry_is_traced=_contains_jax_tracer(spec),
+            build_inputs_fn=build_rks_integral_inputs,
+            run_rks_fn=run_rks_from_integrals,
         )
 
     def kernel(self) -> Any:
+        _configure_jax_cache()
         result = self._build_scf_result(self._spec())
         self._sync_from_scf_result(result)
         return self.e_tot
@@ -393,12 +296,9 @@ class RKS(_BaseKS):
         execution_device: Literal["auto", "cpu", "gpu"] | None = None,
         *,
         precompile: bool = False,
-        iteration_backend: Literal["lax"] | None = None,
     ) -> "RKS":
         if execution_device is not None:
             self.execution_device = execution_device
-        if iteration_backend is not None and iteration_backend != "lax":
-            raise ValueError("iteration_backend must be 'lax' or None.")
         preference = str(self.execution_device).lower()
         if preference not in {"auto", "cpu", "gpu"}:
             raise ValueError("execution_device must be 'auto', 'cpu', or 'gpu'.")
@@ -406,7 +306,6 @@ class RKS(_BaseKS):
             self.jk_backend = "full"
             self.direct_jk_engine = "jax"
             self.integral_backend = "libcint"
-            self.iteration_backend = "lax"
             return self
         if cuda_ffi_available():
             _configure_cuda_jax_cache()
@@ -414,13 +313,10 @@ class RKS(_BaseKS):
             self.direct_jk_engine = "cuda"
             self.integral_backend = "libcint"
             self.grid_ao_backend = "jax"
-            self.iteration_backend = iteration_backend or _default_cuda_direct_iteration_backend(
-                precompile=precompile,
-            )
             if precompile:
                 spec = self._spec()
                 if not _contains_jax_tracer(spec):
-                    precompile_config = replace(self._config(), iteration_backend="lax")
+                    precompile_config = self._config()
                     solver = self._get_cuda_direct_reference_solver(
                         spec,
                         rks_config=precompile_config,
@@ -437,7 +333,6 @@ class RKS(_BaseKS):
         self.jk_backend = "full"
         self.direct_jk_engine = "jax"
         self.integral_backend = "libcint"
-        self.iteration_backend = "lax"
         return self
 
 
@@ -454,25 +349,25 @@ class UKS(_BaseKS):
         )
 
     def _build_reference(self, spec: MoleculeSpec) -> Any:
-        reference = unrestricted_reference_from_spec_with_jax_uks(
-            atom=spec,
-            basis=self.mol.basis,
-            xc_spec=self.xc,
-            unit=self.mol.unit,
-            charge=self.mol.charge,
-            spin=self.mol.spin,
-            cart=self.mol.cart,
+        return build_unrestricted_reference_from_facade(
+            spec,
+            mol=self.mol,
+            xc=self.xc,
             grids_level=self.grids_level,
             max_l=self.max_l,
-            uks_config=self._config(),
-            grid_ao_backend=self.grid_ao_backend,
             integral_backend=self.integral_backend,
-            libcint_geometry_grad_policy=self.geometry_grad_policy,
-            verbose=self.mol.verbose,
+            geometry_grad_policy=self.geometry_grad_policy,
+            grid_ao_backend=self.grid_ao_backend,
+            uks_config=self._config(),
+            init_guess=self.init_guess,
+            chkfile=self.chkfile,
+            sap_basis=self.sap_basis,
+            init_guess_chkfile_project=self.init_guess_chkfile_project,
+            reference_builder=unrestricted_reference_from_spec_with_jax_uks,
         )
-        return reference
 
     def kernel(self) -> Any:
+        _configure_jax_cache()
         reference = self._build_reference(self._spec())
         reference = self._put_on_requested_device(reference)
         self._sync_from_reference(reference)
@@ -504,5 +399,7 @@ class _NuclearGradient:
     mf: _BaseKS
 
     def kernel(self) -> Any:
-        spec = self.mf._spec()
-        return jax.grad(lambda coords: _energy_for_coords(self.mf, coords))(spec.coords_bohr)
+        raise NotImplementedError(
+            "Explicit SCF coordinate differentiation is disabled. "
+            "Use implicit-differential training workflows instead."
+        )

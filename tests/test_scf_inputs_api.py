@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 from td_graddft.data.molecule import parse_molecule_spec
+from td_graddft.data.integrals.libcint.mol import build_libcint_mol
 from td_graddft.scf import RKSConfig, UKSConfig
+from td_graddft.scf.init_guess import (
+    RestrictedInitGuess,
+    restricted_init_guess_from_pyscf,
+    unrestricted_init_guess_from_pyscf,
+)
 from td_graddft.scf.inputs import (
     RKSIntegralInputs,
     UKSIntegralInputs,
@@ -127,16 +134,15 @@ def test_build_rks_integral_inputs_cuda_direct_skips_eri_group_precompute(monkey
     import td_graddft.scf.inputs as inputs_mod
 
     monkeypatch.setattr(inputs_mod, "cuda_ffi_available", lambda: True)
+    captured = {}
 
-    class FakeCudaOneElectronBuilder:
-        def __init__(self, basis):
-            self.basis = basis
+    def fake_overlap_hcore_matrices(basis, *, backend="auto", **kwargs):
+        captured["basis"] = basis
+        captured["backend"] = backend
+        shape = (basis.nao, basis.nao)
+        return jnp.eye(shape[0]), 2.0 * jnp.eye(shape[0])
 
-        def build_overlap_hcore(self):
-            shape = (self.basis.nao, self.basis.nao)
-            return jnp.eye(shape[0]), 2.0 * jnp.eye(shape[0])
-
-    monkeypatch.setattr(inputs_mod, "CudaOneElectronBuilder", FakeCudaOneElectronBuilder)
+    monkeypatch.setattr(inputs_mod, "overlap_hcore_matrices", fake_overlap_hcore_matrices)
 
     inputs = build_rks_integral_inputs(
         atom=_h2_spec(),
@@ -149,6 +155,8 @@ def test_build_rks_integral_inputs_cuda_direct_skips_eri_group_precompute(monkey
     )
 
     assert inputs.direct_basis is inputs.basis
+    assert captured["basis"] is inputs.basis
+    assert captured["backend"] == "cuda"
     assert inputs.basis.precompute_eri_groups is False
     assert inputs.basis.quartet_groups == ()
     assert inputs.basis.shell_quartet_groups == ()
@@ -175,22 +183,37 @@ def test_build_rks_integral_inputs_libcint_cuda_direct_uses_direct_digest_inputs
     assert inputs.eri_pair_matrix is None
 
 
+@pytest.mark.parametrize("jk_backend", ["full", "df"])
+def test_build_rks_integral_inputs_libcint_nondirect_skips_eri_group_precompute(jk_backend):
+    pytest.importorskip("pyscf")
+
+    inputs = build_rks_integral_inputs(
+        atom=_h2_spec(),
+        basis="sto-3g",
+        config=RKSConfig(jk_backend=jk_backend),
+        integral_backend="libcint",
+        grid_ao_backend="jax",
+        grids_level=0,
+        max_l=1,
+        include_dipole_integrals=False,
+    )
+
+    assert inputs.basis.precompute_eri_groups is False
+    assert inputs.basis.quartet_groups == ()
+    assert inputs.basis.shell_quartet_groups == ()
+
+
 def test_build_rks_integral_inputs_libcint_nontraced_spec_uses_single_pyscf_mol(monkeypatch):
     import td_graddft.scf.inputs as inputs_mod
 
     pytest.importorskip("pyscf")
-    from pyscf import dft
 
     monkeypatch.setattr(inputs_mod, "cuda_ffi_available", lambda: True)
 
     def _fail_traceable_one_electron(*args, **kwargs):
         raise AssertionError("Non-traced libcint inputs should use the PySCF mol fast path.")
 
-    def _fail_pyscf_grid(*args, **kwargs):
-        raise AssertionError("libcint inputs must use TD-GradDFT grid/AO, not PySCF grids.")
-
     monkeypatch.setattr(inputs_mod, "libcint_int1e_with_coords", _fail_traceable_one_electron)
-    monkeypatch.setattr(dft.gen_grid, "Grids", _fail_pyscf_grid)
 
     inputs = build_rks_integral_inputs(
         atom=_h2_spec(),
@@ -207,17 +230,16 @@ def test_build_rks_integral_inputs_libcint_nontraced_spec_uses_single_pyscf_mol(
     assert inputs.grid_ao_backend == "jax"
 
 
-def test_build_rks_integral_inputs_libcint_hybrid_does_not_use_pyscf_minao_guess(monkeypatch):
-    pytest.importorskip("pyscf")
-    from pyscf import dft
+def test_build_rks_integral_inputs_libcint_default_uses_minao_initial_density(monkeypatch):
+    import td_graddft.scf.inputs as inputs_mod
 
-    rks_calls = []
+    captured = {}
 
-    def _track_pyscf_rks(*args, **kwargs):
-        rks_calls.append((args, kwargs))
-        raise AssertionError("hybrid libcint inputs must not call PySCF minao initial guess.")
+    def fake_init_guess(**kwargs):
+        captured.update(kwargs)
+        return RestrictedInitGuess(density=jnp.eye(2))
 
-    monkeypatch.setattr(dft, "RKS", _track_pyscf_rks)
+    monkeypatch.setattr(inputs_mod, "restricted_init_guess_from_pyscf", fake_init_guess)
 
     inputs = build_rks_integral_inputs(
         atom=_h2_spec(),
@@ -229,7 +251,25 @@ def test_build_rks_integral_inputs_libcint_hybrid_does_not_use_pyscf_minao_guess
         max_l=1,
     )
 
-    assert rks_calls == []
+    assert captured["init_guess"] == "minao"
+    assert inputs.init_density is not None
+    assert inputs.init_mo_coeff is None
+    assert inputs.init_mo_occ is None
+
+
+def test_build_rks_integral_inputs_1e_initial_guess_keeps_density_unset():
+    inputs = build_rks_integral_inputs(
+        atom=_h2_spec(),
+        basis="sto-3g",
+        config=RKSConfig(xc_spec="pbe", jk_backend="full"),
+        integral_backend="jax",
+        grid_ao_backend="jax",
+        grids_level=0,
+        max_l=1,
+        init_guess="1e",
+    )
+
+    assert inputs.init_density is None
     assert inputs.init_mo_coeff is None
     assert inputs.init_mo_occ is None
 
@@ -237,11 +277,14 @@ def test_build_rks_integral_inputs_libcint_hybrid_does_not_use_pyscf_minao_guess
 def test_build_rks_integral_inputs_jax_uses_fused_core_matrices(monkeypatch):
     import td_graddft.scf.inputs as inputs_mod
 
-    def _fail_separate_core_builder(*args, **kwargs):
-        raise AssertionError("JAX RKS input construction should use fused overlap/hcore matrices.")
+    def fake_overlap_hcore_matrices(basis, *, backend="auto", **kwargs):
+        shape = (basis.nao, basis.nao)
+        if backend != "jax":
+            raise AssertionError("Default JAX RKS input construction should request backend='jax'.")
+        return jnp.eye(shape[0]), 2.0 * jnp.eye(shape[0])
 
-    monkeypatch.setattr(inputs_mod, "overlap_matrix", _fail_separate_core_builder)
-    monkeypatch.setattr(inputs_mod, "build_hcore", _fail_separate_core_builder)
+    monkeypatch.setattr(inputs_mod, "overlap_hcore_matrices", fake_overlap_hcore_matrices)
+    monkeypatch.delattr(inputs_mod, "CudaOneElectronBuilder", raising=False)
 
     inputs = build_rks_integral_inputs(
         atom=_h2_spec(),
@@ -257,25 +300,282 @@ def test_build_rks_integral_inputs_jax_uses_fused_core_matrices(monkeypatch):
     assert inputs.direct_basis is inputs.basis
 
 
+def test_restricted_chk_init_guess_uses_bound_pyscf_chkfile_api(monkeypatch):
+    class FakeMF:
+        def __init__(self):
+            self.chk_call = None
+            self.minao_called = False
+
+        def init_guess_by_chkfile(self, *, chkfile=None, project=None):
+            self.chk_call = (chkfile, project)
+            return np.eye(2)
+
+        def init_guess_by_minao(self, mol):
+            self.minao_called = True
+            return 2.0 * np.eye(2)
+
+    fake_mf = FakeMF()
+
+    monkeypatch.setattr(
+        "td_graddft.scf.init_guess._build_pyscf_ks_object",
+        lambda **kwargs: (object(), fake_mf),
+    )
+
+    guess = restricted_init_guess_from_pyscf(
+        atom=_h2_spec(),
+        basis="sto-3g",
+        unit="Bohr",
+        charge=0,
+        spin=0,
+        cart=False,
+        verbose=0,
+        xc_spec="pbe",
+        init_guess="chk",
+        sap_basis=None,
+        chkfile="fake.chk",
+        chkfile_project=True,
+        geometry_is_traced=False,
+        dtype=jnp.float64,
+    )
+
+    assert fake_mf.chk_call == ("fake.chk", True)
+    assert fake_mf.minao_called is False
+    np.testing.assert_allclose(np.asarray(guess.density), np.eye(2))
+
+
+def test_unrestricted_chk_init_guess_uses_bound_pyscf_chkfile_api(monkeypatch):
+    class FakeMF:
+        def __init__(self):
+            self.chk_call = None
+            self.minao_called = False
+
+        def init_guess_by_chkfile(self, *, chkfile=None, project=None):
+            self.chk_call = (chkfile, project)
+            return np.stack([np.eye(1), np.zeros((1, 1))], axis=0)
+
+        def init_guess_by_minao(self, mol):
+            self.minao_called = True
+            return np.stack([2.0 * np.eye(1), np.zeros((1, 1))], axis=0)
+
+    fake_mf = FakeMF()
+
+    monkeypatch.setattr(
+        "td_graddft.scf.init_guess._build_pyscf_ks_object",
+        lambda **kwargs: (object(), fake_mf),
+    )
+
+    guess = unrestricted_init_guess_from_pyscf(
+        atom=_h_atom_spec(),
+        basis="sto-3g",
+        unit="Bohr",
+        charge=0,
+        spin=1,
+        cart=False,
+        verbose=0,
+        xc_spec="pbe",
+        init_guess="chk",
+        sap_basis=None,
+        chkfile="fake.chk",
+        chkfile_project=False,
+        geometry_is_traced=False,
+        dtype=jnp.float64,
+    )
+
+    assert fake_mf.chk_call == ("fake.chk", False)
+    assert fake_mf.minao_called is False
+    np.testing.assert_allclose(np.asarray(guess.density_alpha), np.eye(1))
+    np.testing.assert_allclose(np.asarray(guess.density_beta), np.zeros((1, 1)))
+
+
+def test_restricted_init_guess_reuses_prebuilt_libcint_mol(monkeypatch):
+    class FakeMF:
+        def get_init_guess(self, mol, key="minao"):
+            assert key == "minao"
+            return np.eye(2)
+
+    fake_mol = object()
+
+    monkeypatch.setattr(
+        "td_graddft.scf.init_guess.build_libcint_mol",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("build_libcint_mol should not be called")),
+    )
+    monkeypatch.setattr("pyscf.dft.RKS", lambda mol, xc=None: FakeMF())
+
+    guess = restricted_init_guess_from_pyscf(
+        atom=_h2_spec(),
+        basis="sto-3g",
+        unit="Bohr",
+        charge=0,
+        spin=0,
+        cart=False,
+        verbose=0,
+        xc_spec="pbe",
+        init_guess="minao",
+        sap_basis=None,
+        chkfile=None,
+        chkfile_project=None,
+        geometry_is_traced=False,
+        dtype=jnp.float64,
+        libcint_mol=fake_mol,
+    )
+
+    np.testing.assert_allclose(np.asarray(guess.density), np.eye(2))
+
+
+def test_build_libcint_mol_caches_identical_host_handles(monkeypatch):
+    import td_graddft.data.integrals.libcint.mol as mol_mod
+
+    class FakeGTO:
+        def __init__(self):
+            self.calls = 0
+
+        def M(self, **kwargs):
+            self.calls += 1
+            return {"call": self.calls, "kwargs": kwargs}
+
+    fake_gto = FakeGTO()
+    monkeypatch.setattr("pyscf.gto.M", fake_gto.M)
+    mol_mod._LIBCINT_MOL_CACHE.clear()
+
+    spec = _h2_spec()
+    mol1 = build_libcint_mol(
+        atom=spec,
+        basis="sto-3g",
+        unit="Bohr",
+        charge=0,
+        spin=0,
+        cart=False,
+        verbose=0,
+    )
+    mol2 = build_libcint_mol(
+        atom=spec,
+        basis="sto-3g",
+        unit="Bohr",
+        charge=0,
+        spin=0,
+        cart=False,
+        verbose=0,
+    )
+
+    assert fake_gto.calls == 1
+    assert mol1 is mol2
+
+
+def test_libcint_one_electron_from_mol_caches_host_integrals():
+    import td_graddft.scf.inputs as inputs_mod
+
+    class FakeMol:
+        cart = False
+
+        def __init__(self):
+            self.calls = []
+
+        def intor_symmetric(self, name, comp=None):
+            self.calls.append((name, comp))
+            if comp == 3:
+                return np.zeros((3, 2, 2))
+            return np.eye(2)
+
+    fake_mol = FakeMol()
+    inputs_mod._LIBCINT_HOST_INTEGRAL_CACHE.clear()
+
+    out1 = inputs_mod._libcint_one_electron_from_mol(
+        mol=fake_mol,
+        geometry_anchor=jnp.zeros((1, 3)),
+        geometry_grad_policy="analytic",
+        include_dipole_integrals=True,
+    )
+    out2 = inputs_mod._libcint_one_electron_from_mol(
+        mol=fake_mol,
+        geometry_anchor=jnp.zeros((1, 3)),
+        geometry_grad_policy="analytic",
+        include_dipole_integrals=True,
+    )
+
+    assert fake_mol.calls.count(("int1e_ovlp_sph", None)) == 1
+    assert fake_mol.calls.count(("int1e_kin_sph", None)) == 1
+    assert fake_mol.calls.count(("int1e_nuc_sph", None)) == 1
+    assert fake_mol.calls.count(("int1e_r_sph", 3)) == 1
+    assert out1[0] is out2[0]
+    assert out1[1] is out2[1]
+    assert out1[2] is out2[2]
+
+
+def test_cached_libcint_host_integral_reuses_s4_eri_binding():
+    import td_graddft.scf.inputs as inputs_mod
+
+    fake_mol = object()
+    calls = {"n": 0}
+    inputs_mod._LIBCINT_HOST_INTEGRAL_CACHE.clear()
+
+    def _loader():
+        calls["n"] += 1
+        return np.eye(3)
+
+    out1 = inputs_mod._cached_libcint_host_integral(
+        mol=fake_mol,
+        integral_name="int2e_s4",
+        geometry_anchor=jnp.zeros((1, 3)),
+        geometry_grad_policy="analytic",
+        loader=_loader,
+    )
+    out2 = inputs_mod._cached_libcint_host_integral(
+        mol=fake_mol,
+        integral_name="int2e_s4",
+        geometry_anchor=jnp.zeros((1, 3)),
+        geometry_grad_policy="analytic",
+        loader=_loader,
+    )
+
+    assert calls["n"] == 1
+    assert out1 is out2
+
+
+def test_build_rks_integral_inputs_cuda_direct_jax_uses_single_integrals_entrypoint(monkeypatch):
+    import td_graddft.scf.inputs as inputs_mod
+
+    monkeypatch.setattr(inputs_mod, "cuda_ffi_available", lambda: True)
+
+    def _fail_direct_builder(*args, **kwargs):
+        raise AssertionError("SCF inputs should not instantiate CUDA one-electron builders directly.")
+
+    monkeypatch.setattr(inputs_mod, "CudaOneElectronBuilder", _fail_direct_builder, raising=False)
+
+    def fake_overlap_hcore_matrices(basis, *, backend="auto", **kwargs):
+        shape = (basis.nao, basis.nao)
+        return jnp.eye(shape[0]), 2.0 * jnp.eye(shape[0])
+
+    monkeypatch.setattr(inputs_mod, "overlap_hcore_matrices", fake_overlap_hcore_matrices)
+
+    inputs = build_rks_integral_inputs(
+        atom=_h2_spec(),
+        basis="sto-3g",
+        config=RKSConfig(jk_backend="direct", direct_jk_engine="cuda"),
+        integral_backend="jax",
+        grid_ao_backend="jax",
+        grids_level=0,
+        max_l=1,
+    )
+
+    assert inputs.overlap.shape == inputs.hcore.shape
+
+
 def test_build_rks_integral_inputs_cuda_direct_jax_uses_cuda_one_electron(monkeypatch):
     import td_graddft.scf.inputs as inputs_mod
 
     monkeypatch.setattr(inputs_mod, "cuda_ffi_available", lambda: True)
     captured = {}
 
-    def _fail_jax_core_builder(*args, **kwargs):
-        raise AssertionError("CUDA direct JAX input should use CUDA one-electron FFI.")
+    def fake_overlap_hcore_matrices(basis, *, backend="auto", **kwargs):
+        captured["basis"] = basis
+        captured["backend"] = backend
+        shape = (captured["basis"].nao, captured["basis"].nao)
+        if backend != "cuda":
+            raise AssertionError("CUDA direct JAX input should request backend='cuda'.")
+        return jnp.eye(shape[0]), 2.0 * jnp.eye(shape[0])
 
-    class FakeCudaOneElectronBuilder:
-        def __init__(self, basis):
-            captured["basis"] = basis
-
-        def build_overlap_hcore(self):
-            shape = (captured["basis"].nao, captured["basis"].nao)
-            return jnp.eye(shape[0]), 2.0 * jnp.eye(shape[0])
-
-    monkeypatch.setattr(inputs_mod, "overlap_hcore_matrices", _fail_jax_core_builder)
-    monkeypatch.setattr(inputs_mod, "CudaOneElectronBuilder", FakeCudaOneElectronBuilder)
+    monkeypatch.setattr(inputs_mod, "overlap_hcore_matrices", fake_overlap_hcore_matrices)
+    monkeypatch.delattr(inputs_mod, "CudaOneElectronBuilder", raising=False)
 
     inputs = build_rks_integral_inputs(
         atom=_h2_spec(),
@@ -288,6 +588,7 @@ def test_build_rks_integral_inputs_cuda_direct_jax_uses_cuda_one_electron(monkey
     )
 
     assert captured["basis"] is inputs.basis
+    assert captured["backend"] == "cuda"
     assert jnp.allclose(inputs.overlap, jnp.eye(inputs.basis.nao))
     assert jnp.allclose(inputs.hcore, 2.0 * jnp.eye(inputs.basis.nao))
 
@@ -297,18 +598,17 @@ def test_build_rks_integral_inputs_cuda_direct_jax_falls_back_without_cuda(monke
 
     captured = {}
 
-    def fake_core_builder(basis):
+    def fake_core_builder(basis, *, backend="auto", **kwargs):
         captured["basis"] = basis
+        captured["backend"] = backend
         shape = (basis.nao, basis.nao)
+        if backend != "jax":
+            raise AssertionError("Non-CUDA fallback must request backend='jax'.")
         return jnp.eye(shape[0]), 2.0 * jnp.eye(shape[0])
-
-    class FailingCudaOneElectronBuilder:
-        def __init__(self, basis):
-            raise AssertionError("CUDA one-electron builder should not be used without CUDA.")
 
     monkeypatch.setattr(inputs_mod, "cuda_ffi_available", lambda: False)
     monkeypatch.setattr(inputs_mod, "overlap_hcore_matrices", fake_core_builder)
-    monkeypatch.setattr(inputs_mod, "CudaOneElectronBuilder", FailingCudaOneElectronBuilder)
+    monkeypatch.delattr(inputs_mod, "CudaOneElectronBuilder", raising=False)
 
     inputs = build_rks_integral_inputs(
         atom=_h2_spec(),
@@ -321,6 +621,7 @@ def test_build_rks_integral_inputs_cuda_direct_jax_falls_back_without_cuda(monke
     )
 
     assert captured["basis"] is inputs.basis
+    assert captured["backend"] == "jax"
     assert inputs.basis.precompute_eri_groups is True
     assert jnp.allclose(inputs.overlap, jnp.eye(inputs.basis.nao))
     assert jnp.allclose(inputs.hcore, 2.0 * jnp.eye(inputs.basis.nao))

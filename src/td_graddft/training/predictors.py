@@ -6,6 +6,10 @@ from typing import Any, Callable
 from jaxtyping import Array, PyTree
 
 from .config import GroundStateTrainingConfig
+from .trainer import (
+    _resolve_runtime_forward_setup,
+    _runtime_forward_molecule,
+)
 from .targets import (
     _predict_ground_state_total_energy_from_molecule,
     _resolve_training_molecule_with_mode,
@@ -29,6 +33,14 @@ def predict_ground_state_molecule(
     """
 
     cfg = GroundStateTrainingConfig() if training_config is None else training_config
+    _, runtime_forward_provider = _resolve_runtime_forward_setup(cfg, None)
+    if runtime_forward_provider is not None:
+        return _runtime_forward_molecule(
+            runtime_forward_provider,
+            params,
+            functional,
+            molecule,
+        )
     return _resolve_training_molecule_with_mode(
         params,
         functional,

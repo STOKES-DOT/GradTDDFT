@@ -9,7 +9,6 @@ import optax
 from flax.training.train_state import TrainState
 
 from .config import GroundStateTrainingConfig
-from .losses import make_self_supervised_rsh_loss
 from .neural_xc_trainer import _empty_history
 from .neural_xc_trainer import _scalar_metric
 from .results import TrainingResult
@@ -44,7 +43,7 @@ def _default_rsh_training_config(
         return training_config
     return GroundStateTrainingConfig(
         mode="self_consistent",
-        scf_gradient_mode="implicit_commutator",
+        scf_gradient_mode="impl",
         scf_require_convergence=False,
     )
 
@@ -87,35 +86,9 @@ def _build_rsh_loss(
 ) -> Callable[..., tuple[Any, dict[str, Any]]]:
     if callable(loss):
         return _average_loss_over_data(loss)
-    if loss == "koopmans_ip_ea":
-        return _average_loss_over_data(
-            make_self_supervised_rsh_loss(
-                functional,
-                training_config=training_config,
-                janak_weight=0.0,
-                fractional_weight=0.0,
-                koopmans_ip_weight=1.0,
-                koopmans_ea_weight=0.0,
-                koopmans_lumo_ea_weight=1.0,
-                prior_weight=1e-3,
-            )
-        )
-    if loss in {"janak", "self_supervised"}:
-        return _average_loss_over_data(
-            make_self_supervised_rsh_loss(
-                functional,
-                training_config=training_config,
-                janak_weight=1.0,
-                fractional_weight=0.0,
-                koopmans_ip_weight=0.0,
-                koopmans_ea_weight=0.0,
-                koopmans_lumo_ea_weight=0.0,
-                prior_weight=1e-3,
-            )
-        )
-    raise ValueError(
-        "RSHOptimizer currently supports loss='koopmans_ip_ea', "
-        "loss='janak', loss='self_supervised', or a callable loss."
+    raise NotImplementedError(
+        "Built-in RSH self-supervised losses were removed. "
+        "Pass a callable loss to RSHOptimizer.kernel(...) while the new training path is rebuilt."
     )
 
 
@@ -158,6 +131,12 @@ class RSHOptimizer:
         if int(steps) > 0:
             data = _as_rsh_training_data(self.molecules)
             first_molecule = _molecule_for_initialization(data)
+            resolved_training_config = _default_rsh_training_config(training_config)
+            loss_fn = _build_rsh_loss(
+                self.functional,
+                loss,
+                resolved_training_config,
+            )
             tx = optax.adam(float(learning_rate))
             if params is None:
                 key = jax.random.PRNGKey(0) if rng is None else rng
@@ -173,12 +152,6 @@ class RSHOptimizer:
                     params=params,
                     tx=tx,
                 )
-            resolved_training_config = _default_rsh_training_config(training_config)
-            loss_fn = _build_rsh_loss(
-                self.functional,
-                loss,
-                resolved_training_config,
-            )
             train_step = make_ground_state_train_step(
                 self.functional,
                 training_config=resolved_training_config,

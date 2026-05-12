@@ -4,6 +4,7 @@ import pytest
 
 from td_graddft.nn_rsh import (
     AtomCenteredDensityDescriptorConfig,
+    RSH,
     RSHGNNHead,
     make_atom_centered_density_descriptor_fn,
     make_gnn_rsh_functional,
@@ -128,3 +129,58 @@ def test_make_gnn_rsh_functional_initializes_from_water_descriptor():
     assert 0.0 <= float(resolved.sr_hf_fraction) <= float(resolved.lr_hf_fraction) <= 1.0
     assert 0.05 <= float(resolved.omega) <= 0.70
     assert jnp.all(jnp.isfinite(functional._raw_outputs(params, molecule)))
+
+
+def test_rsh_public_trainable_uses_atom_centered_gnn_workflow():
+    molecule = _make_water_reference()
+    functional = RSH("lc-wpbe").trainable(
+        descriptor_config=AtomCenteredDensityDescriptorConfig(
+            radial_centers=(0.6, 1.4),
+            radial_width=0.5,
+            max_angular=1,
+        ),
+        node_hidden_dims=(8,),
+        global_hidden_dims=(8,),
+        num_heads=2,
+        num_layers=1,
+        qkv_features=8,
+        ffn_dim=16,
+        fallback_omega_values=(0.0, 0.3, 0.6),
+    )
+
+    params = functional.init_from_molecule(jax.random.PRNGKey(7), molecule)
+    descriptor = functional.descriptor_fn(molecule)
+    resolved = functional.resolve_parameters(params, molecule)
+
+    assert functional.head_type == "gnn"
+    assert set(descriptor) >= {"atom_descriptors", "atom_coords", "atom_charges"}
+    assert descriptor["atom_descriptors"].shape[0] == molecule.atom_coords.shape[0]
+    assert resolved.sr_hf_fraction.shape == ()
+    assert resolved.lr_hf_fraction.shape == ()
+    assert resolved.omega.shape == ()
+
+
+def test_hse06_public_trainable_initializes_on_water_descriptor():
+    molecule = _make_water_reference()
+    functional = RSH("hse06").trainable(
+        descriptor_config=AtomCenteredDensityDescriptorConfig(
+            radial_centers=(0.6, 1.4),
+            radial_width=0.5,
+            max_angular=1,
+        ),
+        node_hidden_dims=(8,),
+        global_hidden_dims=(8,),
+        num_heads=2,
+        num_layers=1,
+        qkv_features=8,
+        ffn_dim=16,
+        fallback_omega_values=(0.0, 0.3, 0.6),
+    )
+
+    params = functional.init_from_molecule(jax.random.PRNGKey(9), molecule)
+    resolved = functional.resolve_parameters(params, molecule)
+
+    assert functional.head_type == "gnn"
+    assert functional.local_term_specs
+    assert float(resolved.sr_hf_fraction) == pytest.approx(0.25, abs=1e-6)
+    assert float(resolved.lr_hf_fraction) == pytest.approx(0.0, abs=1e-6)
