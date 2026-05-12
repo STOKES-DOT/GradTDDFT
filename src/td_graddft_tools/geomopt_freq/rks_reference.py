@@ -5,7 +5,7 @@ from typing import Any, Literal
 import jax.numpy as jnp
 from jaxtyping import Array
 
-from td_graddft.data.integrals.libcint_autodiff import LibcintGeometryGradPolicy
+from td_graddft.data.integrals.libcint.autodiff import LibcintGeometryGradPolicy
 from td_graddft.data.molecule import ANGSTROM_TO_BOHR, MoleculeSpec, parse_molecule_spec
 from td_graddft.scf.builders import restricted_molecule_from_spec_with_jax_rks
 from td_graddft.scf import RKSConfig

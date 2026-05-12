@@ -6,6 +6,7 @@ import pytest
 from types import SimpleNamespace
 
 import td_graddft.training.targets as training_targets
+import td_graddft.training.trainer as training_trainer
 from td_graddft.jax_libxc import b3lyp_component_basis
 from td_graddft.neural_xc import make_neural_xc_functional
 from td_graddft.nn_rsh.functional import BoundTrainableRSHFunctional
@@ -23,8 +24,12 @@ from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,
     ground_state_mse_loss,
+    make_ground_state_eval,
+    make_ground_state_loss_and_grad,
+    make_ground_state_predictor,
     make_self_consistent_runtime_forward_provider,
     make_runtime_forward_implicit_loss_and_grad,
+    predict_ground_state_molecule,
     predict_ground_state_total_energy,
 )
 
@@ -283,8 +288,8 @@ def test_self_consistent_training_mode_produces_finite_loss_and_energy():
             conv_tol_density=1e-7,
         )
     )
-    molecule_sc, info = solver.run(molecule, functional, params)
-    assert info.mode == "self_consistent"
+    molecule_sc, info = solver.run_runtime_forward(molecule, functional, params)
+    assert info.mode == "self_consistent_runtime_forward"
     assert int(info.cycles) >= 1
     assert np.isfinite(float(info.final_rms_density))
     assert np.isfinite(np.asarray(molecule_sc.rdm1)).all()
@@ -320,7 +325,7 @@ def test_self_consistent_training_mode_produces_finite_loss_and_energy():
     assert metrics["scf_cycles_mean"].shape == (1,)
     assert metrics["scf_selected_rms_max"].shape == (1,)
     assert 0.0 <= float(metrics["scf_converged_fraction"][0]) <= 1.0
-    assert float(metrics["scf_cycles_mean"][0]) >= 1.0
+    assert float(metrics["scf_cycles_mean"][0]) == 0.0
     assert np.isfinite(float(metrics["scf_selected_rms_max"][0]))
     assert np.isfinite(float(energy))
 
@@ -345,6 +350,7 @@ def test_self_consistent_solver_preserves_fractional_frontier_occupations():
     solver = DifferentiableSCF(
         DifferentiableSCFConfig(
             mode="self_consistent",
+            gradient_mode="impl",
             max_cycle=4,
             damping=0.2,
             conv_tol_density=1e-7,
@@ -352,7 +358,7 @@ def test_self_consistent_solver_preserves_fractional_frontier_occupations():
     )
     molecule_sc, info = solver.run(molecule_frac, functional, params)
 
-    assert info.mode == "self_consistent"
+    assert info.mode == "self_consistent_implicit_input_state"
     assert np.allclose(np.asarray(molecule_sc.mo_occ), np.asarray(mo_occ_frac), atol=1e-8)
     assert np.isfinite(np.asarray(molecule_sc.rdm1)).all()
 
@@ -364,7 +370,7 @@ def test_unrestricted_self_consistent_solver_runs_for_bound_rsh():
     solver = DifferentiableSCF(
         DifferentiableSCFConfig(
             mode="self_consistent",
-            gradient_mode="unrolled",
+            gradient_mode="impl",
             max_cycle=6,
             damping=0.2,
             conv_tol_density=1e-8,
@@ -372,14 +378,14 @@ def test_unrestricted_self_consistent_solver_runs_for_bound_rsh():
     )
     molecule_sc, info = solver.run(molecule, functional, {})
 
-    assert info.mode == "self_consistent"
-    assert int(info.cycles) >= 1
+    assert info.mode == "self_consistent_implicit_input_state"
+    assert int(info.cycles) == 0
     assert np.isfinite(float(info.final_rms_density))
     assert np.isfinite(np.asarray(molecule_sc.rdm1)).all()
     assert np.allclose(np.asarray(molecule_sc.mo_occ), np.asarray(molecule.mo_occ), atol=1e-8)
 
 
-def test_unrestricted_self_consistent_solver_is_differentiable_in_unrolled_mode():
+def test_unrestricted_self_consistent_solver_is_differentiable_in_implicit_mode():
     molecule = _make_toy_unrestricted_reference()
 
     class _ToyUnrestrictedFunctional:
@@ -403,7 +409,7 @@ def test_unrestricted_self_consistent_solver_is_differentiable_in_unrolled_mode(
     solver = DifferentiableSCF(
         DifferentiableSCFConfig(
             mode="self_consistent",
-            gradient_mode="unrolled",
+            gradient_mode="impl",
             max_cycle=6,
             damping=0.2,
             conv_tol_density=1e-8,
@@ -421,7 +427,7 @@ def test_unrestricted_self_consistent_solver_is_differentiable_in_unrolled_mode(
     assert jnp.isfinite(grad)
 
 
-def test_unrestricted_implicit_commutator_produces_finite_gradient():
+def test_unrestricted_impl_produces_finite_gradient():
     molecule = _make_toy_unrestricted_reference()
 
     class _ToyUnrestrictedFunctional:
@@ -457,7 +463,7 @@ def test_unrestricted_implicit_commutator_produces_finite_gradient():
     solver_implicit = DifferentiableSCF(
         DifferentiableSCFConfig(
             mode="self_consistent",
-            gradient_mode="implicit_commutator",
+            gradient_mode="impl",
             max_cycle=6,
             damping=0.2,
             conv_tol_density=1e-8,
@@ -467,16 +473,6 @@ def test_unrestricted_implicit_commutator_produces_finite_gradient():
             implicit_diff_restart=6,
         )
     )
-    solver_unrolled = DifferentiableSCF(
-        DifferentiableSCFConfig(
-            mode="self_consistent",
-            gradient_mode="unrolled",
-            max_cycle=6,
-            damping=0.2,
-            conv_tol_density=1e-8,
-        )
-    )
-
     def _objective_with(solver, raw_strength):
         params = {"strength": raw_strength}
         out, _ = solver.run(molecule, functional, params)
@@ -486,24 +482,13 @@ def test_unrestricted_implicit_commutator_produces_finite_gradient():
     implicit_value, implicit_grad = jax.value_and_grad(
         lambda x: _objective_with(solver_implicit, x)
     )(raw_strength)
-    unrolled_value, unrolled_grad = jax.value_and_grad(
-        lambda x: _objective_with(solver_unrolled, x)
-    )(raw_strength)
 
     assert jnp.isfinite(implicit_value)
     assert jnp.isfinite(implicit_grad)
-    assert jnp.isfinite(unrolled_value)
-    assert jnp.isfinite(unrolled_grad)
     assert jnp.abs(implicit_grad) > 1e-6
-    assert np.allclose(
-        np.asarray(implicit_grad),
-        np.asarray(unrolled_grad),
-        atol=5e-2,
-        rtol=5e-1,
-    )
 
 
-def test_implicit_commutator_can_use_input_state_as_forward_primal():
+def test_impl_can_use_input_state_as_forward_primal():
     molecule = _make_toy_restricted_reference()
 
     class _ToyRestrictedFunctional:
@@ -517,7 +502,7 @@ def test_implicit_commutator_can_use_input_state_as_forward_primal():
     solver = DifferentiableSCF(
         DifferentiableSCFConfig(
             mode="self_consistent",
-            gradient_mode="implicit_commutator",
+            gradient_mode="impl",
             implicit_forward_mode="input_state",
             implicit_diff_max_iter=12,
             implicit_diff_regularization=1e-3,
@@ -547,13 +532,13 @@ def test_training_config_passes_implicit_forward_mode_to_scf():
 
     cfg = GroundStateTrainingConfig(
         mode="self_consistent",
-        scf_gradient_mode="implicit_commutator",
+        scf_gradient_mode="impl",
         scf_implicit_forward_mode="input_state",
     )
 
     scf_solver = targets_mod._make_differentiable_scf(cfg)
 
-    assert scf_solver.config.gradient_mode == "implicit_commutator"
+    assert scf_solver.config.gradient_mode == "impl"
     assert scf_solver.config.implicit_forward_mode == "input_state"
 
 
@@ -660,7 +645,92 @@ def test_self_consistent_runtime_forward_provider_feeds_implicit_loss():
     assert jnp.isfinite(grads["strength"])
 
 
-def test_implicit_commutator_self_consistent_loss_produces_finite_gradient():
+def test_ground_state_helpers_auto_use_runtime_forward_for_implicit_self_consistent(
+    monkeypatch,
+):
+    molecule = _make_toy_restricted_reference()
+
+    class _ToyRestrictedFunctional:
+        def scf_potential_components_and_alpha(self, params, molecule_in):
+            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
+            v_rho = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
+            v_grad = jnp.zeros((int(molecule_in.ao.shape[0]), 3), dtype=jnp.float32)
+            return v_rho, v_grad, "LDA", jnp.asarray(0.0, dtype=jnp.float32)
+
+        def energy(self, params, density, weights):
+            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
+            return strength * jnp.sum(jnp.asarray(density) * jnp.asarray(weights))
+
+    calls: list[str] = []
+
+    def _provider_factory(_cfg):
+        def _provider(params, functional, molecule_in):
+            del params, functional
+            calls.append("forward")
+            return _replace_molecule(
+                molecule_in,
+                rdm1=jnp.asarray(molecule_in.rdm1),
+                scf_initial_density=jnp.asarray(molecule_in.rdm1).sum(axis=0),
+            )
+
+        return _provider
+
+    monkeypatch.setattr(
+        training_trainer,
+        "make_self_consistent_runtime_forward_provider",
+        _provider_factory,
+    )
+
+    cfg = GroundStateTrainingConfig(
+        mode="self_consistent",
+        scf_gradient_mode="impl",
+        energy_mse_weight=1.0,
+        energy_mae_weight=0.0,
+        scf_implicit_diff_max_iter=8,
+        scf_implicit_diff_regularization=1e-3,
+        scf_implicit_diff_tolerance=1e-6,
+        scf_implicit_diff_restart=4,
+    )
+    functional = _ToyRestrictedFunctional()
+    params = {"strength": jnp.asarray(0.1, dtype=jnp.float32)}
+    datum = GroundStateDatum(
+        molecule=molecule,
+        target_total_energy=jnp.asarray(0.0, dtype=jnp.float32),
+    )
+
+    evaluate = make_ground_state_eval(functional, training_config=cfg)
+    loss_eval, metrics_eval = evaluate(params, datum)
+    assert calls == ["forward"]
+    assert np.isfinite(float(loss_eval))
+    assert int(metrics_eval["scf_cycles"][0]) == 0
+
+    calls.clear()
+    loss_and_grad = make_ground_state_loss_and_grad(functional, training_config=cfg)
+    loss_train, metrics_train, grads = loss_and_grad(params, datum)
+    assert calls == ["forward"]
+    assert np.isfinite(float(loss_train))
+    assert int(metrics_train["scf_cycles"][0]) == 0
+    assert jnp.isfinite(grads["strength"])
+
+    calls.clear()
+    predicted_molecule = predict_ground_state_molecule(
+        params,
+        functional,
+        molecule,
+        training_config=cfg,
+    )
+    assert calls == ["forward"]
+    assert predicted_molecule.rdm1.shape == molecule.rdm1.shape
+
+    calls.clear()
+    predictor = make_ground_state_predictor(functional, training_config=cfg)
+    predicted_energy, predictor_molecule = predictor(params, molecule)
+    assert calls == ["forward"]
+    assert np.isfinite(float(predicted_energy))
+    assert predictor_molecule.rdm1.shape == molecule.rdm1.shape
+
+
+def test_impl_self_consistent_loss_produces_finite_gradient():
     _pyscf_or_skip()
     molecule = _make_h2_reference()
     functional, params = _make_functional_and_params(molecule)
@@ -672,7 +742,7 @@ def test_implicit_commutator_self_consistent_loss_produces_finite_gradient():
     )
     training_config = GroundStateTrainingConfig(
         mode="self_consistent",
-        scf_gradient_mode="implicit_commutator",
+        scf_gradient_mode="impl",
         scf_max_cycle=4,
         scf_damping=0.2,
         scf_conv_tol_density=1e-7,
@@ -762,7 +832,7 @@ def test_iterate_selection_tracks_best_and_first_converged_cycles():
             iterate_selection="best_rms",
         )
     )
-    _, best_info = best_solver.run(molecule, functional, params)
+    _, best_info = best_solver.run_runtime_forward(molecule, functional, params)
     best_history = np.asarray(best_info.rms_density_history)
     assert int(best_info.best_cycle) == int(best_history.argmin() + 1)
     assert np.isclose(float(best_info.best_rms_density), float(best_history.min()))
@@ -778,7 +848,7 @@ def test_iterate_selection_tracks_best_and_first_converged_cycles():
             iterate_selection="first_converged",
         )
     )
-    _, first_info = first_solver.run(molecule, functional, params)
+    _, first_info = first_solver.run_runtime_forward(molecule, functional, params)
     assert bool(first_info.converged)
     assert int(first_info.cycles) == 1
     assert int(first_info.selected_cycle) == 1
@@ -980,7 +1050,7 @@ def test_require_converged_iterates_avoids_best_rms_fallback_when_unconverged():
             require_converged_iterates=True,
         )
     )
-    _, info = solver.run(molecule, functional, params)
+    _, info = solver.run_runtime_forward(molecule, functional, params)
 
     assert not bool(info.converged)
     assert int(info.selected_cycle) == 1
@@ -1024,7 +1094,7 @@ def test_self_consistent_solver_uses_cached_initial_density_when_available():
             iterate_selection="final",
         )
     )
-    out, _ = solver.run(molecule_cached, functional, params)
+    out, _ = solver.run_runtime_forward(molecule_cached, functional, params)
 
     assert np.allclose(
         np.asarray(out.rdm1).sum(axis=0),
@@ -1051,7 +1121,7 @@ def test_batched_self_consistent_ground_state_loss_matches_loop_path(monkeypatch
     ]
     training_config = GroundStateTrainingConfig(
         mode="self_consistent",
-        scf_gradient_mode="unrolled",
+        scf_gradient_mode="impl",
         scf_max_cycle=4,
         scf_damping=0.2,
         scf_conv_tol_density=1e-7,
@@ -1094,7 +1164,7 @@ def test_batched_self_consistent_ground_state_loss_matches_loop_path(monkeypatch
     )
 
 
-def test_implicit_commutator_multi_datum_self_consistent_loss_skips_batched_fast_path(monkeypatch):
+def test_impl_multi_datum_self_consistent_loss_skips_batched_fast_path(monkeypatch):
     _pyscf_or_skip()
     molecule_a = _make_h2_reference(half_distance_angstrom=0.35)
     molecule_b = _make_h2_reference(half_distance_angstrom=0.70)
@@ -1112,7 +1182,7 @@ def test_implicit_commutator_multi_datum_self_consistent_loss_skips_batched_fast
     ]
     training_config = GroundStateTrainingConfig(
         mode="self_consistent",
-        scf_gradient_mode="implicit_commutator",
+        scf_gradient_mode="impl",
         scf_max_cycle=4,
         scf_damping=0.2,
         scf_conv_tol_density=1e-7,
@@ -1126,7 +1196,7 @@ def test_implicit_commutator_multi_datum_self_consistent_loss_skips_batched_fast
         training_targets,
         "_ground_state_mse_loss_batched_self_consistent",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("implicit_commutator path should not use batched self-consistent fast path")
+            AssertionError("impl path should not use batched self-consistent fast path")
         ),
     )
     loss_loop, metrics_loop = training_targets.ground_state_mse_loss(
@@ -1209,3 +1279,217 @@ def test_ground_state_energy_uses_direct_cuda_jk_when_eri_is_empty():
 
     assert calls == [0.0]
     assert np.isfinite(float(energy))
+
+
+# ---------------------------------------------------------------------------
+# Tests for gradient_mode switching between expl and impl
+# ---------------------------------------------------------------------------
+
+
+def test_expl_gradient_mode_produces_finite_energy():
+    """gradient_mode='expl' runs the full SCF loop and returns a converged density."""
+    _pyscf_or_skip()
+    molecule = _make_h2_reference()
+    functional, params = _make_functional_and_params(molecule)
+
+    solver = DifferentiableSCF(
+        DifferentiableSCFConfig(
+            mode="self_consistent",
+            gradient_mode="expl",
+            max_cycle=8,
+            damping=0.2,
+            conv_tol_density=1e-8,
+        )
+    )
+    molecule_sc, info = solver.run(molecule, functional, params)
+
+    assert info.mode == "self_consistent"
+    assert np.isfinite(np.asarray(molecule_sc.rdm1)).all()
+    assert np.isfinite(float(info.final_rms_density))
+
+
+def test_expl_mode_gradient_is_finite():
+    """gradient_mode='expl' produces finite gradients through the SCF loop."""
+    _pyscf_or_skip()
+    molecule = _make_h2_reference()
+    functional, params = _make_functional_and_params(molecule)
+
+    solver = DifferentiableSCF(
+        DifferentiableSCFConfig(
+            mode="self_consistent",
+            gradient_mode="expl",
+            max_cycle=8,
+            damping=0.25,
+            conv_tol_density=1e-8,
+        )
+    )
+
+    def loss_fn(p):
+        mol_sc, _ = solver.run(molecule, functional, p)
+        energy = training_targets._predict_ground_state_total_energy_from_molecule(
+            p, functional, mol_sc,
+        )
+        return energy
+
+    loss, grads = jax.value_and_grad(loss_fn)(params)
+    assert np.isfinite(float(loss))
+    grad_leaves = jax.tree_util.tree_leaves(grads)
+    assert len(grad_leaves) > 0
+    for g in grad_leaves:
+        assert np.isfinite(np.asarray(g)).all(), "gradient contains non-finite values"
+
+
+def test_implicit_mode_gradient_is_finite():
+    """gradient_mode='impl' with input_state produces finite gradients."""
+    _pyscf_or_skip()
+    molecule = _make_h2_reference()
+    functional, params = _make_functional_and_params(molecule)
+
+    solver = DifferentiableSCF(
+        DifferentiableSCFConfig(
+            mode="self_consistent",
+            gradient_mode="impl",
+            implicit_forward_mode="input_state",
+            max_cycle=8,
+            damping=0.25,
+            conv_tol_density=1e-8,
+        )
+    )
+
+    def loss_fn(p):
+        mol_sc, _ = solver.run(molecule, functional, p)
+        energy = training_targets._predict_ground_state_total_energy_from_molecule(
+            p, functional, mol_sc,
+        )
+        return energy
+
+    loss, grads = jax.value_and_grad(loss_fn)(params)
+    assert np.isfinite(float(loss))
+    grad_leaves = jax.tree_util.tree_leaves(grads)
+    assert len(grad_leaves) > 0
+    for g in grad_leaves:
+        assert np.isfinite(np.asarray(g)).all(), "gradient contains non-finite values"
+
+
+def test_implicit_mode_with_expl_forward_is_finite():
+    """gradient_mode='impl' with implicit_forward_mode='expl' works."""
+    _pyscf_or_skip()
+    molecule = _make_h2_reference()
+    functional, params = _make_functional_and_params(molecule)
+
+    solver = DifferentiableSCF(
+        DifferentiableSCFConfig(
+            mode="self_consistent",
+            gradient_mode="impl",
+            implicit_forward_mode="expl",
+            max_cycle=8,
+            damping=0.25,
+            conv_tol_density=1e-8,
+        )
+    )
+
+    def loss_fn(p):
+        mol_sc, info = solver.run(molecule, functional, p)
+        # The forward state info should reflect a full SCF run (not input_state).
+        assert info.mode == "self_consistent"
+        energy = training_targets._predict_ground_state_total_energy_from_molecule(
+            p, functional, mol_sc,
+        )
+        return energy
+
+    loss, grads = jax.value_and_grad(loss_fn)(params)
+    assert np.isfinite(float(loss))
+    for g in jax.tree_util.tree_leaves(grads):
+        assert np.isfinite(np.asarray(g)).all()
+
+
+def test_expl_and_implicit_gradients_are_consistent():
+    """Gradients from expl and implicit modes should be directionally similar."""
+    _pyscf_or_skip()
+    molecule = _make_h2_reference()
+    functional, params = _make_functional_and_params(molecule)
+
+    # Unrolled gradient
+    solver_expl = DifferentiableSCF(
+        DifferentiableSCFConfig(
+            mode="self_consistent",
+            gradient_mode="expl",
+            max_cycle=8,
+            damping=0.25,
+            conv_tol_density=1e-8,
+        )
+    )
+
+    def loss_expl(p):
+        mol_sc, _ = solver_expl.run(molecule, functional, p)
+        return training_targets._predict_ground_state_total_energy_from_molecule(
+            p, functional, mol_sc,
+        )
+
+    _, grads_expl = jax.value_and_grad(loss_expl)(params)
+
+    # Implicit gradient (use expl forward for a tighter comparison)
+    solver_implicit = DifferentiableSCF(
+        DifferentiableSCFConfig(
+            mode="self_consistent",
+            gradient_mode="impl",
+            implicit_forward_mode="expl",
+            max_cycle=8,
+            damping=0.25,
+            conv_tol_density=1e-8,
+            implicit_diff_max_iter=24,
+            implicit_diff_tolerance=1e-6,
+        )
+    )
+
+    def loss_implicit(p):
+        mol_sc, _ = solver_implicit.run(molecule, functional, p)
+        return training_targets._predict_ground_state_total_energy_from_molecule(
+            p, functional, mol_sc,
+        )
+
+    _, grads_implicit = jax.value_and_grad(loss_implicit)(params)
+
+    # Compare: the two gradient vectors should have positive cosine similarity.
+    def _flatten(g):
+        leaves = jax.tree_util.tree_leaves(g)
+        return jnp.concatenate([jnp.asarray(x).ravel() for x in leaves])
+
+    g_expl = _flatten(grads_expl)
+    g_implicit = _flatten(grads_implicit)
+
+    cos_sim = jnp.dot(g_expl, g_implicit) / (
+        jnp.linalg.norm(g_expl) * jnp.linalg.norm(g_implicit) + 1e-12
+    )
+    assert float(cos_sim) > 0.9, (
+        f"Gradient cosine similarity {float(cos_sim):.6f} < 0.9, "
+        "expl and implicit gradients disagree too much."
+    )
+
+
+def test_config_rejects_invalid_gradient_mode():
+    with pytest.raises(ValueError, match="gradient_mode must be one of"):
+        DifferentiableSCFConfig(gradient_mode="explicit")
+
+
+def test_config_rejects_invalid_forward_mode():
+    with pytest.raises(ValueError, match="implicit_forward_mode must be one of"):
+        DifferentiableSCFConfig(implicit_forward_mode="none")
+
+
+def test_mode_switch_via_config():
+    """Verify that switching between expl and implicit modes is a simple config change."""
+    expl_cfg = DifferentiableSCFConfig(gradient_mode="expl")
+    assert expl_cfg.gradient_mode == "expl"
+
+    implicit_cfg = replace(expl_cfg, gradient_mode="impl",
+                           implicit_forward_mode="input_state")
+    assert implicit_cfg.gradient_mode == "impl"
+    assert implicit_cfg.implicit_forward_mode == "input_state"
+
+    # Both configs should be usable to create solvers.
+    solver_expl = DifferentiableSCF(expl_cfg)
+    assert solver_expl.config.gradient_mode == "expl"
+
+    solver_implicit = DifferentiableSCF(implicit_cfg)
+    assert solver_implicit.config.gradient_mode == "impl"

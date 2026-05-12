@@ -3,13 +3,14 @@ from __future__ import annotations
 import functools
 import weakref
 from collections.abc import Callable
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from ..basis import CartesianAO, CartesianBasis, PairBatchGroup
+from ...basis import CartesianAO, CartesianBasis, PairBatchGroup
 from ._common import (
     SUPPORTED_CARTESIAN_MAX_L,
     apply_cartesian_derivatives_2c,
@@ -1161,8 +1162,19 @@ def overlap_hcore_matrices(
     atom_coords: Array | None = None,
     atom_charges: Array | None = None,
     engine: str = "auto",
+    backend: Literal["jax", "cuda", "auto"] = "auto",
 ) -> tuple[Array, Array]:
     """Build overlap and H_core matrices in one AO-pair pass."""
+
+    backend_mode = str(backend).lower()
+    if backend_mode not in {"auto", "jax", "cuda"}:
+        raise ValueError(
+            f"Unsupported overlap_hcore backend={backend!r}. Expected 'auto', 'jax', or 'cuda'."
+        )
+    if backend_mode == "cuda":
+        from .cuda_one_electron import CudaOneElectronBuilder
+
+        return CudaOneElectronBuilder(basis).build_overlap_hcore()
 
     coords = basis.atom_coords if atom_coords is None else atom_coords
     charges = basis.atom_charges if atom_charges is None else atom_charges

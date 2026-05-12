@@ -15,13 +15,20 @@ from .descriptors import (
     make_atom_centered_density_descriptor_fn,
 )
 from .gnn import RSHGNNHead
-from ..features import restricted_grid_features, restricted_grid_features_with_gradients
+from ..features import (
+    _spin_density_and_gradient,
+    restricted_grid_features,
+    restricted_grid_features_with_gradients,
+)
 from ..jax_libxc import (
+    LocalXCTermSpec,
     RestrictedFeatureBundle,
     eval_xc_energy_density,
+    eval_xc_term_specs_energy_density,
     restricted_feature_bundle_from_rho_grad_tau,
     semilocal_terms,
     xc_type,
+    xc_type_from_term_specs,
 )
 from .schema import (
     RSHFunctionalTemplate,
@@ -80,6 +87,10 @@ def _is_concrete_scalar_near_zero(value: Any, *, tol: float = 1e-12) -> bool:
 
 def _xc_spec_uses_wpbeh(xc_spec: str) -> bool:
     return any(term.name == "gga_x_wpbeh" for term in semilocal_terms(str(xc_spec)))
+
+
+def _local_terms_use_wpbeh(term_specs: Sequence[LocalXCTermSpec]) -> bool:
+    return any(term.name == "gga_x_wpbeh" for term in term_specs)
 
 
 def _exact_exchange_energy(molecule: Any) -> Array:
@@ -269,13 +280,47 @@ def _range_separated_exchange_matrix_for_density(
     return 0.5 * (k_mat + k_mat.T)
 
 
+def _xc_kind_and_wpbeh_flag(
+    xc_spec: str | None,
+    local_term_specs: Sequence[LocalXCTermSpec],
+) -> tuple[str, bool]:
+    if local_term_specs:
+        return (
+            str(xc_type_from_term_specs(local_term_specs)).upper(),
+            _local_terms_use_wpbeh(local_term_specs),
+        )
+    if xc_spec is None:
+        raise ValueError("Either xc_spec or local_term_specs must be provided.")
+    return str(xc_type(xc_spec)).upper(), _xc_spec_uses_wpbeh(xc_spec)
+
+
+def _evaluate_local_xc_density(
+    xc_spec: str | None,
+    local_term_specs: Sequence[LocalXCTermSpec],
+    features: RestrictedFeatureBundle,
+    *,
+    omega: Array,
+) -> Array:
+    if local_term_specs:
+        return eval_xc_term_specs_energy_density(
+            tuple(local_term_specs),
+            features,
+            omega=omega,
+        )
+    if xc_spec is None:
+        raise ValueError("Either xc_spec or local_term_specs must be provided.")
+    return eval_xc_energy_density(xc_spec, features, omega=omega)
+
+
 @lru_cache(maxsize=64)
 def _point_xc_value_and_grad_kernel(
-    xc_spec: str,
+    xc_spec: str | None,
+    local_term_specs: tuple[LocalXCTermSpec, ...],
     xc_kind: str,
     density_floor: float,
 ) -> Callable[[Array], tuple[Array, Array]]:
-    xc_spec_norm = str(xc_spec)
+    xc_spec_norm = None if xc_spec is None else str(xc_spec)
+    local_term_specs_norm = tuple(local_term_specs)
     xc_kind_norm = str(xc_kind)
     density_floor_value = float(density_floor)
 
@@ -298,44 +343,33 @@ def _point_xc_value_and_grad_kernel(
             tau_point,
             density_floor=density_floor_value,
         )
-        return eval_xc_energy_density(xc_spec_norm, features, omega=omega)
+        return _evaluate_local_xc_density(
+            xc_spec_norm,
+            local_term_specs_norm,
+            features,
+            omega=omega,
+        )
 
     mapped = jax.vmap(jax.value_and_grad(point_energy, argnums=0), in_axes=(0, None))
-    if _xc_spec_uses_wpbeh(xc_spec_norm):
+    if local_term_specs_norm:
+        if _local_terms_use_wpbeh(local_term_specs_norm):
+            return mapped
+        return jax.jit(mapped)
+    if xc_spec_norm is not None and _xc_spec_uses_wpbeh(xc_spec_norm):
         # jax_xc marks GGA_X_WPBEH as too expensive to JIT because of E1_scaled.
         return mapped
     return jax.jit(mapped)
 
 
-def _spin_density_and_gradient(
-    ao: Array,
-    ao_deriv1: Array,
-    density_spin: Array,
-) -> tuple[Array, Array]:
-    rho = jnp.einsum(
-        "rp,pq,rq->r",
-        ao,
-        density_spin,
-        ao,
-        precision=Precision.HIGHEST,
-    )
-    grad = 2.0 * jnp.einsum(
-        "xrp,pq,rq->rx",
-        ao_deriv1[1:4],
-        density_spin,
-        ao,
-        precision=Precision.HIGHEST,
-    )
-    return rho, grad
-
-
 @lru_cache(maxsize=64)
 def _point_unrestricted_xc_value_and_grad_kernel(
-    xc_spec: str,
+    xc_spec: str | None,
+    local_term_specs: tuple[LocalXCTermSpec, ...],
     xc_kind: str,
     density_floor: float,
 ) -> Callable[[Array], tuple[Array, Array]]:
-    xc_spec_norm = str(xc_spec)
+    xc_spec_norm = None if xc_spec is None else str(xc_spec)
+    local_term_specs_norm = tuple(local_term_specs)
     xc_kind_norm = str(xc_kind).upper()
     density_floor_value = float(density_floor)
 
@@ -359,18 +393,30 @@ def _point_unrestricted_xc_value_and_grad_kernel(
             tau_a=jnp.asarray(0.0, dtype=variables.dtype),
             tau_b=jnp.asarray(0.0, dtype=variables.dtype),
         )
-        return eval_xc_energy_density(xc_spec_norm, features, omega=omega)
+        return _evaluate_local_xc_density(
+            xc_spec_norm,
+            local_term_specs_norm,
+            features,
+            omega=omega,
+        )
 
-    return jax.jit(jax.vmap(jax.value_and_grad(point_energy, argnums=0), in_axes=(0, None)))
+    mapped = jax.vmap(jax.value_and_grad(point_energy, argnums=0), in_axes=(0, None))
+    if local_term_specs_norm:
+        if _local_terms_use_wpbeh(local_term_specs_norm):
+            return mapped
+        return jax.jit(mapped)
+    return jax.jit(mapped)
 
 
 @lru_cache(maxsize=64)
 def _point_unrestricted_xc_value_and_grads_kernel(
-    xc_spec: str,
+    xc_spec: str | None,
+    local_term_specs: tuple[LocalXCTermSpec, ...],
     xc_kind: str,
     density_floor: float,
 ) -> Callable[[Array, Array], tuple[Array, Array, Array]]:
-    xc_spec_norm = str(xc_spec)
+    xc_spec_norm = None if xc_spec is None else str(xc_spec)
+    local_term_specs_norm = tuple(local_term_specs)
     xc_kind_norm = str(xc_kind).upper()
     density_floor_value = float(density_floor)
 
@@ -394,7 +440,12 @@ def _point_unrestricted_xc_value_and_grads_kernel(
             tau_a=jnp.asarray(0.0, dtype=variables.dtype),
             tau_b=jnp.asarray(0.0, dtype=variables.dtype),
         )
-        return eval_xc_energy_density(xc_spec_norm, features, omega=omega)
+        return _evaluate_local_xc_density(
+            xc_spec_norm,
+            local_term_specs_norm,
+            features,
+            omega=omega,
+        )
 
     point_value_and_grads = jax.value_and_grad(point_energy, argnums=(0, 1))
 
@@ -405,7 +456,11 @@ def _point_unrestricted_xc_value_and_grads_kernel(
         )(variables, omega)
         return point_exc, point_grad, point_omega_grad
 
-    if _xc_spec_uses_wpbeh(xc_spec_norm):
+    if local_term_specs_norm:
+        if _local_terms_use_wpbeh(local_term_specs_norm):
+            return mapped
+        return jax.jit(mapped)
+    if xc_spec_norm is not None and _xc_spec_uses_wpbeh(xc_spec_norm):
         # Avoid multi-minute XLA compilation for the generated WPBEH expression.
         return mapped
     return jax.jit(mapped)
@@ -413,11 +468,13 @@ def _point_unrestricted_xc_value_and_grads_kernel(
 
 @lru_cache(maxsize=64)
 def _point_unrestricted_xc_energy_kernel(
-    xc_spec: str,
+    xc_spec: str | None,
+    local_term_specs: tuple[LocalXCTermSpec, ...],
     xc_kind: str,
     density_floor: float,
 ) -> Callable[[Array], Array]:
-    xc_spec_norm = str(xc_spec)
+    xc_spec_norm = None if xc_spec is None else str(xc_spec)
+    local_term_specs_norm = tuple(local_term_specs)
     xc_kind_norm = str(xc_kind).upper()
     density_floor_value = float(density_floor)
 
@@ -441,10 +498,19 @@ def _point_unrestricted_xc_energy_kernel(
             tau_a=jnp.asarray(0.0, dtype=variables.dtype),
             tau_b=jnp.asarray(0.0, dtype=variables.dtype),
         )
-        return eval_xc_energy_density(xc_spec_norm, features, omega=omega)
+        return _evaluate_local_xc_density(
+            xc_spec_norm,
+            local_term_specs_norm,
+            features,
+            omega=omega,
+        )
 
     mapped = jax.vmap(point_energy, in_axes=(0, None))
-    if _xc_spec_uses_wpbeh(xc_spec_norm):
+    if local_term_specs_norm:
+        if _local_terms_use_wpbeh(local_term_specs_norm):
+            return mapped
+        return jax.jit(mapped)
+    if xc_spec_norm is not None and _xc_spec_uses_wpbeh(xc_spec_norm):
         return mapped
     return jax.jit(mapped)
 
@@ -452,7 +518,8 @@ def _point_unrestricted_xc_energy_kernel(
 def _local_xc_energy_and_components(
     molecule: Any,
     *,
-    xc_spec: str,
+    xc_spec: str | None,
+    local_term_specs: Sequence[LocalXCTermSpec] = (),
     density_floor: float,
     potential_clip: float | None,
     omega: Array | float | None = None,
@@ -461,7 +528,7 @@ def _local_xc_energy_and_components(
     rho = jnp.maximum(features.rho, density_floor)
     tau = jnp.maximum(features.tau_a + features.tau_b, 0.0)
     weights = jnp.asarray(molecule.grid.weights)
-    kind = str(xc_type(xc_spec)).upper()
+    kind, _ = _xc_kind_and_wpbeh_flag(xc_spec, local_term_specs)
     if kind == "HF":
         zeros = jnp.zeros_like(rho)
         return jnp.asarray(0.0, dtype=rho.dtype), zeros, jnp.zeros((rho.shape[0], 3), dtype=rho.dtype), "LDA"
@@ -480,6 +547,7 @@ def _local_xc_energy_and_components(
 
     point_exc, point_grad = _point_xc_value_and_grad_kernel(
         xc_spec,
+        tuple(local_term_specs),
         kind,
         density_floor,
     )(response_variables, jnp.asarray(0.4 if omega is None else omega, dtype=rho.dtype))
@@ -504,12 +572,13 @@ def _local_xc_energy_and_components(
 def _local_xc_energy_and_components_unrestricted(
     molecule: Any,
     *,
-    xc_spec: str,
+    xc_spec: str | None,
+    local_term_specs: Sequence[LocalXCTermSpec] = (),
     density_floor: float,
     potential_clip: float | None,
     omega: Array | float | None = None,
 ) -> tuple[Array, Array, Array, Array, Array, str]:
-    kind = str(xc_type(xc_spec)).upper()
+    kind, _ = _xc_kind_and_wpbeh_flag(xc_spec, local_term_specs)
     ao = jnp.asarray(molecule.ao)
     ao_deriv1 = getattr(molecule, "ao_deriv1", None)
     if ao_deriv1 is None:
@@ -541,6 +610,7 @@ def _local_xc_energy_and_components_unrestricted(
 
     point_exc, point_grad = _point_unrestricted_xc_value_and_grad_kernel(
         xc_spec,
+        tuple(local_term_specs),
         kind,
         density_floor,
     )(response_variables, jnp.asarray(0.4 if omega is None else omega, dtype=rho_total.dtype))
@@ -570,11 +640,12 @@ def _local_xc_energy_and_components_unrestricted(
 def _local_xc_energy_unrestricted(
     molecule: Any,
     *,
-    xc_spec: str,
+    xc_spec: str | None,
+    local_term_specs: Sequence[LocalXCTermSpec] = (),
     density_floor: float,
     omega: Array | float | None = None,
 ) -> Array:
-    kind = str(xc_type(xc_spec)).upper()
+    kind, _ = _xc_kind_and_wpbeh_flag(xc_spec, local_term_specs)
     ao = jnp.asarray(molecule.ao)
     ao_deriv1 = getattr(molecule, "ao_deriv1", None)
     if ao_deriv1 is None:
@@ -602,11 +673,13 @@ def _local_xc_energy_unrestricted(
         raise ValueError(f"Unsupported XC kind={kind!r}.")
     energy_kernel = _point_unrestricted_xc_energy_kernel(
         xc_spec,
+        tuple(local_term_specs),
         kind,
         density_floor,
     )
     value_and_grads_kernel = _point_unrestricted_xc_value_and_grads_kernel(
         xc_spec,
+        tuple(local_term_specs),
         kind,
         density_floor,
     )
@@ -702,8 +775,9 @@ class AtomwiseRSHParameterHead(nn.Module):
 @dataclass(frozen=True)
 class BoundTrainableRSHFunctional:
     template: RSHFunctionalTemplate
-    local_xc_spec: str
+    local_xc_spec: str | None
     resolved_params: ResolvedRSHParameters
+    local_term_specs: tuple[LocalXCTermSpec, ...] = ()
     density_floor: float = 1e-12
     potential_clip: float | None = None
     fallback_omega_values: tuple[float, ...] | None = None
@@ -727,6 +801,7 @@ class BoundTrainableRSHFunctional:
         _, v_rho, v_grad, _ = _local_xc_energy_and_components(
             molecule,
             xc_spec=self.local_xc_spec,
+            local_term_specs=self.local_term_specs,
             density_floor=self.density_floor,
             potential_clip=self.potential_clip,
             omega=self.resolved_params.omega,
@@ -738,6 +813,7 @@ class BoundTrainableRSHFunctional:
         local_energy = _local_xc_energy_unrestricted(
             molecule,
             xc_spec=self.local_xc_spec,
+            local_term_specs=self.local_term_specs,
             density_floor=self.density_floor,
             omega=omega,
         )
@@ -766,6 +842,7 @@ class BoundTrainableRSHFunctional:
         _, v_rho_a, v_rho_b, v_grad_a, v_grad_b, kind = _local_xc_energy_and_components_unrestricted(
             molecule,
             xc_spec=self.local_xc_spec,
+            local_term_specs=self.local_term_specs,
             density_floor=self.density_floor,
             potential_clip=self.potential_clip,
             omega=omega,
@@ -824,6 +901,7 @@ class BoundTrainableRSHFunctional:
         _, v_rho, v_grad, kind = _local_xc_energy_and_components(
             molecule,
             xc_spec=self.local_xc_spec,
+            local_term_specs=self.local_term_specs,
             density_floor=self.density_floor,
             potential_clip=self.potential_clip,
             omega=omega,
@@ -859,7 +937,8 @@ class BoundTrainableRSHFunctional:
 class TrainableRSHFunctional:
     model: nn.Module
     template: RSHFunctionalTemplate
-    local_xc_spec: str = "pbe"
+    local_xc_spec: str | None = "pbe"
+    local_term_specs: tuple[LocalXCTermSpec, ...] = ()
     descriptor_fn: Callable[[Any | None], Any] = _constant_rsh_descriptor
     head_type: str = "mlp"
     density_floor: float = 1e-12
@@ -1004,6 +1083,7 @@ class TrainableRSHFunctional:
         return BoundTrainableRSHFunctional(
             template=self.template,
             local_xc_spec=self.local_xc_spec,
+            local_term_specs=self.local_term_specs,
             resolved_params=self.resolve_parameters(params, molecule),
             density_floor=self.density_floor,
             potential_clip=self.potential_clip,
@@ -1023,7 +1103,8 @@ class TrainableRSHFunctional:
 
 def make_minimal_trainable_rsh_functional(
     *,
-    local_xc_spec: str = "pbe",
+    local_xc_spec: str | None = "pbe",
+    local_term_specs: Sequence[LocalXCTermSpec] = (),
     hidden_dims: Sequence[int] = (),
     descriptor_fn: Callable[[Any | None], Any] = _constant_rsh_descriptor,
     template: RSHFunctionalTemplate | None = None,
@@ -1046,6 +1127,7 @@ def make_minimal_trainable_rsh_functional(
         model=RSHParameterHead(hidden_dims=hidden_dims),
         template=resolved_template,
         local_xc_spec=local_xc_spec,
+        local_term_specs=tuple(local_term_specs),
         descriptor_fn=descriptor_fn,
         fallback_omega_values=fallback_omega_values,
     )
@@ -1053,7 +1135,8 @@ def make_minimal_trainable_rsh_functional(
 
 def make_atom_centered_density_rsh_functional(
     *,
-    local_xc_spec: str = "pbe",
+    local_xc_spec: str | None = "pbe",
+    local_term_specs: Sequence[LocalXCTermSpec] = (),
     descriptor_config: AtomCenteredDensityDescriptorConfig | None = None,
     atom_hidden_dims: Sequence[int] = (32, 32),
     pooled_hidden_dims: Sequence[int] = (32,),
@@ -1084,6 +1167,7 @@ def make_atom_centered_density_rsh_functional(
         ),
         template=resolved_template,
         local_xc_spec=local_xc_spec,
+        local_term_specs=tuple(local_term_specs),
         descriptor_fn=make_atom_centered_density_descriptor_fn(descriptor_config),
         fallback_omega_values=fallback_omega_values,
     )
@@ -1091,7 +1175,8 @@ def make_atom_centered_density_rsh_functional(
 
 def make_gnn_rsh_functional(
     *,
-    local_xc_spec: str = "pbe",
+    local_xc_spec: str | None = "pbe",
+    local_term_specs: Sequence[LocalXCTermSpec] = (),
     descriptor_config: AtomCenteredDensityDescriptorConfig | None = None,
     node_hidden_dims: Sequence[int] = (32, 32),
     global_hidden_dims: Sequence[int] = (32, 16),
@@ -1143,6 +1228,7 @@ def make_gnn_rsh_functional(
         ),
         template=resolved_template,
         local_xc_spec=local_xc_spec,
+        local_term_specs=tuple(local_term_specs),
         descriptor_fn=make_atom_centered_density_descriptor_fn(descriptor_config),
         head_type="gnn",
         density_floor=density_floor,

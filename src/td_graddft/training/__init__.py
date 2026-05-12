@@ -30,10 +30,11 @@ from .predictors import (
     predict_ground_state_density,
     predict_ground_state_molecule,
 )
-from .losses import make_ground_state_loss, make_self_supervised_rsh_loss
+from .losses import make_ground_state_loss
 from .trainer import (
     create_train_state,
     create_train_state_from_molecule,
+    make_ground_state_eval,
     make_ground_state_loss_and_grad,
     make_ground_state_train_step,
     make_runtime_forward_implicit_loss_and_grad,
@@ -75,10 +76,10 @@ __all__ = [
     "make_fixed_density_predictor",
     "make_ground_state_predictor",
     "make_ground_state_loss",
-    "make_self_supervised_rsh_loss",
     "make_self_consistent_predictor",
     "create_train_state",
     "create_train_state_from_molecule",
+    "make_ground_state_eval",
     "make_ground_state_loss_and_grad",
     "make_ground_state_train_step",
     "make_runtime_forward_implicit_loss_and_grad",

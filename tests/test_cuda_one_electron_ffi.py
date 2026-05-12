@@ -1,8 +1,8 @@
 import numpy as np
 
 from td_graddft.data.basis import basis_from_spec
-from td_graddft.scf import cuda_one_electron
-from td_graddft.scf.cuda_one_electron import CudaOneElectronBuilder
+from td_graddft.data.integrals.jax import cuda_one_electron
+from td_graddft.data.integrals.jax.cuda_one_electron import CudaOneElectronBuilder
 
 
 def test_cuda_one_electron_builder_invokes_ffi_call(monkeypatch, tmp_path):
@@ -25,7 +25,7 @@ def test_cuda_one_electron_builder_invokes_ffi_call(monkeypatch, tmp_path):
 
     monkeypatch.setattr(CudaOneElectronBuilder, "_compile_library", fake_compile_library)
     monkeypatch.setattr(CudaOneElectronBuilder, "_compile_and_register", fake_compile_and_register)
-    monkeypatch.setattr("td_graddft.scf.cuda_one_electron._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_one_electron._ffi_call", fake_ffi_call)
 
     builder = CudaOneElectronBuilder(basis, cache_dir=tmp_path)
     overlap, hcore = builder.build_overlap_hcore()

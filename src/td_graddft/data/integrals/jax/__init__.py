@@ -1,9 +1,9 @@
-"""Pure-JAX Gaussian integral engines (cartesian s/p/d/f)."""
+"""JAX-native Gaussian integral backbone and derived J/K backends."""
 
-from .jax.cuda_direct_jk import CudaDirectJKBuilder, build_jk_from_eri_pair_matrix_cuda, cuda_ffi_available
-from .jax.cuda_one_electron import CudaOneElectronBuilder
-from .jax.direct_jk import DirectJKResult, build_direct_jk_from_basis, build_direct_jk_incremental
-from .jax.one_electron import (
+from .cuda_direct_jk import CudaDirectJKBuilder, build_jk_from_eri_pair_matrix_cuda, cuda_ffi_available
+from .cuda_one_electron import CudaOneElectronBuilder
+from .direct_jk import DirectJKResult, build_direct_jk_from_basis, build_direct_jk_incremental
+from .one_electron import (
     build_hcore,
     dipole_element,
     dipole_matrix,
@@ -18,13 +18,11 @@ from .jax.one_electron import (
     rinv_matrices,
     rinv_matrix,
 )
-from .jax.packed_eri import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix, eri_pair_matrix_to_mo_eri_slices
-from .jax.screening import schwarz_bounds, shell_pair_schwarz_bounds
-from .jax.two_electron import eri_element, eri_pair_matrix_packed, eri_tensor, eri_tensor_screened, precompile_eri_kernels
-from .libcint.mol import build_libcint_mol, libcint_intor_name
+from .packed_eri import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix, eri_pair_matrix_to_mo_eri_slices
+from .screening import schwarz_bounds, shell_pair_schwarz_bounds
+from .two_electron import eri_element, eri_pair_matrix_packed, eri_tensor, eri_tensor_screened, precompile_eri_kernels
 
 __all__ = [
-    "build_libcint_mol",
     "build_direct_jk_from_basis",
     "build_direct_jk_incremental",
     "overlap_matrix",
@@ -55,5 +53,4 @@ __all__ = [
     "eri_tensor_screened",
     "schwarz_bounds",
     "shell_pair_schwarz_bounds",
-    "libcint_intor_name",
 ]

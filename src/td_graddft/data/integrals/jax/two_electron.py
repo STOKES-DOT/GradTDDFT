@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from ..basis import CartesianAO, CartesianBasis, ContractedShell
+from ...basis import CartesianAO, CartesianBasis, ContractedShell
 from ._common import (
     SUPPORTED_CARTESIAN_MAX_L,
     apply_cartesian_derivatives_4c,

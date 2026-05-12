@@ -556,7 +556,7 @@ def test_strict_jax_self_consistent_losses_have_finite_gradients():
 
     common_cfg = dict(
         mode="self_consistent",
-        scf_gradient_mode="implicit_commutator",
+        scf_gradient_mode="impl",
         scf_max_cycle=6,
         scf_damping=0.2,
         scf_conv_tol_density=1e-7,
@@ -1623,7 +1623,7 @@ def test_strict_janak_frontier_autodiff_penalty_matches_unrestricted_noninteract
 
     cfg = GroundStateTrainingConfig(
         mode="self_consistent",
-        scf_gradient_mode="unrolled",
+        scf_gradient_mode="impl",
         scf_max_cycle=4,
         scf_damping=0.0,
         scf_level_shift=0.0,
@@ -1852,7 +1852,7 @@ def test_strict_janak_frontier_autodiff_penalty_falls_back_when_autodiff_is_nonf
             training_config=GroundStateTrainingConfig(
                 mode="self_consistent",
                 janak_frontier_mode="autodiff",
-                scf_gradient_mode="unrolled",
+                scf_gradient_mode="impl",
                 scf_max_cycle=4,
                 scf_damping=0.0,
                 scf_level_shift=0.0,
@@ -1935,7 +1935,7 @@ def test_strict_janak_frontier_autodiff_penalty_training_path_skips_eta_autodiff
     cfg = GroundStateTrainingConfig(
         mode="self_consistent",
         janak_frontier_mode="autodiff",
-        scf_gradient_mode="unrolled",
+        scf_gradient_mode="impl",
         scf_max_cycle=4,
         scf_damping=0.0,
         scf_level_shift=0.0,
@@ -2001,11 +2001,11 @@ def test_fractional_branch_training_config_uses_stabilized_overrides():
     assert branch_cfg.scf_iterate_selection == "best_rms"
 
 
-def test_strict_janak_branch_training_config_forces_unrolled():
+def test_strict_janak_branch_training_config_preserves_implicit_mode():
     cfg = GroundStateTrainingConfig(
         mode="self_consistent",
         janak_frontier_mode="autodiff",
-        scf_gradient_mode="implicit_commutator",
+        scf_gradient_mode="impl",
         fractional_branch_scf_max_cycle=6,
         fractional_branch_scf_damping=0.4,
         fractional_branch_scf_level_shift=0.6,
@@ -2014,7 +2014,7 @@ def test_strict_janak_branch_training_config_forces_unrolled():
 
     branch_cfg = training_targets._strict_janak_branch_training_config(cfg)
 
-    assert branch_cfg.scf_gradient_mode == "unrolled"
+    assert branch_cfg.scf_gradient_mode == "impl"
     assert branch_cfg.scf_max_cycle == 6
     assert jnp.allclose(branch_cfg.scf_damping, 0.4, atol=1e-6)
     assert jnp.allclose(branch_cfg.scf_level_shift, 0.6, atol=1e-6)
@@ -2073,7 +2073,7 @@ def test_ground_state_loss_uses_strict_janak_dispatch_when_requested(monkeypatch
             mode="self_consistent",
             janak_frontier_mode="autodiff",
             janak_frontier_delta=0.1,
-            scf_gradient_mode="unrolled",
+            scf_gradient_mode="impl",
             scf_max_cycle=6,
         ),
     )
@@ -2113,7 +2113,7 @@ def test_janak_full_scf_ad_dispatch_enables_training_eta_autodiff(monkeypatch):
         training_config=GroundStateTrainingConfig(
             mode="self_consistent",
             janak_frontier_mode="full_scf_ad",
-            scf_gradient_mode="unrolled",
+            scf_gradient_mode="impl",
             scf_max_cycle=3,
         ),
         assume_self_consistent_input=True,

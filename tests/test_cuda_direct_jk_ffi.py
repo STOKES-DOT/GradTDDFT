@@ -6,9 +6,9 @@ import jax
 import jax.numpy as jnp
 
 from td_graddft.data.basis import basis_from_spec
-from td_graddft.scf import cuda_direct_jk
+from td_graddft.data.integrals.jax import cuda_direct_jk
 from td_graddft.scf.builders import _cuda_direct_basis_cache_key
-from td_graddft.scf.cuda_direct_jk import (
+from td_graddft.data.integrals.jax.cuda_direct_jk import (
     CudaDirectJKBuilder,
     _primitive_cart_norm,
     joltqc_basis_data_from_basis,
@@ -53,7 +53,7 @@ def test_cuda_direct_jk_builder_invokes_ffi_call(monkeypatch, tmp_path):
 
     monkeypatch.setattr(CudaDirectJKBuilder, "_compile_library", fake_compile_library)
     monkeypatch.setattr(CudaDirectJKBuilder, "_compile_and_register", fake_compile_and_register)
-    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_direct_jk._ffi_call", fake_ffi_call)
 
     builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
     j_mat, k_mat = builder.build_jk(density)
@@ -341,7 +341,7 @@ def test_cuda_direct_jk_builder_can_build_pair_schwarz(monkeypatch, tmp_path):
         captured["kwargs"] = kwargs
         return np.arange(npair, dtype=np.float64) + 1.0
 
-    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_direct_jk._ffi_call", fake_ffi_call)
 
     builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
     bounds = builder.build_pair_schwarz()
@@ -793,7 +793,7 @@ def test_cuda_direct_jk_builder_pools_pair_schwarz_by_shell_pair(monkeypatch, tm
         assert target_name == "td_graddft_cuda_pair_schwarz"
         return raw_bounds
 
-    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_direct_jk._ffi_call", fake_ffi_call)
 
     builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
     pooled = np.asarray(builder.build_pair_schwarz())
@@ -920,7 +920,7 @@ def test_cuda_direct_jk_builder_uses_screened_shell_task_ffi_for_cutoff(monkeypa
             return np.arange(npair, dtype=np.float64) + 1.0
         return np.ones_like(density), 2.0 * np.ones_like(density)
 
-    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_direct_jk._ffi_call", fake_ffi_call)
 
     builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
     j_mat, k_mat = builder.build_jk(density, density_cutoff=1e-8)
@@ -964,7 +964,7 @@ def test_cuda_direct_jk_builder_uses_rys_screening_when_available(monkeypatch, t
             return np.arange(npair, dtype=np.float64) + 1.0
         return np.ones_like(density), 2.0 * np.ones_like(density)
 
-    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_direct_jk._ffi_call", fake_ffi_call)
 
     builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
     builder.has_rys_direct_jk = True
@@ -1002,7 +1002,7 @@ def test_cuda_direct_jk_builder_builds_grouped_screening_metadata_for_shell_task
             return np.arange(npair, dtype=np.float64) + 1.0
         return np.ones_like(density), 2.0 * np.ones_like(density)
 
-    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_direct_jk._ffi_call", fake_ffi_call)
 
     builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
     shell_log_q = np.asarray(builder.build_shell_log_q_matrix())
@@ -1098,7 +1098,7 @@ def test_cuda_direct_jk_builder_can_build_full_eri_tensor(monkeypatch, tmp_path)
         captured["kwargs"] = kwargs
         return np.ones(result_shape_dtypes.shape, dtype=np.float64)
 
-    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_direct_jk._ffi_call", fake_ffi_call)
 
     builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
     eri = builder.build_eri_tensor()
@@ -1124,7 +1124,7 @@ def test_cuda_direct_jk_builder_can_build_eri_pair_matrix(monkeypatch, tmp_path)
         captured["kwargs"] = kwargs
         return np.ones(result_shape_dtypes.shape, dtype=np.float64)
 
-    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_direct_jk._ffi_call", fake_ffi_call)
 
     builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
     pair = builder.build_eri_pair_matrix()
@@ -1152,7 +1152,7 @@ def test_cuda_direct_jk_builder_passes_pair_schwarz_to_screened_pair_eri(monkeyp
             return np.arange(npair, dtype=np.float64) + 1.0
         return np.ones(result_shape_dtypes.shape, dtype=np.float64)
 
-    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_direct_jk._ffi_call", fake_ffi_call)
 
     builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
     pair = builder.build_eri_pair_matrix()
@@ -1184,7 +1184,7 @@ def test_cuda_direct_jk_builder_can_contract_cached_pair_matrix(monkeypatch, tmp
     monkeypatch.setattr(CudaDirectJKBuilder, "_compile_library", lambda self: tmp_path / "libfake.so")
     monkeypatch.setattr(CudaDirectJKBuilder, "_compile_and_register", lambda self: None)
     monkeypatch.setattr(
-        "td_graddft.scf.cuda_direct_jk.ensure_cuda_pair_matrix_jk_ffi_registered",
+        "td_graddft.data.integrals.jax.cuda_direct_jk.ensure_cuda_pair_matrix_jk_ffi_registered",
         lambda **kwargs: True,
     )
 
@@ -1195,7 +1195,7 @@ def test_cuda_direct_jk_builder_can_contract_cached_pair_matrix(monkeypatch, tmp
         captured["kwargs"] = kwargs
         return np.ones_like(density), 2.0 * np.ones_like(density)
 
-    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_direct_jk._ffi_call", fake_ffi_call)
 
     builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
     j_mat, k_mat = builder.build_jk_from_eri_pair_matrix(pair_matrix, density)
@@ -1210,7 +1210,7 @@ def test_cuda_direct_jk_builder_can_contract_cached_pair_matrix(monkeypatch, tmp
 
 
 def test_cuda_cached_pair_matrix_jk_has_density_vjp(monkeypatch, tmp_path):
-    from td_graddft.scf.packed_eri import build_jk_from_eri_pair_matrix
+    from td_graddft.data.integrals.jax.packed_eri import build_jk_from_eri_pair_matrix
 
     basis = basis_from_spec("H 0 0 0; H 0 0 0.74", basis="sto-3g")
     npair = basis.nao * (basis.nao + 1) // 2
@@ -1248,7 +1248,7 @@ def test_cuda_cached_pair_matrix_jk_has_density_vjp(monkeypatch, tmp_path):
     monkeypatch.setattr(CudaDirectJKBuilder, "_compile_library", lambda self: tmp_path / "libfake.so")
     monkeypatch.setattr(CudaDirectJKBuilder, "_compile_and_register", lambda self: None)
     monkeypatch.setattr(
-        "td_graddft.scf.cuda_direct_jk.ensure_cuda_pair_matrix_jk_ffi_registered",
+        "td_graddft.data.integrals.jax.cuda_direct_jk.ensure_cuda_pair_matrix_jk_ffi_registered",
         lambda **kwargs: True,
     )
 
@@ -1257,7 +1257,7 @@ def test_cuda_cached_pair_matrix_jk_has_density_vjp(monkeypatch, tmp_path):
         j_mat, k_mat = build_jk_from_eri_pair_matrix(args[0], args[1])
         return jax.lax.stop_gradient(j_mat), jax.lax.stop_gradient(k_mat)
 
-    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_direct_jk._ffi_call", fake_ffi_call)
 
     builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
 
@@ -1277,7 +1277,7 @@ def test_cuda_cached_pair_matrix_jk_has_density_vjp(monkeypatch, tmp_path):
 
 
 def test_cuda_direct_jk_has_density_vjp_without_pair_cache(monkeypatch, tmp_path):
-    from td_graddft.scf.packed_eri import build_jk_from_eri_pair_matrix
+    from td_graddft.data.integrals.jax.packed_eri import build_jk_from_eri_pair_matrix
 
     basis = basis_from_spec("H 0 0 0; H 0 0 0.74", basis="sto-3g")
     pair_matrix = jnp.asarray(
@@ -1320,7 +1320,7 @@ def test_cuda_direct_jk_has_density_vjp_without_pair_cache(monkeypatch, tmp_path
         j_mat, k_mat = build_jk_from_eri_pair_matrix(pair_matrix, args[0])
         return jax.lax.stop_gradient(j_mat), jax.lax.stop_gradient(k_mat)
 
-    monkeypatch.setattr("td_graddft.scf.cuda_direct_jk._ffi_call", fake_ffi_call)
+    monkeypatch.setattr("td_graddft.data.integrals.jax.cuda_direct_jk._ffi_call", fake_ffi_call)
 
     builder = CudaDirectJKBuilder(basis, cache_dir=tmp_path)
 
@@ -1809,7 +1809,7 @@ def test_build_prebuilt_cuda_direct_jk_library_skips_joltqc_codegen_when_cached(
     monkeypatch,
     tmp_path,
 ):
-    from td_graddft.scf.joltqc_port import codegen
+    from td_graddft.data.integrals.jax.joltqc_port import codegen
 
     source = tmp_path / "kernel.cu"
     source.write_text("__global__ void placeholder() {}\n")

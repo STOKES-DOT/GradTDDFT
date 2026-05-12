@@ -45,7 +45,7 @@ where = ["src"]
   "_lebedev_level*.npz",
   "pyscf_basis_snapshot/**/*",
 ]
-"td_graddft.scf" = [
+"td_graddft.data.integrals.jax" = [
   "cuda_direct_jk_kernel.cu",
   "cuda_one_electron_kernel.cu",
   "rys_reference/LICENSE",

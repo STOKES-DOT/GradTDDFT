@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from types import SimpleNamespace
 from typing import Any
 
 import jax
@@ -10,6 +9,12 @@ import jax.numpy as jnp
 from jax.lax import Precision
 from jaxtyping import Array
 
+from ..features import (
+    MoleculeLikeState,
+    _spin_density_and_gradient,
+    molecule_grid_view,
+)
+from .core import _build_density_from_occ, _contains_jax_tracer, _host_float_unless_traced
 from .rks import (
     _build_jk,
     _diagonalize_fock,
@@ -58,25 +63,8 @@ class UKSResult:
     hcore_matrix: Array
     cycles: int
 
-
-def _contains_jax_tracer(value: Any) -> bool:
-    if isinstance(value, jax.core.Tracer):
-        return True
-    leaves = jax.tree_util.tree_leaves(value)
-    return any(isinstance(leaf, jax.core.Tracer) for leaf in leaves)
-
-
-def _host_float_unless_traced(value: Any) -> Any:
-    return value if _contains_jax_tracer(value) else float(value)
-
-
 def _default_spin_mo_occ(nao: int, nelec: int, dtype) -> Array:
     return jnp.zeros((nao,), dtype=dtype).at[:nelec].set(1.0)
-
-
-def _build_density_from_occ(mo_coeff: Array, mo_occ: Array) -> Array:
-    occ = jnp.asarray(mo_occ, dtype=mo_coeff.dtype)
-    return jnp.einsum("pi,i,qi->pq", mo_coeff, occ, mo_coeff, precision=Precision.HIGHEST)
 
 
 def _validate_spin_occ(mo_occ: Array, *, nao: int, nelec: int, label: str) -> Array:
@@ -90,22 +78,19 @@ def _validate_spin_occ(mo_occ: Array, *, nao: int, nelec: int, label: str) -> Ar
     return occ
 
 
-def _spin_density_and_gradient(ao: Array, ao_deriv1: Array, density: Array) -> tuple[Array, Array]:
-    rho = jnp.einsum(
-        "rp,pq,rq->r",
-        ao,
-        density,
-        ao,
-        precision=Precision.HIGHEST,
-    )
-    grad = 2.0 * jnp.einsum(
-        "xrp,pq,rq->rx",
-        ao_deriv1[1:4],
-        density,
-        ao,
-        precision=Precision.HIGHEST,
-    )
-    return rho, grad
+def _validate_initial_spin_density(
+    density: Array | None,
+    *,
+    nao: int,
+    dtype: Any,
+    label: str,
+) -> Array | None:
+    if density is None:
+        return None
+    dm = jnp.asarray(density, dtype=dtype)
+    if dm.ndim != 2 or int(dm.shape[0]) != nao or int(dm.shape[1]) != nao:
+        raise ValueError(f"{label} must be a square ({nao}, {nao}) matrix for UKS.")
+    return 0.5 * (dm + dm.T)
 
 
 @lru_cache(maxsize=64)
@@ -293,10 +278,10 @@ def _molecule_like_state_for_bound_xc(
     overlap: Array,
     molecule_template: Any | None,
 ) -> Any:
-    state = SimpleNamespace(
+    return MoleculeLikeState(
         ao=ao,
         ao_deriv1=ao_deriv1,
-        grid=SimpleNamespace(weights=weights),
+        grid=molecule_grid_view(weights, template=getattr(molecule_template, "grid", None)),
         rdm1=jnp.stack([density_a, density_b], axis=0),
         mo_coeff=jnp.stack([mo_coeff_a, mo_coeff_b], axis=0),
         mo_occ=jnp.stack([mo_occ_a, mo_occ_b], axis=0),
@@ -304,26 +289,12 @@ def _molecule_like_state_for_bound_xc(
         rep_tensor=eri,
         h1e=h,
         overlap_matrix=overlap,
+        ao_laplacian=getattr(molecule_template, "ao_laplacian", None),
+        atom_coords=getattr(molecule_template, "atom_coords", None),
+        atom_charges=getattr(molecule_template, "atom_charges", None),
+        hfx_omega_values=getattr(molecule_template, "hfx_omega_values", None),
+        hfx_nu=getattr(molecule_template, "hfx_nu", None),
     )
-    if molecule_template is None:
-        return state
-    for attr in (
-        "ao_laplacian",
-        "atom_coords",
-        "atom_charges",
-        "hfx_omega_values",
-        "hfx_nu",
-    ):
-        value = getattr(molecule_template, attr, None)
-        if value is not None:
-            setattr(state, attr, value)
-    grid_template = getattr(molecule_template, "grid", None)
-    if grid_template is not None:
-        for attr in ("coords", "points"):
-            value = getattr(grid_template, attr, None)
-            if value is not None:
-                setattr(state.grid, attr, value)
-    return state
 
 
 def _raw_fock_and_energy_for_bound_xc_state(
@@ -434,6 +405,8 @@ def run_uks_from_integrals(
     ao: Array,
     ao_deriv1: Array,
     grid_weights: Array,
+    init_density_alpha: Array | None = None,
+    init_density_beta: Array | None = None,
     init_mo_coeff_alpha: Array | None = None,
     init_mo_coeff_beta: Array | None = None,
     init_mo_occ_alpha: Array | None = None,
@@ -484,6 +457,22 @@ def run_uks_from_integrals(
 
     density_a = _build_density_from_occ(mo_coeff_a, mo_occ_a)
     density_b = _build_density_from_occ(mo_coeff_b, mo_occ_b)
+    init_density_a = _validate_initial_spin_density(
+        init_density_alpha,
+        nao=nao,
+        dtype=h.dtype,
+        label="init_density_alpha",
+    )
+    init_density_b = _validate_initial_spin_density(
+        init_density_beta,
+        nao=nao,
+        dtype=h.dtype,
+        label="init_density_beta",
+    )
+    if init_density_a is not None:
+        density_a = init_density_a
+    if init_density_b is not None:
+        density_b = init_density_b
 
     energy = jnp.asarray(0.0, dtype=h.dtype)
     xc_energy = jnp.asarray(0.0, dtype=h.dtype)

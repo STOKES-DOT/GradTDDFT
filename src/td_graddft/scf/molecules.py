@@ -11,24 +11,30 @@ def _pytree_dataclass(*, static_fields: tuple[str, ...] = ()):
     static_field_names = frozenset(static_fields)
 
     def decorator(cls):
+        all_field_names = tuple(field.name for field in fields(cls))
+        dynamic_field_names = tuple(
+            field_name for field_name in all_field_names if field_name not in static_field_names
+        )
+        static_field_names_ordered = tuple(
+            field_name for field_name in all_field_names if field_name in static_field_names
+        )
+
         def tree_flatten(self):
-            child_names = []
-            children = []
-            static_items = []
-            for field in fields(self):
-                value = getattr(self, field.name)
-                if field.name in static_field_names or value is None:
-                    static_items.append((field.name, value))
-                else:
-                    child_names.append(field.name)
-                    children.append(value)
-            return tuple(children), (tuple(child_names), tuple(static_items))
+            children = tuple(getattr(self, field_name) for field_name in dynamic_field_names)
+            static_values = tuple(getattr(self, field_name) for field_name in static_field_names_ordered)
+            return children, static_values
 
         @classmethod
         def tree_unflatten(cls_, aux_data, children):
-            child_names, static_items = aux_data
-            kwargs = {name: value for name, value in static_items}
-            kwargs.update({name: value for name, value in zip(child_names, children, strict=True)})
+            kwargs = {
+                name: value for name, value in zip(dynamic_field_names, children, strict=True)
+            }
+            kwargs.update(
+                {
+                    name: value
+                    for name, value in zip(static_field_names_ordered, aux_data, strict=True)
+                }
+            )
             return cls_(**kwargs)
 
         cls.tree_flatten = tree_flatten
@@ -79,7 +85,7 @@ class RestrictedMolecule:
     mf_energy: float | None = None
     exact_exchange_fraction: float = 0.0
     nocc: int | None = None
-    hfx_omega_values: tuple[float, ...] | None = None
+    hfx_omega_values: jnp.ndarray | None = None
     hfx_local: jnp.ndarray | None = None
     hfx_nu: jnp.ndarray | None = None
     pt2_local: jnp.ndarray | None = None
@@ -123,7 +129,7 @@ class UnrestrictedMolecule:
     exact_exchange_fraction: float = 0.0
     nocc_alpha: int | None = None
     nocc_beta: int | None = None
-    hfx_omega_values: tuple[float, ...] | None = None
+    hfx_omega_values: jnp.ndarray | None = None
     hfx_local: jnp.ndarray | None = None
     hfx_nu: jnp.ndarray | None = None
     scf_initial_density: jnp.ndarray | None = None

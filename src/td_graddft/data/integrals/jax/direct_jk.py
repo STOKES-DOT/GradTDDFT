@@ -8,14 +8,15 @@ import numpy as np
 import jax.numpy as jnp
 from jaxtyping import Array
 
-from ..data.basis import CartesianBasis
-from ..data.integrals.two_electron import (
+from ...basis import CartesianBasis
+from .packed_eri import build_jk_from_eri_pair_matrix
+from .screening import shell_pair_schwarz_bounds as integral_shell_pair_schwarz_bounds
+from .two_electron import (
     _compiled_eri_shell_block_kernel_batched,
-    eri_pair_matrix_packed,
     _gather_shell_quartet_batch,
     _run_quartet_kernel_chunked,
+    eri_pair_matrix_packed,
 )
-from .packed_eri import build_jk_from_eri_pair_matrix
 
 
 _DIRECT_PACKED_JK_MAX_NAO = 64
@@ -27,50 +28,7 @@ class DirectJKResult:
     k: Array
 
 
-def shell_pair_schwarz_bounds(basis: CartesianBasis) -> np.ndarray:
-    """Return shell-pair Schwarz bounds sqrt(max |(ij|ij)|) for screening."""
-
-    nshell = len(basis.shells)
-    bounds = np.zeros((nshell, nshell), dtype=float)
-    if nshell == 0:
-        return bounds
-    for i in range(nshell):
-        for j in range(i + 1):
-            shell_i = basis.shells[i]
-            shell_j = basis.shells[j]
-            signature = (
-                shell_i.angulars,
-                shell_j.angulars,
-                shell_i.angulars,
-                shell_j.angulars,
-                basis.shell_nprims_tuple[i],
-                basis.shell_nprims_tuple[j],
-                basis.shell_nprims_tuple[i],
-                basis.shell_nprims_tuple[j],
-            )
-            kernel = _compiled_eri_shell_block_kernel_batched(*signature)
-            blocks = _run_quartet_kernel_chunked(
-                kernel,
-                _gather_shell_quartet_batch(
-                    basis,
-                    jnp.asarray([i], dtype=jnp.int32),
-                    jnp.asarray([j], dtype=jnp.int32),
-                    jnp.asarray([i], dtype=jnp.int32),
-                    jnp.asarray([j], dtype=jnp.int32),
-                    nprim_i=signature[4],
-                    nprim_j=signature[5],
-                    nprim_k=signature[6],
-                    nprim_l=signature[7],
-                ),
-            )
-            value = float(np.max(np.abs(np.asarray(blocks)))) if blocks.size else 0.0
-            bound = float(np.sqrt(max(value, 0.0)))
-            bounds[i, j] = bound
-            bounds[j, i] = bound
-    return bounds
-
-
-_compute_shell_pair_schwarz_bounds = shell_pair_schwarz_bounds
+shell_pair_schwarz_bounds = integral_shell_pair_schwarz_bounds
 
 
 @lru_cache(maxsize=64)
@@ -186,7 +144,7 @@ def build_direct_jk_from_basis(
         bounds = (
             shell_pair_schwarz_bounds
             if shell_pair_schwarz_bounds is not None
-            else _compute_shell_pair_schwarz_bounds(basis)
+            else integral_shell_pair_schwarz_bounds(basis)
         )
         bounds = np.asarray(bounds, dtype=float)
 

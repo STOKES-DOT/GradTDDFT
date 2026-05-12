@@ -39,7 +39,7 @@ from td_graddft.scf import (
     run_rks_from_integrals,
     run_uks_from_integrals,
 )
-from td_graddft.scf.packed_eri import eri_pair_matrix_to_mo_eri_slices
+from td_graddft.data.integrals.jax.packed_eri import eri_pair_matrix_to_mo_eri_slices
 
 
 def _hybrid_fraction_from_mf(mf: Any) -> float:
@@ -63,8 +63,8 @@ def _uses_cuda_direct_jk(cfg: RKSConfig) -> bool:
 
 def _overlap_hcore_for_jax_rks_reference(basis: Any, cfg: RKSConfig) -> tuple[Any, Any]:
     if _uses_cuda_direct_jk(cfg):
-        from td_graddft.scf.cuda_direct_jk import cuda_ffi_available
-        from td_graddft.scf.cuda_one_electron import CudaOneElectronBuilder
+        from td_graddft.data.integrals.jax.cuda_direct_jk import cuda_ffi_available
+        from td_graddft.data.integrals.jax.cuda_one_electron import CudaOneElectronBuilder
 
         if cuda_ffi_available():
             return CudaOneElectronBuilder(basis).build_overlap_hcore()

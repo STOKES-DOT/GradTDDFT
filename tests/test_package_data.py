@@ -13,15 +13,15 @@ def test_pyscf_basis_snapshot_is_included_as_package_data():
 def test_joltqc_port_cuda_sources_are_included_as_package_data():
     pyproject = tomllib.loads(Path("pyproject.toml").read_text())
     package_data = pyproject["tool"]["setuptools"]["package-data"]
-    scf_patterns = package_data["td_graddft.scf"]
+    integral_patterns = package_data["td_graddft.data.integrals.jax"]
 
-    assert "joltqc_port/*.cu" in scf_patterns
-    assert "joltqc_port/*.py" in scf_patterns
-    assert "joltqc_port/*.json" in scf_patterns
+    assert "joltqc_port/*.cu" in integral_patterns
+    assert "joltqc_port/*.py" in integral_patterns
+    assert "joltqc_port/*.json" in integral_patterns
 
 
 def test_joltqc_port_includes_full_rys_root_sources():
-    source_dir = Path("src/td_graddft/scf/joltqc_port")
+    source_dir = Path("src/td_graddft/data/integrals/jax/joltqc_port")
 
     for nroot in range(1, 10):
         assert (source_dir / f"rys_root{nroot}.cu").exists()
@@ -30,7 +30,7 @@ def test_joltqc_port_includes_full_rys_root_sources():
 
 
 def test_joltqc_port_util_is_self_contained():
-    from td_graddft.scf.joltqc_port import util
+    from td_graddft.data.integrals.jax.joltqc_port import util
 
     table = util.generate_lookup_table(1, 0, 0, 0)
 
@@ -38,7 +38,7 @@ def test_joltqc_port_util_is_self_contained():
 
 
 def test_joltqc_port_builds_static_1qnt_source_without_cupy():
-    from td_graddft.scf.joltqc_port.codegen import build_1qnt_source
+    from td_graddft.data.integrals.jax.joltqc_port.codegen import build_1qnt_source
 
     source = build_1qnt_source((1, 0, 0, 0), (3, 3, 3, 3))
 
@@ -52,7 +52,7 @@ def test_joltqc_port_builds_static_1qnt_source_without_cupy():
 def test_joltqc_port_builds_basis_specific_1qnt_dispatch_source():
     import numpy as np
 
-    from td_graddft.scf.joltqc_port.codegen import build_1qnt_dispatch_source
+    from td_graddft.data.integrals.jax.joltqc_port.codegen import build_1qnt_dispatch_source
 
     source = build_1qnt_dispatch_source(
         np.asarray([[0, 3], [2, 1]], dtype=np.int32),
@@ -76,7 +76,7 @@ def test_joltqc_port_builds_basis_specific_1qnt_dispatch_source():
 def test_joltqc_port_dispatch_uses_joltqc_1q1t_for_ssss():
     import numpy as np
 
-    from td_graddft.scf.joltqc_port.codegen import build_1qnt_dispatch_source
+    from td_graddft.data.integrals.jax.joltqc_port.codegen import build_1qnt_dispatch_source
 
     source = build_1qnt_dispatch_source(
         np.asarray([[0, 3]], dtype=np.int32),
@@ -93,7 +93,7 @@ def test_joltqc_port_dispatch_uses_joltqc_1q1t_for_ssss():
 def test_joltqc_port_dispatch_specializes_kernels_by_primitive_counts():
     import numpy as np
 
-    from td_graddft.scf.joltqc_port.codegen import build_1qnt_dispatch_source
+    from td_graddft.data.integrals.jax.joltqc_port.codegen import build_1qnt_dispatch_source
 
     source = build_1qnt_dispatch_source(
         np.asarray([[1, 1], [1, 3]], dtype=np.int32),
@@ -111,7 +111,7 @@ def test_joltqc_port_dispatch_specializes_kernels_by_primitive_counts():
 def test_joltqc_port_split_dispatch_signature_units_are_independent_of_group_offsets():
     import numpy as np
 
-    from td_graddft.scf.joltqc_port.codegen import build_1qnt_dispatch_source_units
+    from td_graddft.data.integrals.jax.joltqc_port.codegen import build_1qnt_dispatch_source_units
 
     group_keys = np.asarray([[0, 3], [1, 3]], dtype=np.int32)
     group_quartet_keys = np.asarray([[0, 0, 0, 0], [1, 0, 1, 0]], dtype=np.int32)
@@ -148,7 +148,7 @@ def test_joltqc_port_split_dispatch_signature_units_are_independent_of_group_off
 def test_joltqc_port_dispatch_source_key_is_independent_of_runtime_quartet_mapping():
     import numpy as np
 
-    from td_graddft.scf.joltqc_port.codegen import build_1qnt_dispatch_source_key
+    from td_graddft.data.integrals.jax.joltqc_port.codegen import build_1qnt_dispatch_source_key
 
     group_keys = np.asarray([[0, 3], [1, 3]], dtype=np.int32)
     group_quartet_keys = np.asarray([[0, 0, 0, 0], [1, 0, 1, 0]], dtype=np.int32)
@@ -171,7 +171,7 @@ def test_joltqc_port_dispatch_source_key_is_independent_of_runtime_quartet_mappi
 def test_joltqc_port_fixed_dispatch_arrays_cover_runtime_signature_universe():
     import numpy as np
 
-    from td_graddft.scf.joltqc_port.codegen import (
+    from td_graddft.data.integrals.jax.joltqc_port.codegen import (
         build_fixed_1qnt_dispatch_arrays,
         build_1qnt_dispatch_source_key,
     )
@@ -194,7 +194,7 @@ def test_joltqc_port_fixed_dispatch_arrays_cover_runtime_signature_universe():
 def test_joltqc_port_split_dispatch_specializes_kernels_by_primitive_counts():
     import numpy as np
 
-    from td_graddft.scf.joltqc_port.codegen import build_1qnt_dispatch_source_units
+    from td_graddft.data.integrals.jax.joltqc_port.codegen import build_1qnt_dispatch_source_units
 
     units = build_1qnt_dispatch_source_units(
         np.asarray([[1, 1], [1, 3]], dtype=np.int32),

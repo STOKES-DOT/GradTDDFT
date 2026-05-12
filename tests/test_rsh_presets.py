@@ -42,6 +42,8 @@ def test_wb97xd_preset_matches_literature_coefficients():
 def test_rsh_preset_aliases_and_templates_are_canonical():
     names = list_rsh_functional_presets()
     assert "lc-wpbe" in names
+    assert "hse03" in names
+    assert "hse06" in names
     assert "wb97x-d" in names
 
     lc = get_rsh_functional_preset("LC_WPBE")
@@ -54,6 +56,20 @@ def test_rsh_preset_aliases_and_templates_are_canonical():
     assert template.default_sr_hf_fraction == 0.0
     assert template.default_lr_hf_fraction == 1.0
     assert template.default_omega == 0.4
+
+
+def test_hse06_preset_maps_to_screened_rsh_template():
+    preset = get_rsh_functional_preset("hyb_gga_xc_hse06")
+    template = make_rsh_template("hse06")
+
+    assert preset.name == "hse06"
+    assert preset.default_sr_hf_fraction == 0.25
+    assert preset.default_lr_hf_fraction == 0.0
+    assert template.monotonic_lr_hf is False
+    assert template.default_sr_hf_fraction == 0.25
+    assert template.default_lr_hf_fraction == 0.0
+    assert template.default_omega == 0.11
+    assert len(preset.local_term_specs) == 3
 
 
 def test_lc_wpbe_preset_exposes_optxc_tuning_omega_range():

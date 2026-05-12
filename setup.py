@@ -19,10 +19,10 @@ class build_py(_build_py):
         src_dir = root / "src"
         if str(src_dir) not in sys.path:
             sys.path.insert(0, str(src_dir))
-        from td_graddft.scf.cuda_direct_jk import build_prebuilt_cuda_direct_jk_library
-        from td_graddft.scf.cuda_one_electron import build_prebuilt_cuda_one_electron_library
+        from td_graddft.data.integrals.jax.cuda_direct_jk import build_prebuilt_cuda_direct_jk_library
+        from td_graddft.data.integrals.jax.cuda_one_electron import build_prebuilt_cuda_one_electron_library
 
-        output_dir = Path(self.build_lib) / "td_graddft" / "scf"
+        output_dir = Path(self.build_lib) / "td_graddft" / "data" / "integrals" / "jax"
         force = os.environ.get("TD_GRADDFT_FORCE_CUDA_FFI_BUILD", "").lower() in {
             "1",
             "true",

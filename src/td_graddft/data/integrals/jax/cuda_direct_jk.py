@@ -19,7 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array
 
-from ..data.basis import CartesianBasis
+from ...basis import CartesianBasis
 
 
 _FFI_TARGET_NAME = "td_graddft_cuda_direct_jk"

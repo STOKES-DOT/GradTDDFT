@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 
-from ..data.basis import CartesianBasis
+from ...basis import CartesianBasis
 from .cuda_direct_jk import (
     _detect_cuda_arch,
     _ffi_call,

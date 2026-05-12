@@ -70,9 +70,25 @@ def _runtime_forward_implicit_config(
     return replace(
         cfg,
         mode="self_consistent",
-        scf_gradient_mode="implicit_commutator",
+        scf_gradient_mode="impl",
         scf_implicit_forward_mode="input_state",
     )
+
+
+def _resolve_runtime_forward_setup(
+    training_config: GroundStateTrainingConfig | None,
+    runtime_forward_state_provider: RuntimeForwardStateProvider | None,
+) -> tuple[GroundStateTrainingConfig | None, RuntimeForwardStateProvider | None]:
+    if runtime_forward_state_provider is not None:
+        return training_config, runtime_forward_state_provider
+
+    cfg = GroundStateTrainingConfig() if training_config is None else training_config
+    if cfg.mode == "self_consistent" and cfg.scf_gradient_mode == "impl":
+        return (
+            _runtime_forward_implicit_config(cfg),
+            make_self_consistent_runtime_forward_provider(cfg),
+        )
+    return training_config, None
 
 
 def make_self_consistent_runtime_forward_provider(
@@ -92,7 +108,8 @@ def make_self_consistent_runtime_forward_provider(
     cfg = replace(
         GroundStateTrainingConfig() if training_config is None else training_config,
         mode="self_consistent",
-        scf_gradient_mode="unrolled",
+        scf_gradient_mode="impl",
+        scf_implicit_forward_mode="input_state",
     )
     scf_solver = _make_differentiable_scf(cfg)
 
@@ -179,6 +196,10 @@ def make_ground_state_loss_and_grad(
     and keep optimizer state updates outside the compiled graph.
     """
 
+    effective_training_config, effective_runtime_provider = _resolve_runtime_forward_setup(
+        training_config,
+        runtime_forward_state_provider,
+    )
     objective = ground_state_mse_loss if loss_fn is None else loss_fn
 
     def loss_and_grad(
@@ -189,11 +210,11 @@ def make_ground_state_loss_and_grad(
             data,
             params=params,
             functional=functional,
-            provider=runtime_forward_state_provider,
+            provider=effective_runtime_provider,
         )
 
         def compute_loss(local_params):
-            kwargs = {"training_config": training_config}
+            kwargs = {"training_config": effective_training_config}
             if predictor is not None:
                 kwargs["predictor"] = predictor
             return objective(
@@ -214,6 +235,44 @@ def make_ground_state_loss_and_grad(
         return loss, metrics, cleaned_grads
 
     return loss_and_grad
+
+
+def make_ground_state_eval(
+    functional: Any,
+    training_config: GroundStateTrainingConfig | None = None,
+    loss_fn: Callable[..., tuple[Array, dict[str, Array]]] | None = None,
+    predictor: Callable[[Any, Any], tuple[Array, Any]] | None = None,
+    runtime_forward_state_provider: RuntimeForwardStateProvider | None = None,
+):
+    """Create a params-only evaluation kernel aligned with the train-step policy."""
+
+    effective_training_config, effective_runtime_provider = _resolve_runtime_forward_setup(
+        training_config,
+        runtime_forward_state_provider,
+    )
+    objective = ground_state_mse_loss if loss_fn is None else loss_fn
+
+    def evaluate(
+        params: Any,
+        data: GroundStateDatum | Sequence[GroundStateDatum],
+    ):
+        data_for_loss = _with_runtime_forward_state(
+            data,
+            params=params,
+            functional=functional,
+            provider=effective_runtime_provider,
+        )
+        kwargs = {"training_config": effective_training_config}
+        if predictor is not None:
+            kwargs["predictor"] = predictor
+        return objective(
+            params,
+            functional,
+            data_for_loss,
+            **kwargs,
+        )
+
+    return evaluate
 
 
 def make_runtime_forward_implicit_loss_and_grad(

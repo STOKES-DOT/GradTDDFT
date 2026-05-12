@@ -200,8 +200,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--orbital-loss-scf-vxc-clip", type=float, default=20.0)
     parser.add_argument(
         "--orbital-loss-scf-gradient-mode",
-        choices=("unrolled", "implicit_commutator"),
-        default="implicit_commutator",
+        choices=("expl", "impl"),
+        default="impl",
     )
     parser.add_argument("--orbital-loss-scf-implicit-max-iter", type=int, default=24)
     parser.add_argument("--orbital-loss-scf-implicit-step-size", type=float, default=0.2)

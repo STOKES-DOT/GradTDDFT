@@ -16,8 +16,8 @@ from td_graddft.data.integrals import (
     rinv_matrices,
     rinv_matrix,
 )
-import td_graddft.data.integrals.two_electron as two_electron_module
-from td_graddft.data.integrals.one_electron import _cached_rinv_chunk_builder
+import td_graddft.data.integrals.jax.two_electron as two_electron_module
+from td_graddft.data.integrals.jax.one_electron import _cached_rinv_chunk_builder
 
 
 class _MockQuartetGroup:
@@ -128,7 +128,7 @@ def test_one_electron_engine_modes_agree_for_h2():
 def test_build_hcore_uses_fused_pair_pass_for_jit(monkeypatch):
     _pyscf_or_skip()
     from pyscf import gto
-    import td_graddft.data.integrals.one_electron as one_electron
+    import td_graddft.data.integrals.jax.one_electron as one_electron
 
     mol = gto.M(
         atom="""

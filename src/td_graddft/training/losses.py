@@ -4,9 +4,8 @@ from typing import Any, Callable, Sequence
 
 from jaxtyping import Array, PyTree
 
-from ..nn_rsh.losses import make_self_supervised_rsh_loss
 from .config import GroundStateDatum, GroundStateTrainingConfig
-from .targets import ground_state_mse_loss
+from .trainer import make_ground_state_eval
 
 
 def make_ground_state_loss(
@@ -23,17 +22,8 @@ def make_ground_state_loss(
     """
 
     cfg = GroundStateTrainingConfig() if training_config is None else training_config
-
-    def loss(
-        params: PyTree,
-        data: GroundStateDatum | Sequence[GroundStateDatum],
-    ) -> tuple[Array, dict[str, Array]]:
-        return ground_state_mse_loss(
-            params,
-            functional,
-            data,
-            training_config=cfg,
-            predictor=predictor,
-        )
-
-    return loss
+    return make_ground_state_eval(
+        functional,
+        training_config=cfg,
+        predictor=predictor,
+    )

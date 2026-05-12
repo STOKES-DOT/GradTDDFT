@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, fields
 from typing import Any
 import weakref
 
@@ -17,6 +18,65 @@ from .jax_libxc import (
 
 _MAX_TRANSITION_RESPONSE_FEATURE_CACHE_SIZE = 64
 _TRANSITION_RESPONSE_FEATURE_CACHE: dict[tuple[int, str], tuple[weakref.ReferenceType[Any], Array]] = {}
+
+
+def _pytree_dataclass(cls):
+    field_names = tuple(field.name for field in fields(cls))
+
+    def tree_flatten(self):
+        children = tuple(getattr(self, field_name) for field_name in field_names)
+        return children, None
+
+    @classmethod
+    def tree_unflatten(cls_, aux_data, children):
+        del aux_data
+        return cls_(*children)
+
+    cls.tree_flatten = tree_flatten
+    cls.tree_unflatten = tree_unflatten
+    return jax.tree_util.register_pytree_node_class(cls)
+
+
+@_pytree_dataclass
+@dataclass(frozen=True)
+class MoleculeGridView:
+    weights: Array
+    coords: Array | None = None
+    points: Array | None = None
+
+
+@_pytree_dataclass
+@dataclass(frozen=True)
+class MoleculeLikeState:
+    ao: Array
+    ao_deriv1: Array
+    grid: MoleculeGridView
+    rdm1: Array
+    mo_coeff: Array
+    mo_occ: Array
+    mo_energy: Array
+    rep_tensor: Array | None = None
+    h1e: Array | None = None
+    overlap_matrix: Array | None = None
+    ao_laplacian: Array | None = None
+    atom_coords: Array | None = None
+    atom_charges: Array | None = None
+    hfx_omega_values: Array | None = None
+    hfx_nu: Array | None = None
+
+
+def molecule_grid_view(
+    weights: Array,
+    *,
+    template: Any | None = None,
+) -> MoleculeGridView:
+    if template is None:
+        return MoleculeGridView(weights=weights)
+    return MoleculeGridView(
+        weights=weights,
+        coords=getattr(template, "coords", None),
+        points=getattr(template, "points", None),
+    )
 
 
 def _is_tracer(value: Any) -> bool:

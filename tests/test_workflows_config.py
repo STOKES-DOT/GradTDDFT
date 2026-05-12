@@ -204,8 +204,8 @@ def test_simulation_config_defaults_to_strict_jax_runtime():
     assert config.scf_backend == "jax_rks"
     assert config.jax_grid_ao_backend == "jax"
     assert config.jax_compilation_cache_dir is None
-    assert config.jax_persistent_cache_min_compile_time_secs > 0.0
-    assert config.jax_persistent_cache_min_entry_size_bytes > 0
+    assert config.jax_persistent_cache_min_compile_time_secs == 0.0
+    assert config.jax_persistent_cache_min_entry_size_bytes == 0
 
 
 def test_neural_xc_training_config_accepts_coefficient_prior():

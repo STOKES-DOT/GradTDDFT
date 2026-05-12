@@ -86,6 +86,229 @@ class XCTerm:
 
 
 @dataclass(frozen=True)
+class LocalXCTermSpec:
+    name: str
+    coefficient: float = 1.0
+    omega_mode: Literal["none", "fixed", "runtime"] = "none"
+    fixed_omega: float | None = None
+
+
+_HybridTerm = tuple[float, str, dict[str, float]]
+
+SAFE_JAX_XC_WRAPPED_COMPOSITES: dict[str, tuple[_HybridTerm, ...]] = {
+    "pbe0": (
+        (0.75, "gga_x_pbe", {}),
+        (1.0, "gga_c_pbe", {}),
+    ),
+    "pbeh": (
+        (0.75, "gga_x_pbe", {}),
+        (1.0, "gga_c_pbe", {}),
+    ),
+    "hyb_gga_xc_pbeh": (
+        (0.75, "gga_x_pbe", {}),
+        (1.0, "gga_c_pbe", {}),
+    ),
+    "hyb_gga_xc_pbe0_13": (
+        (0.75, "gga_x_pbe", {}),
+        (1.0, "gga_c_pbe", {}),
+    ),
+    "b3lyp": (
+        (0.08, "lda_x", {}),
+        (0.72, "gga_x_b88", {}),
+        (0.19, "lda_c_vwn_rpa", {}),
+        (0.81, "gga_c_lyp", {}),
+    ),
+    "hyb_gga_xc_b3lyp": (
+        (0.08, "lda_x", {}),
+        (0.72, "gga_x_b88", {}),
+        (0.19, "lda_c_vwn_rpa", {}),
+        (0.81, "gga_c_lyp", {}),
+    ),
+    "b3pw91": (
+        (0.08, "lda_x", {}),
+        (0.72, "gga_x_b88", {}),
+        (0.19, "lda_c_pw", {}),
+        (0.81, "gga_c_pw91", {}),
+    ),
+    "hyb_gga_xc_b3pw91": (
+        (0.08, "lda_x", {}),
+        (0.72, "gga_x_b88", {}),
+        (0.19, "lda_c_pw", {}),
+        (0.81, "gga_c_pw91", {}),
+    ),
+    "bhandhlyp": (
+        (0.5, "gga_x_b88", {}),
+        (1.0, "gga_c_lyp", {}),
+    ),
+    "hyb_gga_xc_bhandhlyp": (
+        (0.5, "gga_x_b88", {}),
+        (1.0, "gga_c_lyp", {}),
+    ),
+    "hyb_gga_xc_hse03": (
+        (1.0, "gga_x_wpbeh", {"_omega": 0.0}),
+        (-0.25, "gga_x_wpbeh", {"_omega": 0.18898815748423098}),
+        (1.0, "gga_c_pbe", {}),
+    ),
+    "hyb_gga_xc_hse06": (
+        (1.0, "gga_x_wpbeh", {"_omega": 0.0}),
+        (-0.25, "gga_x_wpbeh", {"_omega": 0.11}),
+        (1.0, "gga_c_pbe", {}),
+    ),
+    "hyb_gga_xc_cam_b3lyp": (
+        (0.35, "gga_x_b88", {}),
+        (0.46, "gga_x_ityh", {"_omega": 0.33}),
+        (0.19, "lda_c_vwn", {}),
+        (0.81, "gga_c_lyp", {}),
+    ),
+}
+
+JAXXCStatus = Literal["strict", "wrapped", "experimental", "unavailable"]
+
+
+@dataclass(frozen=True)
+class JAXXCFunctionalInfo:
+    name: str
+    status: JAXXCStatus
+    family: str
+    reason: str
+    children: tuple[str, ...] = ()
+
+
+_STRICT_JAX_XC_FUNCTIONALS = {
+    "lda_x",
+    "lda_c_pw",
+    "lda_c_vwn",
+    "lda_c_vwn_rpa",
+    "gga_x_b88",
+    "gga_x_pbe",
+    "gga_x_wpbeh",
+    "gga_c_lyp",
+    "gga_c_pbe",
+}
+
+_EXPERIMENTAL_JAX_XC_FUNCTIONALS = {
+    "gga_x_rpbe",
+    "gga_x_wc",
+    "gga_x_pw91",
+    "hyb_gga_xc_b97",
+    "hyb_gga_xc_b97_1",
+    "hyb_gga_xc_wb97x",
+}
+
+_KNOWN_MISMATCH_JAX_XC_FUNCTIONALS = {
+    "hyb_gga_xc_b97",
+    "hyb_gga_xc_b97_1",
+    "hyb_gga_xc_wb97x",
+}
+
+
+def _is_mgga_name(name: str) -> bool:
+    return name.startswith("mgga_") or name.startswith("hyb_mgga_")
+
+
+def _family_from_name(name: str) -> str:
+    if name.startswith("lda_"):
+        return "LDA"
+    if _is_mgga_name(name):
+        return "MGGA"
+    if name.startswith("gga_"):
+        return "GGA"
+    if name.startswith("hyb_gga_"):
+        return "HYB_GGA"
+    return "unknown"
+
+
+def _active_jax_xc_has(name: str) -> bool:
+    from .jax_xc_adapter import load_jax_xc
+
+    module, _ = load_jax_xc()
+    return hasattr(module, name)
+
+
+def _active_jax_xc_names() -> set[str]:
+    from .jax_xc_adapter import load_jax_xc
+
+    module, _ = load_jax_xc()
+    raw_module = getattr(module, "_module", module)
+    names = {name for name in dir(raw_module) if not name.startswith("_")}
+    mapping = getattr(raw_module, "_MAPPING", None)
+    if mapping is not None:
+        names.update(str(name) for name in mapping)
+    names.update(SAFE_JAX_XC_WRAPPED_COMPOSITES)
+    return names
+
+
+def jax_xc_functional_info(name: str) -> JAXXCFunctionalInfo:
+    canonical = str(name).strip().lower()
+    if canonical in _STRICT_JAX_XC_FUNCTIONALS:
+        return JAXXCFunctionalInfo(
+            name=canonical,
+            status="strict",
+            family=_family_from_name(canonical),
+            reason="Implemented by TD-GradDFT's strict local JAX evaluator.",
+        )
+    if canonical in SAFE_JAX_XC_WRAPPED_COMPOSITES:
+        children = tuple(child for _, child, _ in SAFE_JAX_XC_WRAPPED_COMPOSITES[canonical])
+        return JAXXCFunctionalInfo(
+            name=canonical,
+            status="wrapped",
+            family=_family_from_name(canonical),
+            reason="Reconstructed by TD-GradDFT from safe semilocal child components.",
+            children=children,
+        )
+    if canonical in _EXPERIMENTAL_JAX_XC_FUNCTIONALS and _active_jax_xc_has(canonical):
+        reason = "Available from jax_xc but not validated for Neural XC training."
+        if canonical in _KNOWN_MISMATCH_JAX_XC_FUNCTIONALS:
+            reason = (
+                "B97-family jax_xc output has benchmark mismatches against PySCF/libxc; "
+                "explicit experimental opt-in is required."
+            )
+        return JAXXCFunctionalInfo(
+            name=canonical,
+            status="experimental",
+            family=_family_from_name(canonical),
+            reason=reason,
+        )
+    if _is_mgga_name(canonical) and _active_jax_xc_has(canonical):
+        reason = (
+            "MGGA functional is available from jax_xc and requires an orbital-derived "
+            "tau/mo_fn bridge; explicit experimental opt-in is required."
+        )
+        if canonical.startswith("hyb_mgga_"):
+            reason = (
+                "Hybrid MGGA functional is available from jax_xc as an experimental "
+                "local channel; TD-GradDFT does not infer exact-exchange fractions "
+                "from this name."
+            )
+        return JAXXCFunctionalInfo(
+            name=canonical,
+            status="experimental",
+            family="MGGA",
+            reason=reason,
+        )
+    return JAXXCFunctionalInfo(
+        name=canonical,
+        status="unavailable",
+        family=_family_from_name(canonical),
+        reason="No strict, wrapped, or active jax_xc implementation is available.",
+    )
+
+
+def list_jax_xc_functionals(status: JAXXCStatus | None = None) -> tuple[JAXXCFunctionalInfo, ...]:
+    active_mgga = {name for name in _active_jax_xc_names() if _is_mgga_name(name)}
+    names = sorted(
+        _STRICT_JAX_XC_FUNCTIONALS
+        | set(SAFE_JAX_XC_WRAPPED_COMPOSITES)
+        | _EXPERIMENTAL_JAX_XC_FUNCTIONALS
+        | active_mgga
+    )
+    infos = tuple(jax_xc_functional_info(name) for name in names)
+    if status is None:
+        return infos
+    return tuple(info for info in infos if info.status == status)
+
+
+@dataclass(frozen=True)
 class RSHFunctionalPreset:
     """Strict literature/libxc metadata for a named RSH XC functional."""
 
@@ -105,7 +328,9 @@ class RSHFunctionalPreset:
     has_dispersion: bool = False
     dispersion_form: str | None = None
     jax_local_xc_spec: str | None = None
+    local_term_specs: tuple[LocalXCTermSpec, ...] = ()
     strict_jax_supported: bool = False
+    monotonic_lr_hf: bool = True
     notes: str = ""
 
     def to_range_separated_coefficients(self) -> tuple[float, float, float]:
@@ -173,7 +398,7 @@ class RSHFunctionalPreset:
             supports_trainable_lr_hf=self.lr_hf_bounds[0] != self.lr_hf_bounds[1],
             supports_trainable_omega=omega_bounds[0] != omega_bounds[1],
             has_dispersion=self.has_dispersion,
-            monotonic_lr_hf=True,
+            monotonic_lr_hf=self.monotonic_lr_hf,
             default_sr_hf_fraction=self.default_sr_hf_fraction,
             default_lr_hf_fraction=self.default_lr_hf_fraction,
             default_omega=default_omega,
@@ -198,11 +423,57 @@ _RSH_PRESETS: dict[str, RSHFunctionalPreset] = {
         optxc_default_omega=0.205,
         optxc_omega_bounds=(0.13, 0.30),
         jax_local_xc_spec="lc_wpbe_local",
+        local_term_specs=(
+            LocalXCTermSpec("gga_x_wpbeh", 1.0, "runtime"),
+            LocalXCTermSpec("gga_c_pbe", 1.0, "none"),
+        ),
         strict_jax_supported=True,
         notes=(
             "Vydrov-Scuseria LC-wPBE uses a fully long-range-corrected PBE "
             "exchange split. It is not equivalent to full PBE exchange plus LR-HF."
         ),
+    ),
+    "hse03": RSHFunctionalPreset(
+        name="hse03",
+        canonical_xc_name="HSE03",
+        libxc_id="HYB_GGA_XC_HSE03",
+        exchange_form="PBE exchange with 25% short-range HF screening",
+        correlation_form="GGA_C_PBE",
+        default_sr_hf_fraction=0.25,
+        default_lr_hf_fraction=0.0,
+        default_omega=0.18898815748423098,
+        omega_bounds=(0.05, 0.80),
+        sr_hf_bounds=(0.25, 0.25),
+        lr_hf_bounds=(0.0, 0.0),
+        local_term_specs=(
+            LocalXCTermSpec("gga_x_wpbeh", 1.0, "fixed", 0.0),
+            LocalXCTermSpec("gga_x_wpbeh", -0.25, "runtime"),
+            LocalXCTermSpec("gga_c_pbe", 1.0, "none"),
+        ),
+        strict_jax_supported=True,
+        monotonic_lr_hf=False,
+        notes="Screened PBE hybrid with fixed short-range HF fraction and zero long-range HF.",
+    ),
+    "hse06": RSHFunctionalPreset(
+        name="hse06",
+        canonical_xc_name="HSE06",
+        libxc_id="HYB_GGA_XC_HSE06",
+        exchange_form="PBE exchange with 25% short-range HF screening",
+        correlation_form="GGA_C_PBE",
+        default_sr_hf_fraction=0.25,
+        default_lr_hf_fraction=0.0,
+        default_omega=0.11,
+        omega_bounds=(0.05, 0.80),
+        sr_hf_bounds=(0.25, 0.25),
+        lr_hf_bounds=(0.0, 0.0),
+        local_term_specs=(
+            LocalXCTermSpec("gga_x_wpbeh", 1.0, "fixed", 0.0),
+            LocalXCTermSpec("gga_x_wpbeh", -0.25, "runtime"),
+            LocalXCTermSpec("gga_c_pbe", 1.0, "none"),
+        ),
+        strict_jax_supported=True,
+        monotonic_lr_hf=False,
+        notes="Screened PBE hybrid with fixed short-range HF fraction and zero long-range HF.",
     ),
     "wb97x-d": RSHFunctionalPreset(
         name="wb97x-d",
@@ -230,6 +501,10 @@ _RSH_PRESET_ALIASES = {
     "lc_wpbe": "lc-wpbe",
     "lc-wpbe": "lc-wpbe",
     "lcwpbe": "lc-wpbe",
+    "hse03": "hse03",
+    "hyb_gga_xc_hse03": "hse03",
+    "hse06": "hse06",
+    "hyb_gga_xc_hse06": "hse06",
     "wb97x_d": "wb97x-d",
     "wb97x-d": "wb97x-d",
     "wb97xd": "wb97x-d",
@@ -351,8 +626,6 @@ def parse_xc(spec: str, *, allow_experimental_jax_xc: bool = False) -> list[XCTe
         coefficient, raw_name = _parse_coefficient(token)
         name = _canonical_name(raw_name)
         if name not in registry:
-            from .jax_xc_adapter import jax_xc_functional_info
-
             info = jax_xc_functional_info(name)
             if info.status == "experimental" and not allow_experimental_jax_xc:
                 raise ValueError(
@@ -681,6 +954,84 @@ def _omega_or_default(omega: Array | float | None) -> Array:
     if omega is None:
         return jnp.asarray(0.4)
     return jnp.asarray(omega)
+
+
+def xc_type_from_term_specs(
+    term_specs: Sequence[LocalXCTermSpec],
+    *,
+    allow_experimental_jax_xc: bool = False,
+) -> str:
+    if not term_specs:
+        return "HF"
+    registry = _registry()
+    families = set()
+    for term in term_specs:
+        if term.name in registry:
+            families.add(registry[term.name][0])
+            continue
+        info = jax_xc_functional_info(term.name)
+        if info.status == "experimental" and not allow_experimental_jax_xc:
+            raise ValueError(
+                f"jax_xc functional {term.name!r} is experimental: {info.reason} "
+                "Pass allow_experimental_jax_xc=True to evaluate it."
+            )
+        families.add(info.family)
+    if not families:
+        return "HF"
+    if "MGGA" in families:
+        return "MGGA"
+    if "GGA" in families or "HYB_GGA" in families:
+        return "GGA"
+    return "LDA"
+
+
+def eval_xc_term_specs_energy_density(
+    term_specs: Sequence[LocalXCTermSpec],
+    features: RestrictedFeatureBundle,
+    *,
+    omega: Array | float | None = None,
+    allow_experimental_jax_xc: bool = False,
+) -> Array:
+    from .jax_xc_adapter import eval_jax_xc_from_restricted_features
+
+    registry = _registry()
+    omega_value = _omega_or_default(omega)
+    values = []
+    for term in term_specs:
+        if term.omega_mode == "runtime":
+            term_omega = omega_value
+        elif term.omega_mode == "fixed":
+            if term.fixed_omega is None:
+                raise ValueError(f"LocalXCTermSpec {term.name!r} is fixed-omega but fixed_omega is None.")
+            term_omega = jnp.asarray(term.fixed_omega, dtype=features.rho.dtype)
+        else:
+            term_omega = None
+
+        if term.name in registry:
+            _, evaluator = registry[term.name]
+            if term.name == "gga_x_wpbeh":
+                values.append(term.coefficient * evaluator(features, omega=_omega_or_default(term_omega)))
+            else:
+                if term_omega is not None:
+                    raise NotImplementedError(
+                        f"Local XC term {term.name!r} does not support explicit omega control."
+                    )
+                values.append(term.coefficient * evaluator(features))
+            continue
+
+        if term_omega is not None:
+            raise NotImplementedError(
+                f"Wrapped jax_xc term {term.name!r} does not support explicit omega control in the RSH workflow."
+            )
+        eps = eval_jax_xc_from_restricted_features(
+            term.name,
+            features,
+            allow_experimental_jax_xc=allow_experimental_jax_xc,
+        )
+        values.append(term.coefficient * features.rho * eps)
+    if not values:
+        return jnp.zeros_like(features.rho)
+    return jnp.sum(jnp.stack(values, axis=0), axis=0)
 
 
 def eval_xc_energy_density(

@@ -113,7 +113,7 @@ class NeuralXCTrainingConfig:
     scf_require_convergence: bool = False
     scf_stop_gradient_on_unconverged: bool = False
     scf_stop_gradient_rms_threshold: float | None = None
-    scf_gradient_mode: Literal["auto", "unrolled", "implicit_commutator"] = "auto"
+    scf_gradient_mode: Literal["impl"] = "impl"
     scf_implicit_diff_max_iter: int = 24
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4

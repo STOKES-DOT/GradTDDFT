@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pathlib
 
-from td_graddft.scf import cuda_direct_jk
+from td_graddft.data.integrals.jax import cuda_direct_jk
 
 
 def test_build_prebuilt_cuda_direct_jk_library_invokes_nvcc(monkeypatch, tmp_path):
