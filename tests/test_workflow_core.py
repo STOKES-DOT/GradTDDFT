@@ -1,9 +1,13 @@
 import math
+from types import SimpleNamespace
 
 import pytest
 
 import jax.numpy as jnp
+import optax
 
+from td_graddft.scf import GPU4PYSCF_RKS_RUNTIME_BACKEND
+from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule
 from td_graddft.workflows.core import (
     _canonicalize_graddft_ground_state_config,
     _resolve_training_scf_gradient_mode,
@@ -11,6 +15,7 @@ from td_graddft.workflows.core import (
     run_pipeline_core,
     run_pipeline_core_from_molecule_spec,
     run_pipeline_core_from_spec,
+    train_neural_xc,
 )
 from td_graddft.workflows.types import (
     MoleculeRun,
@@ -270,3 +275,108 @@ def test_run_pipeline_core_requests_local_pt2_features_when_pt2_channel_enabled(
 
     assert captured["compute_local_hfx_features"] is True
     assert captured["compute_local_pt2_features"] is True
+
+
+def test_train_neural_xc_propagates_gpu4pyscf_runtime_forward_backend(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _FakeFunctional:
+        model = SimpleNamespace(apply=lambda *args, **kwargs: None)
+
+        def __init__(self, **kwargs):
+            captured["functional_kwargs"] = kwargs
+
+        def init_from_molecule(self, rng, molecule):
+            del rng, molecule
+            return {"strength": jnp.asarray(0.0)}
+
+        def effective_exchange_fraction(self, params, molecule):
+            del params, molecule
+            return jnp.asarray(0.0)
+
+    def fake_train_step(functional, *, training_config):
+        del functional
+        captured["train_step_config"] = training_config
+
+        def _step(state, datum):
+            del datum
+            return state, {
+                "loss": jnp.asarray(0.0),
+                "grad_norm": jnp.asarray([0.0]),
+                "grad_abs_max": jnp.asarray([0.0]),
+                "param_update_norm": jnp.asarray([0.0]),
+                "nonfinite_grad_fraction": jnp.asarray([0.0]),
+                "density_penalty": jnp.asarray([0.0]),
+                "stationarity_penalty": jnp.asarray([0.0]),
+                "coefficient_prior_penalty": jnp.asarray([0.0]),
+            }
+
+        return _step
+
+    def fake_eval(functional, *, training_config):
+        del functional
+        captured["eval_config"] = training_config
+        metrics = {
+            "density_penalty": jnp.asarray([0.0]),
+            "stationarity_penalty": jnp.asarray([0.0]),
+            "coefficient_prior_penalty": jnp.asarray([0.0]),
+        }
+        return lambda params, datum: (jnp.asarray(0.0), metrics)
+
+    monkeypatch.setattr("td_graddft.workflows.core.neural_xc.Functional", _FakeFunctional)
+    monkeypatch.setattr("td_graddft.workflows.core.optax.adam", lambda lr: optax.sgd(lr))
+    monkeypatch.setattr(
+        "td_graddft.workflows.core.make_ground_state_train_step",
+        fake_train_step,
+    )
+    monkeypatch.setattr("td_graddft.workflows.core.make_ground_state_eval", fake_eval)
+    monkeypatch.setattr(
+        "td_graddft.workflows.core.make_ground_state_predictor",
+        lambda functional, training_config: (
+            lambda params, molecule: (jnp.asarray(0.0), molecule)
+        ),
+    )
+
+    mo_coeff = jnp.eye(2)
+    mo_occ = jnp.asarray([[1.0, 0.0], [1.0, 0.0]])
+    mo_energy = jnp.asarray([[-0.8, 0.2], [-0.8, 0.2]])
+    density_half = jnp.einsum("pi,i,qi->pq", mo_coeff, mo_occ[0], mo_coeff)
+    molecule = RestrictedMolecule(
+        ao=jnp.ones((3, 2)),
+        grid=QuadratureGrid(weights=jnp.ones((3,))),
+        dipole_integrals=jnp.zeros((3, 2, 2)),
+        rep_tensor=jnp.zeros((2, 2, 2, 2)),
+        mo_coeff=jnp.stack([mo_coeff, mo_coeff]),
+        mo_occ=mo_occ,
+        mo_energy=mo_energy,
+        rdm1=jnp.stack([density_half, density_half]),
+        h1e=jnp.eye(2),
+        nuclear_repulsion=0.0,
+        mf_energy=-1.0,
+        overlap_matrix=jnp.eye(2),
+        runtime_scf_backend=GPU4PYSCF_RKS_RUNTIME_BACKEND,
+    )
+    reference = MoleculeRun(
+        molecule=molecule,
+        nocc=1,
+        nvir=1,
+        nstates=0,
+        nstates_full=0,
+        energies_au=jnp.asarray([]),
+        oscillator_strengths=jnp.asarray([]),
+        scf_elapsed_s=0.0,
+        tddft_elapsed_s=0.0,
+    )
+
+    train_neural_xc(
+        reference,
+        NeuralXCTrainingConfig(
+            steps=0,
+            training_mode="self_consistent",
+            scf_runtime_forward_backend="gpu4pyscf_rks",
+        ),
+        SpectrumGridConfig(),
+    )
+
+    assert captured["train_step_config"].scf_runtime_forward_backend == "gpu4pyscf_rks"
+    assert captured["eval_config"].scf_runtime_forward_backend == "gpu4pyscf_rks"

@@ -25,7 +25,7 @@ from td_graddft.neural_xc import (
 
 @dataclass(frozen=True)
 class NeuralXCTrainingConfig:
-    """Configuration for fixed-density ground-state Neural_xc fitting."""
+    """Configuration for fixed-density or implicit self-consistent Neural_xc fitting."""
 
     steps: int = 2000
     learning_rate: float = 5e-5
@@ -114,6 +114,7 @@ class NeuralXCTrainingConfig:
     scf_stop_gradient_on_unconverged: bool = False
     scf_stop_gradient_rms_threshold: float | None = None
     scf_gradient_mode: Literal["impl"] = "impl"
+    scf_runtime_forward_backend: Literal["auto", "jax", "gpu4pyscf_rks"] = "auto"
     scf_implicit_diff_max_iter: int = 24
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4

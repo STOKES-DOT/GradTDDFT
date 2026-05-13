@@ -7,6 +7,7 @@ from .config import (
     GroundStateCoreTrainingConfig,
     GroundStateDatum,
     GroundStateTrainingConfig,
+    SCFRuntimeForwardBackend,
 )
 from .checkpoints import load_params_checkpoint, save_params_checkpoint
 from .targets import (
@@ -57,6 +58,7 @@ __all__ = [
     "GroundStateCoreTrainingConfig",
     "ExcitedStateTrainingConfig",
     "GroundStateTrainingConfig",
+    "SCFRuntimeForwardBackend",
     "load_params_checkpoint",
     "save_params_checkpoint",
     "density_on_grid",

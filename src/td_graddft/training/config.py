@@ -6,6 +6,9 @@ from typing import Any, Literal
 from jaxtyping import Array
 
 
+SCFRuntimeForwardBackend = Literal["auto", "jax", "gpu4pyscf_rks"]
+
+
 @dataclass(frozen=True)
 class GroundStateCoreDatum:
     """Ground-state supervision and regularization targets for one molecule."""
@@ -265,6 +268,7 @@ class GroundStateCoreTrainingConfig:
     scf_stop_gradient_rms_threshold: float | None = None
     scf_gradient_mode: Literal["expl", "impl"] = "impl"
     scf_implicit_forward_mode: Literal["expl", "input_state"] = "input_state"
+    scf_runtime_forward_backend: SCFRuntimeForwardBackend = "auto"
     scf_implicit_diff_max_iter: int = 24
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
@@ -350,6 +354,7 @@ class GroundStateTrainingConfig:
     scf_stop_gradient_rms_threshold: float | None = None
     scf_gradient_mode: Literal["expl", "impl"] = "impl"
     scf_implicit_forward_mode: Literal["expl", "input_state"] = "input_state"
+    scf_runtime_forward_backend: SCFRuntimeForwardBackend = "auto"
     scf_implicit_diff_max_iter: int = 24
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
@@ -418,6 +423,7 @@ class GroundStateTrainingConfig:
             scf_stop_gradient_rms_threshold=core.scf_stop_gradient_rms_threshold,
             scf_gradient_mode=core.scf_gradient_mode,
             scf_implicit_forward_mode=core.scf_implicit_forward_mode,
+            scf_runtime_forward_backend=core.scf_runtime_forward_backend,
             scf_implicit_diff_max_iter=core.scf_implicit_diff_max_iter,
             scf_implicit_diff_step_size=core.scf_implicit_diff_step_size,
             scf_implicit_diff_clip=core.scf_implicit_diff_clip,
@@ -467,6 +473,7 @@ class GroundStateTrainingConfig:
             scf_stop_gradient_rms_threshold=self.scf_stop_gradient_rms_threshold,
             scf_gradient_mode=self.scf_gradient_mode,
             scf_implicit_forward_mode=self.scf_implicit_forward_mode,
+            scf_runtime_forward_backend=self.scf_runtime_forward_backend,
             scf_implicit_diff_max_iter=self.scf_implicit_diff_max_iter,
             scf_implicit_diff_step_size=self.scf_implicit_diff_step_size,
             scf_implicit_diff_clip=self.scf_implicit_diff_clip,

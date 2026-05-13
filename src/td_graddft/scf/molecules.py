@@ -61,6 +61,8 @@ class QuadratureGrid:
         "direct_scf_tol",
         "direct_basis",
         "direct_cuda_jk_builder",
+        "runtime_scf_backend",
+        "runtime_scf_options",
     )
 )
 @dataclass(frozen=True)
@@ -100,6 +102,8 @@ class RestrictedMolecule:
     direct_scf_tol: float | None = None
     direct_basis: Any | None = None
     direct_cuda_jk_builder: Any | None = None
+    runtime_scf_backend: str | None = None
+    runtime_scf_options: Any | None = None
 
     def density(self) -> jnp.ndarray:
         return jnp.einsum("spq,rp,rq->rs", self.rdm1, self.ao, self.ao)
