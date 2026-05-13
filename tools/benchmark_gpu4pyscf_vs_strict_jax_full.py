@@ -46,6 +46,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--grid-points", type=int, default=2200)
     p.add_argument("--grid-max-ev", type=float, default=12.0)
     p.add_argument("--jax-jk-backend", choices=("full", "df", "direct"), default="full")
+    p.add_argument(
+        "--gpu4pyscf-density-fit",
+        action="store_true",
+        help="Use GPU4PySCF density fitting. Default is exact/non-DF dft.RKS(...).to_gpu().",
+    )
     p.add_argument("--integral-backend", choices=("libcint",), default="libcint")
     p.add_argument(
         "--libcint-geometry-grad-policy",
@@ -120,7 +125,14 @@ def _require_gpu4pyscf():
         ) from exc
 
 
-def _build_gpu4pyscf_reference(*, atom: str, basis: str, xc: str, grids_level: int):
+def _build_gpu4pyscf_reference(
+    *,
+    atom: str,
+    basis: str,
+    xc: str,
+    grids_level: int,
+    density_fit: bool = False,
+):
     _require_gpu4pyscf()
     mol = gto.M(
         atom=atom,
@@ -140,7 +152,9 @@ def _build_gpu4pyscf_reference(*, atom: str, basis: str, xc: str, grids_level: i
         raise RuntimeError(
             "PySCF object does not expose to_gpu(). PySCF >= 2.5.0 is required for GPU4PySCF conversion."
         )
-    mf = mf.density_fit().to_gpu()
+    if density_fit:
+        mf = mf.density_fit()
+    mf = mf.to_gpu()
     e_tot = mf.kernel()
     _sync_gpu()
     converged = bool(getattr(mf, "converged", False))
@@ -181,7 +195,7 @@ def _build_strict_jax_reference(
     precompile_eri: bool,
     precompile_eri_chunk_size: int,
 ):
-    from td_graddft.reference import restricted_reference_from_spec_with_jax_rks
+    from td_graddft.scf.builders import restricted_reference_from_spec_with_jax_rks
     from td_graddft.scf import RKSConfig
 
     cfg = RKSConfig(
@@ -317,6 +331,7 @@ def main() -> None:
             basis=str(args.basis),
             xc=str(args.xc),
             grids_level=int(args.grids_level),
+            density_fit=bool(args.gpu4pyscf_density_fit),
         )
     )
     (gpu_tda_e, gpu_tda_f), gpu_tda_elapsed_s = _time_call(
@@ -433,6 +448,7 @@ def main() -> None:
         "basis": str(args.basis),
         "xc": str(args.xc),
         "nstates": int(args.nstates),
+        "gpu4pyscf_density_fit": bool(args.gpu4pyscf_density_fit),
         "gpu4pyscf_total_energy_ha": float(gpu_e_tot),
         "jax_total_energy_ha": float(ref.mf_energy),
         "energy_diff_ha": float(ref.mf_energy - gpu_e_tot),

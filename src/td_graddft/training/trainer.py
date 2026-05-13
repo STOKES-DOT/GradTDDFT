@@ -9,6 +9,12 @@ import optax
 from flax.training.train_state import TrainState
 from jaxtyping import Array, PRNGKeyArray
 
+from td_graddft.scf.gpu4pyscf import (
+    GPU4PYSCF_RKS_RUNTIME_BACKEND,
+    molecule_from_gpu4pyscf_rks_forward_result,
+    run_gpu4pyscf_rks_forward,
+)
+
 from .config import GroundStateDatum, GroundStateTrainingConfig
 from .targets import density_on_grid, ground_state_mse_loss
 
@@ -114,7 +120,38 @@ def make_self_consistent_runtime_forward_provider(
     scf_solver = _make_differentiable_scf(cfg)
 
     def provider(params: Any, functional: Any, molecule: Any):
+        backend = str(getattr(cfg, "scf_runtime_forward_backend", "auto")).lower()
+        if backend not in {"auto", "jax", GPU4PYSCF_RKS_RUNTIME_BACKEND}:
+            raise ValueError(
+                "scf_runtime_forward_backend must be one of "
+                "{'auto', 'jax', 'gpu4pyscf_rks'}."
+            )
+        molecule_backend = getattr(molecule, "runtime_scf_backend", None)
+        if (
+            backend == GPU4PYSCF_RKS_RUNTIME_BACKEND
+            and molecule_backend != GPU4PYSCF_RKS_RUNTIME_BACKEND
+        ):
+            raise ValueError(
+                "scf_runtime_forward_backend='gpu4pyscf_rks' requires a molecule "
+                "built by the GPU4PySCF RKS forward path."
+            )
         forward_params = jax.tree_util.tree_map(jax.lax.stop_gradient, params)
+        if (
+            backend in {"auto", GPU4PYSCF_RKS_RUNTIME_BACKEND}
+            and molecule_backend == GPU4PYSCF_RKS_RUNTIME_BACKEND
+        ):
+            runtime_options = getattr(molecule, "runtime_scf_options", None)
+            if runtime_options is None:
+                return molecule
+            forward_kwargs = runtime_options.as_kwargs()
+            forward = run_gpu4pyscf_rks_forward(
+                **forward_kwargs,
+                molecule_template=molecule,
+                xc_functional=functional,
+                xc_params=forward_params,
+                neural_vxc_clip=float(cfg.scf_vxc_clip),
+            )
+            return molecule_from_gpu4pyscf_rks_forward_result(molecule, forward)
         return scf_solver.run_runtime_forward(molecule, functional, forward_params)
 
     return provider

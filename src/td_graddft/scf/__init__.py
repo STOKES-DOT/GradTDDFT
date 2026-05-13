@@ -26,8 +26,16 @@ from .uks import (
 from .facade import RKS, UKS
 from .builders import (
     precompile_restricted_cuda_direct_rks_solver,
+    restricted_molecule_from_spec_with_gpu4pyscf_rks,
     restricted_molecule_from_spec_with_jax_rks,
     unrestricted_molecule_from_spec_with_jax_uks,
+)
+from .gpu4pyscf import (
+    GPU4PYSCF_RKS_RUNTIME_BACKEND,
+    GPU4PySCFRKSForwardOptions,
+    GPU4PySCFRKSForwardResult,
+    molecule_from_gpu4pyscf_rks_forward_result,
+    run_gpu4pyscf_rks_forward,
 )
 from .molecules import QuadratureGrid, RestrictedMolecule, UnrestrictedMolecule
 from .inputs import (
@@ -58,7 +66,13 @@ __all__ = [
     "build_uks_integral_inputs",
     "core",
     "precompile_restricted_cuda_direct_rks_solver",
+    "GPU4PYSCF_RKS_RUNTIME_BACKEND",
+    "GPU4PySCFRKSForwardOptions",
+    "GPU4PySCFRKSForwardResult",
+    "molecule_from_gpu4pyscf_rks_forward_result",
+    "restricted_molecule_from_spec_with_gpu4pyscf_rks",
     "restricted_molecule_from_spec_with_jax_rks",
+    "run_gpu4pyscf_rks_forward",
     "run_rks_from_integrals",
     "UKSConfig",
     "UKSResult",

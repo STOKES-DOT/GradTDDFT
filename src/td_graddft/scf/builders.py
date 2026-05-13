@@ -33,6 +33,11 @@ from .inputs import build_rks_integral_inputs, build_uks_integral_inputs
 from .molecules import QuadratureGrid, RestrictedMolecule, UnrestrictedMolecule
 from .rks import RKSConfig, run_rks_from_integrals, run_rks_from_integrals_traceable
 from .uks import UKSConfig, run_uks_from_integrals
+from .gpu4pyscf import (
+    GPU4PYSCF_RKS_RUNTIME_BACKEND,
+    GPU4PySCFRKSForwardOptions,
+    run_gpu4pyscf_rks_forward,
+)
 
 
 _CUDA_DIRECT_RKS_JIT_CACHE_MAXSIZE = 16
@@ -1059,6 +1064,265 @@ def restricted_molecule_from_spec_with_jax_rks(
     )
 
 
+def restricted_molecule_from_spec_with_gpu4pyscf_rks(
+    *,
+    atom: Any,
+    basis: Any,
+    xc_spec: str = "pbe",
+    unit: str = "Angstrom",
+    charge: int = 0,
+    spin: int = 0,
+    cart: bool = True,
+    grids_level: int = 0,
+    max_l: int = 3,
+    rks_config: RKSConfig | None = None,
+    grid_ao_backend: Literal["jax"] = "jax",
+    integral_backend: Literal["jax", "libcint"] = "libcint",
+    libcint_geometry_grad_policy: LibcintGeometryGradPolicy = "analytic",
+    energy_target: float | None = None,
+    compute_local_hfx_features: bool = False,
+    compute_local_hfx_aux: bool = False,
+    compute_local_pt2_features: bool = False,
+    hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
+    hfx_chunk_size: int = 512,
+    include_dipole_integrals: bool = True,
+    init_guess: Any = "minao",
+    chkfile: str | None = None,
+    init_guess_sap_basis: Any | None = None,
+    init_guess_chkfile_project: bool | None = None,
+    precompile_eri: bool = False,
+    precompile_eri_chunk_size: int = 512,
+    verbose: int = 0,
+    **mol_kwargs: Any,
+) -> RestrictedMolecule:
+    """Build a restricted reference using exact GPU4PySCF RKS as the SCF forward.
+
+    The SCF forward is ``dft.RKS(mol).to_gpu()`` without ``density_fit()``. JAX
+    AO/grid/integral inputs are still built so Neural XC evaluation and implicit
+    differentiation can reuse the existing TD-GradDFT machinery.
+    """
+
+    if isinstance(atom, MoleculeSpec):
+        charge = int(atom.charge)
+        spin = int(atom.spin)
+    if int(spin) != 0:
+        raise NotImplementedError(
+            "restricted_molecule_from_spec_with_gpu4pyscf_rks only supports closed-shell systems."
+        )
+    if not bool(cart):
+        raise NotImplementedError(
+            "restricted_molecule_from_spec_with_gpu4pyscf_rks currently supports cart=True only."
+        )
+
+    xc_spec_resolved = str(xc_spec)
+    parse_xc(xc_spec_resolved)
+    cfg_forward = RKSConfig(xc_spec=xc_spec_resolved) if rks_config is None else rks_config
+    if cfg_forward.xc_spec != xc_spec_resolved:
+        cfg_forward = replace(cfg_forward, xc_spec=xc_spec_resolved)
+    cfg_inputs = replace(
+        cfg_forward,
+        jk_backend="full",
+        direct_jk_engine="jax",
+        iteration_backend="runtime",
+    )
+
+    scf_inputs = build_rks_integral_inputs(
+        atom=atom,
+        basis=basis,
+        config=cfg_inputs,
+        xc_spec=xc_spec_resolved,
+        unit=unit,
+        charge=charge,
+        spin=spin,
+        cart=cart,
+        grids_level=grids_level,
+        max_l=max_l,
+        grid_ao_backend=grid_ao_backend,
+        integral_backend=integral_backend,
+        libcint_geometry_grad_policy=libcint_geometry_grad_policy,
+        include_dipole_integrals=include_dipole_integrals,
+        init_guess=init_guess,
+        chkfile=chkfile,
+        init_guess_sap_basis=init_guess_sap_basis,
+        init_guess_chkfile_project=init_guess_chkfile_project,
+        precompile_eri=precompile_eri,
+        precompile_eri_chunk_size=precompile_eri_chunk_size,
+        _precompile_eri_kernels=precompile_eri_kernels,
+        verbose=verbose,
+        **mol_kwargs,
+    )
+    if scf_inputs.geometry_is_traced:
+        raise NotImplementedError(
+            "GPU4PySCF forward is host/GPU-external and cannot run for traced geometries."
+        )
+
+    forward = run_gpu4pyscf_rks_forward(
+        atom=atom,
+        basis=basis,
+        xc_spec=xc_spec_resolved,
+        unit=unit,
+        charge=charge,
+        spin=spin,
+        cart=cart,
+        grids_level=grids_level,
+        conv_tol=cfg_forward.conv_tol,
+        max_cycle=cfg_forward.max_cycle,
+        verbose=verbose,
+        **mol_kwargs,
+    )
+
+    basis_cart = scf_inputs.basis
+    s = scf_inputs.overlap
+    h1e = scf_inputs.hcore
+    eri = scf_inputs.eri
+    eri_pair_matrix = scf_inputs.eri_pair_matrix
+    df_factors = scf_inputs.df_factors
+    coords = scf_inputs.coords
+    weights = scf_inputs.grid_weights
+    ao = scf_inputs.ao
+    ao_deriv1 = scf_inputs.ao_deriv1
+    ao_laplacian = scf_inputs.ao_laplacian
+    dipole_integrals = scf_inputs.dipole_integrals
+    dtype = np.asarray(s).dtype
+
+    dm_total = np.asarray(forward.density_matrix, dtype=dtype)
+    half_dm = 0.5 * dm_total
+    mo_coeff = np.asarray(forward.mo_coeff, dtype=dtype)
+    mo_occ_total = np.asarray(forward.mo_occ, dtype=dtype)
+    mo_occ = 0.5 * mo_occ_total
+    mo_energy = np.asarray(forward.mo_energy, dtype=dtype)
+
+    hfx_local = None
+    hfx_nu = None
+    pt2_local = None
+    reference_eri_pair_matrix = None
+    if compute_local_hfx_features:
+        hfx_result = _local_hfx_features_from_basis_dm(
+            basis_cart,
+            ao,
+            (half_dm, half_dm),
+            coords,
+            omega_values=tuple(float(omega) for omega in hfx_omega_values),
+            chunk_size=hfx_chunk_size,
+            return_nu=bool(compute_local_hfx_aux),
+        )
+        if compute_local_hfx_aux:
+            hfx_local, hfx_nu = hfx_result
+        else:
+            hfx_local = hfx_result
+
+    mf_energy = (
+        float(forward.total_energy)
+        if energy_target is None
+        else _host_float_unless_traced(energy_target)
+    )
+    nocc = int(np.count_nonzero(mo_occ_total > 1e-8))
+    exact_exchange_fraction = (
+        float(forward.exact_exchange_fraction)
+        if forward.exact_exchange_fraction is not None
+        else float(hybrid_coeff(xc_spec_resolved))
+    )
+    needs_exchange_slices = abs(exact_exchange_fraction) > 1e-14
+    if eri is None and eri_pair_matrix is None:
+        raise RuntimeError(
+            "GPU4PySCF RKS reference requires exact ERI pair data for downstream JAX use."
+        )
+    if eri_pair_matrix is not None:
+        reference_eri_pair_matrix = jnp.asarray(eri_pair_matrix, dtype=jnp.asarray(s).dtype)
+        eri_ovov, eri_ovvo, eri_oovv = eri_pair_matrix_to_mo_eri_slices(
+            eri_pair_matrix,
+            mo_coeff,
+            nocc=nocc,
+            include_oovv=needs_exchange_slices,
+        )
+        rep_tensor = _empty_rep_tensor_like(s, traced=False)
+    else:
+        eri_ovov, eri_ovvo, eri_oovv = _restricted_response_eri_slices_from_mo_tensor(
+            np.asarray(eri),
+            mo_coeff,
+            nocc,
+            include_oovv=needs_exchange_slices,
+        )
+        rep_tensor = jnp.asarray(eri)
+
+    if compute_local_pt2_features:
+        pt2_local = _local_pt2_feature_from_restricted_orbitals(
+            ao,
+            mo_coeff,
+            mo_occ,
+            mo_energy,
+            rep_tensor=rep_tensor,
+            eri_ovov=eri_ovov,
+            df_factors=df_factors,
+            nocc=nocc,
+            density_floor=cfg_inputs.density_floor,
+        )
+
+    reference_arrays = _restricted_reference_array_packaging(
+        mo_coeff=mo_coeff,
+        mo_occ=mo_occ,
+        mo_energy=mo_energy,
+        half_dm=half_dm,
+        h1e=h1e,
+        atom_coords=basis_cart.atom_coords,
+        atom_charges=basis_cart.atom_charges,
+        overlap=s,
+        df_factors=df_factors,
+        dtype=jnp.asarray(s).dtype,
+        traced=False,
+    )
+
+    return RestrictedMolecule(
+        ao=ao,
+        grid=QuadratureGrid(weights=weights, coords=coords),
+        dipole_integrals=dipole_integrals,
+        rep_tensor=rep_tensor,
+        mo_coeff=reference_arrays["mo_coeff"],
+        mo_occ=reference_arrays["mo_occ"],
+        mo_energy=reference_arrays["mo_energy"],
+        rdm1=reference_arrays["rdm1"],
+        h1e=reference_arrays["h1e"],
+        nuclear_repulsion=_host_float_unless_traced(scf_inputs.nuclear_repulsion),
+        atom_coords=reference_arrays["atom_coords"],
+        atom_charges=reference_arrays["atom_charges"],
+        overlap_matrix=reference_arrays["overlap_matrix"],
+        ao_deriv1=ao_deriv1,
+        ao_laplacian=ao_laplacian,
+        mf_energy=mf_energy,
+        exact_exchange_fraction=exact_exchange_fraction,
+        nocc=nocc,
+        hfx_omega_values=(
+            jnp.asarray(hfx_omega_values, dtype=reference_arrays["mo_coeff"].dtype)
+            if compute_local_hfx_features
+            else None
+        ),
+        hfx_local=hfx_local,
+        hfx_nu=hfx_nu,
+        pt2_local=pt2_local,
+        df_factors=reference_arrays["df_factors"],
+        eri_pair_matrix=reference_eri_pair_matrix,
+        eri_ovov=eri_ovov,
+        eri_ovvo=eri_ovvo,
+        eri_oovv=eri_oovv,
+        scf_converged=bool(forward.converged),
+        runtime_scf_backend=GPU4PYSCF_RKS_RUNTIME_BACKEND,
+        runtime_scf_options=GPU4PySCFRKSForwardOptions(
+            atom=atom,
+            basis=basis,
+            xc_spec=xc_spec_resolved,
+            unit=unit,
+            charge=charge,
+            spin=spin,
+            cart=cart,
+            grids_level=grids_level,
+            conv_tol=cfg_forward.conv_tol,
+            max_cycle=cfg_forward.max_cycle,
+            verbose=verbose,
+            mol_kwargs=dict(mol_kwargs),
+        ),
+    )
+
+
 def build_restricted_reference_from_facade(
     spec: MoleculeSpec,
     *,
@@ -1389,6 +1653,7 @@ def build_unrestricted_reference_from_facade(
 
 precompile_restricted_cuda_direct_rks_reference = precompile_restricted_cuda_direct_rks_solver
 restricted_reference_from_spec_with_jax_rks = restricted_molecule_from_spec_with_jax_rks
+restricted_reference_from_spec_with_gpu4pyscf_rks = restricted_molecule_from_spec_with_gpu4pyscf_rks
 unrestricted_reference_from_spec_with_jax_uks = unrestricted_molecule_from_spec_with_jax_uks
 
 __all__ = [
@@ -1402,6 +1667,8 @@ __all__ = [
     "build_restricted_scf_result_from_facade",
     "build_unrestricted_reference_from_facade",
     "precompile_restricted_cuda_direct_rks_solver",
+    "restricted_molecule_from_spec_with_gpu4pyscf_rks",
     "restricted_molecule_from_spec_with_jax_rks",
+    "restricted_reference_from_spec_with_gpu4pyscf_rks",
     "unrestricted_molecule_from_spec_with_jax_uks",
 ]

@@ -16,6 +16,7 @@ from td_graddft import neural_xc, tdscf
 from td_graddft.device import put_molecule_on_device, resolve_execution_device
 from td_graddft.jax_runtime import configure_jax_persistent_cache
 from td_graddft.scf.builders import (
+    restricted_molecule_from_spec_with_gpu4pyscf_rks,
     restricted_molecule_from_spec_with_jax_rks,
     unrestricted_molecule_from_spec_with_jax_uks,
 )
@@ -230,10 +231,10 @@ def run_molecule_from_spec(
     """Build a strict-JAX molecule and excited states directly from molecule specs."""
 
     backend = str(simulation.scf_backend).lower()
-    if backend not in {"jax_rks", "jax_uks"}:
+    if backend not in {"jax_rks", "jax_uks", "gpu4pyscf_rks"}:
         raise NotImplementedError(
             "run_molecule_from_spec currently supports simulation.scf_backend in "
-            "{'jax_rks', 'jax_uks'} only."
+            "{'jax_rks', 'jax_uks', 'gpu4pyscf_rks'} only."
         )
 
     configure_jax_persistent_cache(
@@ -246,7 +247,7 @@ def run_molecule_from_spec(
     exec_device = resolve_execution_device(simulation.execution_device)
     device_context = jax.default_device(exec_device) if exec_device is not None else nullcontext()
     with device_context:
-        if backend == "jax_rks":
+        if backend in {"jax_rks", "gpu4pyscf_rks"}:
             rks_xc = simulation.jax_rks_xc_spec or str(spec.xc)
             rks_config = RKSConfig(
                 xc_spec=rks_xc,
@@ -283,7 +284,12 @@ def run_molecule_from_spec(
                 precompile_eri_chunk_size=simulation.jax_precompile_eri_chunk_size,
                 verbose=spec.verbose,
             )
-            reference = restricted_molecule_from_spec_with_jax_rks(**molecule_kwargs)
+            reference_builder = (
+                restricted_molecule_from_spec_with_gpu4pyscf_rks
+                if backend == "gpu4pyscf_rks"
+                else restricted_molecule_from_spec_with_jax_rks
+            )
+            reference = reference_builder(**molecule_kwargs)
             xc_label = rks_xc
         else:
             uks_xc = simulation.jax_uks_xc_spec or str(spec.xc)
@@ -382,7 +388,7 @@ def train_neural_xc(
     config: NeuralXCTrainingConfig,
     spectrum_config: SpectrumGridConfig,
 ) -> TrainingRun:
-    """Train Neural_xc against fixed-density ground-state total energy."""
+    """Train Neural_xc against ground-state and optional TDDFT constraints."""
 
     config = _canonicalize_graddft_ground_state_config(config)
 
@@ -556,6 +562,7 @@ def train_neural_xc(
         scf_stop_gradient_on_unconverged=config.scf_stop_gradient_on_unconverged,
         scf_stop_gradient_rms_threshold=config.scf_stop_gradient_rms_threshold,
         scf_gradient_mode=selected_scf_gradient_mode,
+        scf_runtime_forward_backend=config.scf_runtime_forward_backend,
         scf_implicit_diff_max_iter=config.scf_implicit_diff_max_iter,
         scf_implicit_diff_step_size=config.scf_implicit_diff_step_size,
         scf_implicit_diff_clip=config.scf_implicit_diff_clip,
