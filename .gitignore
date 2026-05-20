@@ -16,7 +16,9 @@ dist/
 
 artifacts/
 datasets/
+docs/
 outputs/
+paper/
 tmp/
 .tmp_*
 *.log
