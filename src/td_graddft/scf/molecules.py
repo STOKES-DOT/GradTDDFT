@@ -1,50 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from typing import Any
 
-import jax
 import jax.numpy as jnp
 
-
-def _pytree_dataclass(*, static_fields: tuple[str, ...] = ()):
-    static_field_names = frozenset(static_fields)
-
-    def decorator(cls):
-        all_field_names = tuple(field.name for field in fields(cls))
-        dynamic_field_names = tuple(
-            field_name for field_name in all_field_names if field_name not in static_field_names
-        )
-        static_field_names_ordered = tuple(
-            field_name for field_name in all_field_names if field_name in static_field_names
-        )
-
-        def tree_flatten(self):
-            children = tuple(getattr(self, field_name) for field_name in dynamic_field_names)
-            static_values = tuple(getattr(self, field_name) for field_name in static_field_names_ordered)
-            return children, static_values
-
-        @classmethod
-        def tree_unflatten(cls_, aux_data, children):
-            kwargs = {
-                name: value for name, value in zip(dynamic_field_names, children, strict=True)
-            }
-            kwargs.update(
-                {
-                    name: value
-                    for name, value in zip(static_field_names_ordered, aux_data, strict=True)
-                }
-            )
-            return cls_(**kwargs)
-
-        cls.tree_flatten = tree_flatten
-        cls.tree_unflatten = tree_unflatten
-        return jax.tree_util.register_pytree_node_class(cls)
-
-    return decorator
+from ._pytree import pytree_dataclass
 
 
-@_pytree_dataclass()
+@pytree_dataclass()
 @dataclass(frozen=True)
 class QuadratureGrid:
     """Minimal quadrature grid container used by the TDDFT modules."""
@@ -53,14 +17,10 @@ class QuadratureGrid:
     coords: jnp.ndarray | None = None
 
 
-@_pytree_dataclass(
+@pytree_dataclass(
     static_fields=(
         "nocc",
         "scf_converged",
-        "direct_jk_engine",
-        "direct_scf_tol",
-        "direct_basis",
-        "direct_cuda_jk_builder",
         "runtime_scf_backend",
         "runtime_scf_options",
     )
@@ -98,10 +58,6 @@ class RestrictedMolecule:
     eri_ovvo: jnp.ndarray | None = None
     eri_oovv: jnp.ndarray | None = None
     scf_converged: bool | None = None
-    direct_jk_engine: str | None = None
-    direct_scf_tol: float | None = None
-    direct_basis: Any | None = None
-    direct_cuda_jk_builder: Any | None = None
     runtime_scf_backend: str | None = None
     runtime_scf_options: Any | None = None
 
@@ -109,7 +65,9 @@ class RestrictedMolecule:
         return jnp.einsum("spq,rp,rq->rs", self.rdm1, self.ao, self.ao)
 
 
-@_pytree_dataclass(static_fields=("nocc_alpha", "nocc_beta"))
+@pytree_dataclass(
+    static_fields=("nocc_alpha", "nocc_beta", "runtime_scf_backend", "runtime_scf_options")
+)
 @dataclass(frozen=True)
 class UnrestrictedMolecule:
     """Minimal unrestricted molecule container used across TD-GradDFT."""
@@ -137,14 +95,12 @@ class UnrestrictedMolecule:
     hfx_local: jnp.ndarray | None = None
     hfx_nu: jnp.ndarray | None = None
     scf_initial_density: jnp.ndarray | None = None
+    runtime_scf_backend: str | None = None
+    runtime_scf_options: Any | None = None
 
     def density(self) -> jnp.ndarray:
         return jnp.einsum("spq,rp,rq->r", self.rdm1, self.ao, self.ao)
 
-
-GridReference = QuadratureGrid
-RestrictedMoleculeReference = RestrictedMolecule
-UnrestrictedMoleculeReference = UnrestrictedMolecule
 
 __all__ = [
     "QuadratureGrid",

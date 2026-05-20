@@ -468,16 +468,15 @@ def test_transition_response_feature_cache_is_bounded():
     )
 
 
-def test_transition_response_mgga_pt2_uses_molecule_mo_energy():
+def test_transition_response_mgga_pt2_linearized_path_is_removed():
     molecule = _make_toy_molecule()
     molecule.nocc = 1
 
-    response_features = features_module.restricted_transition_response_features(
-        molecule,
-        feature_kind="MGGA_PT2",
-    )
-
-    assert response_features.shape[0] == 6
+    with pytest.raises(ValueError, match="PT2 strict response"):
+        features_module.restricted_transition_response_features(
+            molecule,
+            feature_kind="MGGA_PT2",
+        )
 
 
 def test_davidson_tda_falls_back_to_dense_when_operator_solver_fails(monkeypatch):

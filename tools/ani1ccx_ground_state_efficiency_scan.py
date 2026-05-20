@@ -53,13 +53,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hf-input-mode", choices=("total_only", "spin_resolved"), default="spin_resolved")
     parser.add_argument(
         "--response-hf-mode",
-        choices=("nonlocal_exchange_only", "local_projected"),
-        default="nonlocal_exchange_only",
+        choices=("approx", "strict"),
+        default="strict",
     )
     parser.add_argument(
         "--response-pt2-mode",
-        choices=("nonlocal_correlation_only", "local_projected"),
-        default="local_projected",
+        choices=("approx", "strict"),
+        default="approx",
     )
     parser.add_argument("--dm21-hfx-channels", type=int, default=2)
     parser.add_argument("--omega-grid", default="0.0,0.4")

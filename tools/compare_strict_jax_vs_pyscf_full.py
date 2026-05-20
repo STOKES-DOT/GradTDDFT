@@ -13,7 +13,7 @@ import numpy as np
 from pyscf import dft, gto
 
 from td_graddft import tdscf
-from td_graddft.reference import restricted_reference_from_spec_with_jax_rks
+from td_graddft.scf.builders import restricted_molecule_from_spec_with_jax_rks
 from td_graddft.scf import RKSConfig
 from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum
 
@@ -129,7 +129,7 @@ def _build_strict_jax_reference(
         potential_clip=20.0,
         jk_backend=str(jk_backend),
     )
-    return restricted_reference_from_spec_with_jax_rks(
+    return restricted_molecule_from_spec_with_jax_rks(
         atom=atom,
         basis=basis,
         xc_spec=str(xc),

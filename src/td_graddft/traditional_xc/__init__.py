@@ -1,4 +1,9 @@
-from .functional import (
+"""Compatibility namespace for classic XC functional wrappers.
+
+Prefer importing new code from ``td_graddft.dft.xc``.
+"""
+
+from ..dft.xc import (
     CLASSIC_XC_SPECS,
     TraditionalXCFunctional,
     make_b3lyp_functional,

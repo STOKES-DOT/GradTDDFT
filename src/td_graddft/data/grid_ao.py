@@ -11,7 +11,7 @@ from jaxtyping import Array
 from .basis import CartesianBasis
 
 
-_DOUBLE_FACTORIAL_LOOKUP = jnp.asarray([1.0, 1.0, 3.0, 15.0])
+_DOUBLE_FACTORIAL_LOOKUP = (1.0, 1.0, 3.0, 15.0)
 
 
 def _as_device_array(value, dtype=None):
@@ -27,6 +27,7 @@ def _primitive_cartesian_norm_array(exponents: Array, angulars: Array) -> Array:
 
     exponents = jnp.asarray(exponents)
     angulars = jnp.asarray(angulars, dtype=jnp.int32)
+    double_factorial_lookup = jnp.asarray(_DOUBLE_FACTORIAL_LOOKUP, dtype=exponents.dtype)
     lx = angulars[:, 0][:, None]
     ly = angulars[:, 1][:, None]
     lz = angulars[:, 2][:, None]
@@ -34,9 +35,9 @@ def _primitive_cartesian_norm_array(exponents: Array, angulars: Array) -> Array:
 
     pref = (2.0 * exponents / jnp.pi) ** 0.75
     denom = (
-        _DOUBLE_FACTORIAL_LOOKUP[lx]
-        * _DOUBLE_FACTORIAL_LOOKUP[ly]
-        * _DOUBLE_FACTORIAL_LOOKUP[lz]
+        double_factorial_lookup[lx]
+        * double_factorial_lookup[ly]
+        * double_factorial_lookup[lz]
     )
     cart = pref * jnp.sqrt((4.0 * exponents) ** ltot / denom)
 

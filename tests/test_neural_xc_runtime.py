@@ -2,11 +2,12 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import pytest
 from flax import linen as nn
 
-from td_graddft.jax_libxc import b3lyp_component_basis
+from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
 from td_graddft.neural_xc import (
     ResidualMixingMLP,
     available_semilocal_components,
@@ -16,10 +17,14 @@ from td_graddft.neural_xc import (
 )
 from td_graddft.neural_xc.factory import NeuralXCFunctional
 from td_graddft.features import restricted_grid_features
+import td_graddft.scf.differentiable as scf_differentiable
 from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.spectra import HARTREE_TO_EV, oscillator_strengths
 from td_graddft.tddft import RestrictedCasidaTDDFT
-from td_graddft.tddft.response import build_restricted_tda_matrix
+from td_graddft.tddft.response import (
+    build_restricted_response_matrices,
+    build_restricted_tda_matrix,
+)
 from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,
@@ -189,6 +194,7 @@ def test_neural_xc_functional_trains_and_produces_excitation():
     functional = make_neural_xc_functional(
         semilocal_xc="pbe",
         hidden_dims=(8, 8),
+        response_hf_mode="approx",
         name="toy_neural_xc",
     )
     datum = GroundStateDatum(molecule=molecule, target_total_energy=jnp.array(0.2))
@@ -277,7 +283,7 @@ def test_semilocal_xc_alias_expands_to_component_channels_for_neural_basis():
 
 
 def test_neural_xc_rejects_experimental_jax_xc_semilocal_by_default(monkeypatch):
-    from td_graddft import jax_xc_adapter
+    import td_graddft.xc_backend.jax_xc_adapter as jax_xc_adapter
 
     class FakeModule:
         __version__ = "fake"
@@ -301,7 +307,7 @@ def test_neural_xc_rejects_experimental_jax_xc_semilocal_by_default(monkeypatch)
 
 
 def test_neural_xc_accepts_experimental_jax_xc_with_explicit_opt_in(monkeypatch):
-    from td_graddft import jax_xc_adapter
+    import td_graddft.xc_backend.jax_xc_adapter as jax_xc_adapter
 
     class FakeModule:
         __version__ = "fake"
@@ -328,7 +334,7 @@ def test_neural_xc_accepts_experimental_jax_xc_with_explicit_opt_in(monkeypatch)
 
 
 def test_neural_xc_accepts_dynamic_mgga_with_explicit_opt_in(monkeypatch):
-    from td_graddft import jax_xc_adapter
+    import td_graddft.xc_backend.jax_xc_adapter as jax_xc_adapter
 
     class FakeModule:
         __version__ = "fake"
@@ -486,6 +492,7 @@ def test_tda_builder_prefers_response_specific_binding(monkeypatch):
     functional = make_neural_xc_functional(
         semilocal_xc="pbe",
         hidden_dims=(8, 8),
+        response_hf_mode="approx",
         name="toy_response_binding_preference",
     )
     params = functional.init_from_molecule(jax.random.PRNGKey(101), molecule)
@@ -516,7 +523,7 @@ def test_scf_potential_components_and_alpha_matches_bound_scf_binding():
     params = functional.init_from_molecule(jax.random.PRNGKey(233), molecule)
 
     bound = functional.bind_to_molecule_for_scf(params, molecule)
-    v_rho, v_grad, v_tau, v_lapl, kind, alpha = functional.scf_potential_components_and_alpha(
+    v_rho, v_grad, v_tau, v_lapl, kind, alpha, extra_fock = functional.scf_potential_components_and_alpha(
         params,
         molecule,
     )
@@ -535,6 +542,149 @@ def test_scf_potential_components_and_alpha_matches_bound_scf_binding():
     else:
         assert v_lapl is None
     assert jnp.allclose(alpha, bound.exact_exchange_fraction, atol=1e-8)
+    assert extra_fock.shape == molecule.h1e.shape
+    assert jnp.allclose(extra_fock, jnp.zeros_like(molecule.h1e), atol=1e-8)
+
+
+def test_neural_xc_contracts_hfx_feature_gradients_into_extra_fock():
+    molecule = _make_toy_molecule()
+    molecule.hfx_nu = jnp.zeros((2, 2, 2, 2), dtype=jnp.float32)
+    molecule.hfx_nu = molecule.hfx_nu.at[0, 0, 0, 0].set(1.0)
+    molecule.hfx_nu = molecule.hfx_nu.at[0, 1, 1, 1].set(0.8)
+    molecule.hfx_nu = molecule.hfx_nu.at[1, 0, 0, 0].set(0.5)
+    molecule.hfx_nu = molecule.hfx_nu.at[1, 1, 1, 1].set(0.4)
+    functional = make_neural_xc_functional(
+        hidden_dims=(8, 8),
+        name="toy_scf_explicit_hfx_fock",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(244), molecule)
+
+    components = functional.scf_potential_components_and_alpha(params, molecule)
+    _, _, _, _, _, alpha, extra_fock = components
+    density = jnp.asarray(molecule.rdm1).sum(axis=0)
+    callback_extra = functional.scf_extra_fock_for_density(params, molecule, density)
+    _, fock_alpha, fock_extra = scf_differentiable._restricted_xc_fock_terms(
+        params=params,
+        functional=functional,
+        molecule=molecule,
+        weights=molecule.grid.weights,
+        functional_dtype=jnp.float32,
+        vxc_clip=20.0,
+    )
+
+    assert extra_fock.shape == molecule.h1e.shape
+    assert jnp.all(jnp.isfinite(extra_fock))
+    assert jnp.linalg.norm(extra_fock) > 0.0
+    assert jnp.allclose(extra_fock, callback_extra, atol=1e-7)
+    assert jnp.allclose(fock_extra, callback_extra, atol=1e-7)
+    assert jnp.allclose(alpha, 0.0, atol=1e-8)
+    assert jnp.allclose(fock_alpha, 0.0, atol=1e-8)
+    assert functional.effective_exchange_fraction(params, molecule) > 0.0
+
+
+def test_neural_xc_scf_density_energy_matches_rebuilt_molecule_energy():
+    molecule = _make_toy_molecule()
+    functional = make_neural_xc_functional(
+        semilocal_xc="pbe",
+        hidden_dims=(8, 8),
+        name="toy_scf_density_energy",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(313), molecule)
+    density = 1.1 * jnp.asarray(molecule.rdm1).sum(axis=0)
+
+    density_energy = functional.scf_xc_energy_for_density(params, molecule, density)
+    combined_energy, combined_alpha = functional.scf_xc_energy_and_alpha_for_density(
+        params,
+        molecule,
+        density,
+    )
+    rebuilt = functional.scf_molecule_with_density(molecule, density)
+    rebuilt_energy = functional.energy_from_molecule(params, rebuilt)
+    rebuilt_alpha = functional.effective_exchange_fraction(params, rebuilt)
+
+    assert jnp.allclose(density_energy, rebuilt_energy, atol=1e-8)
+    assert jnp.allclose(combined_energy, rebuilt_energy, atol=1e-8)
+    assert jnp.allclose(combined_alpha, rebuilt_alpha, atol=1e-8)
+
+
+def test_neural_xc_energy_from_molecule_uses_direct_channel_basis(monkeypatch):
+    molecule = _make_toy_molecule()
+    functional = make_neural_xc_functional(
+        semilocal_xc="pbe",
+        hidden_dims=(8, 8),
+        name="toy_energy_direct_channel_basis",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(315), molecule)
+
+    def _fail_channel_contributions(*args, **kwargs):
+        raise AssertionError("energy_from_molecule should use the direct channel-basis helper")
+
+    monkeypatch.setattr(NeuralXCFunctional, "channel_contributions", _fail_channel_contributions)
+
+    energy = functional.energy_from_molecule(params, molecule)
+
+    assert jnp.isfinite(energy)
+
+
+def test_neural_xc_scf_fock_terms_use_density_energy_callback(monkeypatch):
+    molecule = _make_toy_molecule()
+    functional = make_neural_xc_functional(
+        semilocal_xc="pbe",
+        hidden_dims=(8, 8),
+        name="toy_scf_density_energy_fock",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(317), molecule)
+
+    def _fail_potential(*args, **kwargs):
+        raise AssertionError("neural XC SCF should use scf_xc_energy_for_density")
+
+    def _fail_separate_alpha(*args, **kwargs):
+        raise AssertionError("neural XC SCF should reuse alpha from the energy callback")
+
+    monkeypatch.setattr(
+        NeuralXCFunctional,
+        "scf_potential_components_and_alpha",
+        _fail_potential,
+    )
+    monkeypatch.setattr(
+        NeuralXCFunctional,
+        "scf_exact_exchange_fraction",
+        _fail_separate_alpha,
+    )
+
+    vxc_matrix, alpha, extra_fock = scf_differentiable._restricted_xc_fock_terms(
+        params=params,
+        functional=functional,
+        molecule=molecule,
+        weights=molecule.grid.weights,
+        functional_dtype=jnp.float32,
+        vxc_clip=20.0,
+    )
+
+    assert vxc_matrix.shape == molecule.h1e.shape
+    assert extra_fock.shape == molecule.h1e.shape
+    assert jnp.all(jnp.isfinite(vxc_matrix))
+    assert jnp.isfinite(alpha)
+
+
+def test_bind_to_molecule_reuses_precomputed_coefficients_for_energy(monkeypatch):
+    molecule = _make_toy_molecule()
+    functional = make_neural_xc_functional(
+        semilocal_xc="pbe",
+        hidden_dims=(8, 8),
+        name="toy_full_bind_energy_reuse",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(234), molecule)
+
+    def _fail_channel_contributions(*args, **kwargs):
+        raise AssertionError("bind_to_molecule should not recompute channel contributions")
+
+    monkeypatch.setattr(NeuralXCFunctional, "channel_contributions", _fail_channel_contributions)
+
+    bound = functional.bind_to_molecule(params, molecule)
+
+    assert bound.projected_energy_density_values is not None
+    assert bound.projected_energy_density_values.shape == molecule.grid.weights.shape
 
 
 def test_custom_non_hf_module_is_pluggable_into_neural_xc_functional():
@@ -574,6 +724,32 @@ def test_custom_non_hf_module_is_pluggable_into_neural_xc_functional():
     assert semilocal_channels.shape[-1] == 2
     assert coefficients.shape[-1] == 3
     assert jnp.all(jnp.isfinite(semilocal_channels))
+
+
+def test_custom_non_hf_module_keeps_random_output_head_initialization():
+    molecule = _make_toy_molecule()
+    non_hf_module = make_custom_semilocal_module(
+        channel_names=("toy_1", "toy_2", "toy_3", "toy_4"),
+        energy_density_channels_fn=lambda features: jnp.stack(
+            [
+                features.rho,
+                0.5 * features.rho,
+                features.sigma,
+                0.25 * features.sigma,
+            ],
+            axis=-1,
+        ),
+        name="toy_four_channel_non_hf_module",
+    )
+    functional = make_neural_xc_functional(
+        non_hf_module=non_hf_module,
+        hidden_dims=(8, 8),
+        name="toy_custom_prior_guard",
+    )
+
+    params = functional.init_from_molecule(jax.random.PRNGKey(19), molecule)
+
+    assert jnp.any(params["params"]["HeadDense"]["kernel"] != 0.0)
 
 
 def test_libxc_semilocal_module_supports_common_exchange_and_correlation_components():
@@ -737,6 +913,59 @@ def test_reference_can_cache_local_pt2_feature_and_functional_reuses_it():
     )
     pt2 = functional.projected_pt2_grid_contribution(reference)
     assert jnp.allclose(pt2, reference.pt2_local, atol=1e-9)
+
+
+def test_local_pt2_feature_supports_packed_eri_pair_matrix():
+    from td_graddft.neural_xc.inputs import _local_pt2_feature_from_restricted_orbitals
+
+    ao = jnp.asarray(
+        [
+            [0.7, -0.2, 0.4],
+            [0.1, 0.8, -0.3],
+            [0.5, 0.3, 0.6],
+            [-0.4, 0.2, 0.9],
+        ],
+        dtype=jnp.float64,
+    )
+    mo_coeff = jnp.eye(3, dtype=jnp.float64)
+    mo_occ = jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)
+    mo_energy = jnp.asarray([-0.6, 0.2, 0.55], dtype=jnp.float64)
+    metric = jnp.asarray(
+        [
+            [1.2, 0.3, -0.2],
+            [0.3, 0.9, 0.1],
+            [-0.2, 0.1, 0.7],
+        ],
+        dtype=jnp.float64,
+    )
+    rep_tensor = jnp.einsum("pq,rs->pqrs", metric, metric)
+
+    rows, cols = np.tril_indices(3)
+    eri_pair_matrix = rep_tensor[
+        rows[:, None],
+        cols[:, None],
+        rows[None, :],
+        cols[None, :],
+    ]
+    expected = _local_pt2_feature_from_restricted_orbitals(
+        ao,
+        mo_coeff,
+        mo_occ,
+        mo_energy,
+        rep_tensor=rep_tensor,
+        nocc=1,
+    )
+    actual = _local_pt2_feature_from_restricted_orbitals(
+        ao,
+        mo_coeff,
+        mo_occ,
+        mo_energy,
+        rep_tensor=jnp.zeros((0,), dtype=jnp.float64),
+        eri_pair_matrix=eri_pair_matrix,
+        nocc=1,
+    )
+
+    assert jnp.allclose(actual, expected, atol=1e-10, rtol=1e-10)
 
 
 def test_projected_hf_uses_local_hfx_channel_without_global_rescaling():
@@ -938,6 +1167,28 @@ def test_projected_pt2_grid_contribution_recovers_canonical_mp2_energy():
     assert jnp.all(jnp.isfinite(projected_pt2))
     assert not jnp.allclose(projected_pt2, 0.0, atol=1e-8)
     assert jnp.allclose(projected_energy, expected_mp2, atol=1e-6)
+
+
+def test_scaled_pt2_projection_does_not_call_local_exact_wrapper(monkeypatch):
+    molecule = _make_pt2_toy_molecule()
+    functional = make_neural_xc_functional(
+        semilocal_xc="pbe",
+        hidden_dims=(8, 8),
+        include_pt2_channel=True,
+        pt2_channel_mode="scaled_projected",
+        name="pt2_projection_no_wrapper_recompute",
+    )
+
+    def _fail_local_exact(*args, **kwargs):
+        raise AssertionError("scaled PT2 should share MP2 intermediates directly")
+
+    monkeypatch.setattr(NeuralXCFunctional, "_local_exact_pt2_grid_contribution", _fail_local_exact)
+
+    projected_pt2 = functional.projected_pt2_grid_contribution(molecule)
+    projected_energy = jnp.tensordot(molecule.grid.weights, projected_pt2, axes=(0, 0))
+
+    assert jnp.all(jnp.isfinite(projected_pt2))
+    assert jnp.allclose(projected_energy, jnp.array(-0.25), atol=1e-6)
 
 
 def test_include_pt2_channel_adds_feature_and_basis_channels():
@@ -1275,7 +1526,7 @@ def test_projected_local_kernel_matches_potential_density_derivative():
     functional = make_neural_xc_functional(
         semilocal_xc="pbe",
         hidden_dims=(8, 8),
-        response_hf_mode="local_projected",
+        response_hf_mode="approx",
         name="kernel_consistency_check",
     )
     params = functional.init_from_molecule(jax.random.PRNGKey(11), molecule)
@@ -1310,7 +1561,7 @@ def test_projected_local_kernel_matches_potential_density_derivative():
             hf_point,
             hf_point,
             hf_point,
-            response_hf_mode="local_projected",
+            response_hf_mode="approx",
         )
 
     def vxc(rho_value):
@@ -1330,11 +1581,19 @@ class _HFOnlyChannelModel(nn.Module):
         return coeff.at[..., 1].set(1.0)
 
 
+class _HFResponsiveChannelModel(nn.Module):
+    @nn.compact
+    def __call__(self, inputs):
+        coeff = jnp.zeros(inputs.shape[:-1] + (2,), dtype=inputs.dtype)
+        hf_coeff = 0.25 + jnp.square(inputs[..., 0])
+        return coeff.at[..., 1].set(hf_coeff)
+
+
 class _PT2ResponsiveChannelModel(nn.Module):
     @nn.compact
     def __call__(self, inputs):
         coeff = jnp.zeros(inputs.shape[:-1] + (3,), dtype=inputs.dtype)
-        pt2_coeff = 0.25 + jnp.square(inputs[..., 0])
+        pt2_coeff = 0.25 + jnp.square(inputs[..., -1])
         return coeff.at[..., 1].set(pt2_coeff)
 
 
@@ -1351,73 +1610,185 @@ def test_response_hf_mode_controls_local_hf_kernel_contribution():
     molecule = _make_toy_molecule()
     semilocal_zero = lambda features: jnp.zeros_like(features.rho)
 
-    hf_nonlocal_only = NeuralXCFunctional(
+    hf_strict = NeuralXCFunctional(
         model=_HFOnlyChannelModel(),
         semilocal_energy_density_fn=semilocal_zero,
-        response_hf_mode="nonlocal_exchange_only",
-        name="hf_nonlocal_only",
+        response_hf_mode="strict",
+        name="hf_strict",
     )
-    hf_local_projected = NeuralXCFunctional(
+    hf_approx = NeuralXCFunctional(
         model=_HFOnlyChannelModel(),
         semilocal_energy_density_fn=semilocal_zero,
-        response_hf_mode="local_projected",
-        name="hf_local_projected",
+        response_hf_mode="approx",
+        name="hf_approx",
     )
 
-    params_nonlocal = hf_nonlocal_only.init_from_molecule(jax.random.PRNGKey(21), molecule)
-    params_local = hf_local_projected.init_from_molecule(jax.random.PRNGKey(22), molecule)
-    bound_nonlocal = hf_nonlocal_only.bind_to_molecule(params_nonlocal, molecule)
-    bound_local = hf_local_projected.bind_to_molecule(params_local, molecule)
+    params_strict = hf_strict.init_from_molecule(jax.random.PRNGKey(21), molecule)
+    params_approx = hf_approx.init_from_molecule(jax.random.PRNGKey(22), molecule)
+    bound_strict = hf_strict.bind_to_molecule(params_strict, molecule)
+    bound_approx = hf_approx.bind_to_molecule(params_approx, molecule)
     rho = jnp.sum(molecule.density(), axis=-1)
 
-    kernel_nonlocal = bound_nonlocal.local_kernel(rho)
-    kernel_local = bound_local.local_kernel(rho)
-    hf_fraction_nonlocal = bound_nonlocal.local_hf_fraction(rho)
-    hf_fraction_local = bound_local.local_hf_fraction(rho)
+    kernel_strict = bound_strict.local_kernel(rho)
+    kernel_approx = bound_approx.local_kernel(rho)
+    hf_fraction_strict = bound_strict.local_hf_fraction(rho)
+    hf_fraction_approx = bound_approx.local_hf_fraction(rho)
 
-    assert jnp.allclose(kernel_nonlocal, 0.0, atol=1e-8)
-    assert jnp.all(jnp.isfinite(kernel_local))
-    assert jnp.allclose(hf_fraction_nonlocal, 1.0, atol=1e-8)
-    assert jnp.allclose(hf_fraction_local, 1.0, atol=1e-8)
+    assert jnp.allclose(kernel_strict, 0.0, atol=1e-8)
+    assert jnp.allclose(kernel_approx, kernel_strict, atol=1e-8)
+    assert jnp.allclose(hf_fraction_strict, 0.0, atol=1e-8)
+    assert jnp.allclose(hf_fraction_approx, 1.0, atol=1e-8)
 
 
-def test_response_pt2_mode_controls_local_pt2_response_contribution():
+def test_response_hf_approx_uses_scalar_exchange_kernel():
+    molecule = _make_toy_molecule()
+    molecule.rep_tensor = molecule.rep_tensor.at[0, 0, 1, 1].set(0.5)
+    semilocal_zero = lambda features: jnp.zeros_like(features.rho)
+    hf_approx = NeuralXCFunctional(
+        model=_HFResponsiveChannelModel(),
+        semilocal_energy_density_fn=semilocal_zero,
+        response_hf_mode="approx",
+        name="hf_approx_response_binding",
+    )
+    params_approx = hf_approx.init_from_molecule(jax.random.PRNGKey(221), molecule)
+
+    bound_approx = hf_approx.bind_to_molecule_for_response(params_approx, molecule)
+    _, a_approx = build_restricted_tda_matrix(
+        molecule,
+        hf_approx,
+        xc_params=params_approx,
+    )
+
+    assert bound_approx.response_feature_kind == "MGGA"
+    assert bound_approx.local_hf_fraction_values is None
+    assert bound_approx.exact_exchange_fraction > 0.0
+    assert bound_approx.nonlocal_response_matrices_fn is None
+    assert jnp.all(jnp.isfinite(a_approx))
+
+
+def test_response_hf_strict_builds_hf_channel_kernel_without_scalar_exchange():
     molecule = _make_pt2_toy_molecule()
+    molecule.rep_tensor = jnp.zeros_like(molecule.rep_tensor)
+    nu = jnp.asarray(
+        [
+            [
+                [[0.7, 0.2], [0.2, 0.5]],
+                [[0.4, -0.1], [-0.1, 0.6]],
+            ],
+        ],
+        dtype=jnp.float64,
+    )
+    molecule.hfx_nu = nu
+    molecule.hfx_local = None
+    alpha = 0.25
+    semilocal_zero = lambda features: jnp.zeros_like(features.rho)
+    functional = NeuralXCFunctional(
+        model=_ConstantChannelModel((0.0, alpha)),
+        semilocal_energy_density_fn=semilocal_zero,
+        input_feature_mode="enhanced",
+        hf_input_mode="total_only",
+        response_hf_mode="strict",
+        name="hf_strict_channel_kernel",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(223), molecule)
+
+    bound = functional.bind_to_molecule_for_response(params, molecule)
+    hf_a, hf_b = bound.nonlocal_response_matrices(molecule)
+    matrices = build_restricted_response_matrices(
+        molecule,
+        functional,
+        xc_params=params,
+    )
+
+    ao = jnp.asarray(molecule.ao)
+    orbo = jnp.asarray(molecule.mo_coeff[0])[:, :1]
+    orbv = jnp.asarray(molecule.mo_coeff[0])[:, 1:]
+    rho_o = jnp.einsum("gp,pi->gi", ao, orbo)
+    rho_v = jnp.einsum("gp,pa->ga", ao, orbv)
+    nu0 = nu[0]
+    nu_vv = jnp.einsum("pa,gpq,qb->gab", orbv, nu0, orbv)
+    nu_vo = jnp.einsum("pa,gpq,qj->gaj", orbv, nu0, orbo)
+    weights = jnp.asarray(molecule.grid.weights)
+    expected_a = -alpha * jnp.einsum(
+        "g,gi,gj,gab->iajb",
+        weights,
+        rho_o,
+        rho_o,
+        nu_vv,
+    )
+    expected_b = -alpha * jnp.einsum(
+        "g,gi,gb,gaj->iajb",
+        weights,
+        rho_o,
+        rho_v,
+        nu_vo,
+    )
+    diagonal = jnp.asarray(molecule.mo_energy[0, 1:] - molecule.mo_energy[0, :1])[0]
+
+    assert jnp.allclose(bound.exact_exchange_fraction, 0.0, atol=1e-12)
+    assert jnp.allclose(hf_a.reshape(expected_a.shape), expected_a, atol=1e-10)
+    assert jnp.allclose(hf_b.reshape(expected_b.shape), expected_b, atol=1e-10)
+    assert jnp.allclose(matrices.a_matrix, expected_a + diagonal, atol=1e-10)
+    assert jnp.allclose(matrices.b_matrix, expected_b, atol=1e-10)
+
+
+def test_response_pt2_strict_adds_nonlocal_tda_matrix():
+    molecule = _make_pt2_toy_molecule()
+    molecule.ao = jnp.asarray([[0.8, 0.3], [0.4, -0.7]], dtype=jnp.float64)
+    molecule.ao_deriv1 = jnp.stack(
+        [
+            molecule.ao,
+            jnp.asarray([[0.05, 0.02], [0.01, 0.07]], dtype=jnp.float64),
+            jnp.asarray([[0.01, -0.03], [0.04, 0.02]], dtype=jnp.float64),
+            jnp.asarray([[0.02, 0.01], [-0.01, 0.03]], dtype=jnp.float64),
+        ]
+    )
+    rep_tensor = jnp.zeros((2, 2, 2, 2), dtype=jnp.float64)
+    rep_tensor = rep_tensor.at[0, 1, 0, 1].set(1.0)
+    rep_tensor = rep_tensor.at[0, 0, 1, 1].set(0.3)
+    rep_tensor = rep_tensor.at[0, 1, 1, 0].set(0.5)
+    rep_tensor = rep_tensor.at[1, 0, 0, 1].set(0.2)
+    molecule.rep_tensor = rep_tensor
     semilocal_zero = lambda features: jnp.zeros_like(features.rho)
 
-    pt2_nonlocal_only = NeuralXCFunctional(
+    pt2_approx = NeuralXCFunctional(
         model=_PT2ResponsiveChannelModel(),
         semilocal_energy_density_fn=semilocal_zero,
         include_pt2_channel=True,
-        response_hf_mode="nonlocal_exchange_only",
-        response_pt2_mode="nonlocal_correlation_only",
-        name="pt2_nonlocal_only",
+        response_hf_mode="approx",
+        response_pt2_mode="approx",
+        name="pt2_approx",
     )
-    pt2_local_projected = NeuralXCFunctional(
+    pt2_strict = NeuralXCFunctional(
         model=_PT2ResponsiveChannelModel(),
         semilocal_energy_density_fn=semilocal_zero,
         include_pt2_channel=True,
-        response_hf_mode="nonlocal_exchange_only",
-        response_pt2_mode="local_projected",
-        name="pt2_local_projected",
+        response_hf_mode="approx",
+        response_pt2_mode="strict",
+        name="pt2_strict",
+    )
+    params_approx = pt2_approx.init_from_molecule(jax.random.PRNGKey(122), molecule)
+    params_strict = pt2_strict.init_from_molecule(jax.random.PRNGKey(122), molecule)
+
+    bound = pt2_strict.bind_to_molecule_for_response(params_strict, molecule)
+    pt2_matrix = bound.nonlocal_response_matrix(molecule)
+    _, a_approx = build_restricted_tda_matrix(
+        molecule,
+        pt2_approx,
+        xc_params=params_approx,
+    )
+    _, a_strict = build_restricted_tda_matrix(
+        molecule,
+        pt2_strict,
+        xc_params=params_strict,
     )
 
-    params_nonlocal = pt2_nonlocal_only.init_from_molecule(jax.random.PRNGKey(121), molecule)
-    params_local = pt2_local_projected.init_from_molecule(jax.random.PRNGKey(122), molecule)
-    bound_nonlocal = pt2_nonlocal_only.bind_to_molecule(params_nonlocal, molecule)
-    bound_local = pt2_local_projected.bind_to_molecule(params_local, molecule)
-    rho = jnp.sum(molecule.density(), axis=-1)
-
-    potential_nonlocal = bound_nonlocal.local_potential(rho)
-    potential_local = bound_local.local_potential(rho)
-    kernel_nonlocal = bound_nonlocal.local_kernel(rho)
-    kernel_local = bound_local.local_kernel(rho)
-
-    assert jnp.allclose(potential_nonlocal, 0.0, atol=1e-8)
-    assert jnp.allclose(kernel_nonlocal, 0.0, atol=1e-8)
-    assert jnp.all(jnp.isfinite(potential_local))
-    assert jnp.all(jnp.isfinite(kernel_local))
-    assert not jnp.allclose(potential_local, 0.0, atol=1e-8)
+    assert bound.response_feature_kind == "MGGA"
+    assert bound.grid_response_tensor(molecule).shape == (5, 5, molecule.grid.weights.shape[0])
+    assert pt2_matrix.shape == (1, 1)
+    assert jnp.all(jnp.isfinite(pt2_matrix))
+    assert not jnp.allclose(pt2_matrix, 0.0, atol=1e-10)
+    assert not jnp.allclose(a_strict, a_approx, atol=1e-10)
 
 
 def test_bound_neural_xc_exposes_strict_mgga_response_tensor():
@@ -1522,7 +1893,7 @@ def test_coefficient_prior_penalty_is_reported_and_nonnegative():
     assert constrained_loss >= plain_loss
 
 
-def test_nonlocal_exchange_only_response_mode_is_closer_to_pyscf_b3lyp():
+def test_strict_response_mode_matches_pyscf_b3lyp_tolerance():
     _pyscf_or_skip()
     mf = _make_water_b3lyp_reference()
     reference = restricted_reference_from_pyscf(
@@ -1558,10 +1929,10 @@ def test_nonlocal_exchange_only_response_mode_is_closer_to_pyscf_b3lyp():
         mae_f = float(jnp.mean(jnp.abs(pred_osc[:n] - ref_osc[:n])))
         return mae_e, mae_f
 
-    nonlocal_mae_e, nonlocal_mae_f = run_mode("nonlocal_exchange_only")
-    local_mae_e, local_mae_f = run_mode("local_projected")
+    strict_mae_e, strict_mae_f = run_mode("strict")
+    approx_mae_e, approx_mae_f = run_mode("approx")
 
-    assert nonlocal_mae_e < 0.25
-    assert nonlocal_mae_f < 0.02
-    assert nonlocal_mae_e <= local_mae_e + 1e-4
-    assert nonlocal_mae_f <= local_mae_f + 1e-5
+    assert strict_mae_e < 0.25
+    assert strict_mae_f < 0.02
+    assert approx_mae_e < 0.25
+    assert approx_mae_f < 0.02

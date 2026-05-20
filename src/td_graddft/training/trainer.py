@@ -5,6 +5,7 @@ from typing import Any, Callable, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from flax.training.train_state import TrainState
 from jaxtyping import Array, PRNGKeyArray
@@ -20,6 +21,16 @@ from .targets import density_on_grid, ground_state_mse_loss
 
 
 RuntimeForwardStateProvider = Callable[[Any, Any, Any], Any]
+
+
+def _gpu4pyscf_neural_payload_can_jit(functional: Any) -> bool:
+    """Avoid compiling generated WPBEH expressions inside GPU4PySCF callbacks."""
+    local_terms = getattr(functional, "local_term_specs", ())
+    for term in local_terms or ():
+        if str(getattr(term, "name", "")).lower() == "gga_x_wpbeh":
+            return False
+    local_xc_spec = str(getattr(functional, "local_xc_spec", "")).lower()
+    return "wpbeh" not in local_xc_spec and "lc_wpbe" not in local_xc_spec
 
 
 def _tree_l2_norm(tree: Any, *, sanitize: bool = False) -> Array:
@@ -97,6 +108,50 @@ def _resolve_runtime_forward_setup(
     return training_config, None
 
 
+def _loss_runtime_forward_state_provider(
+    loss_fn: Callable[..., tuple[Array, dict[str, Array]]] | None,
+    training_config: GroundStateTrainingConfig | None,
+) -> RuntimeForwardStateProvider | None:
+    if loss_fn is None:
+        return None
+    factory = getattr(loss_fn, "runtime_forward_state_provider", None)
+    if not callable(factory):
+        return None
+    provider = factory(training_config)
+    if provider is None:
+        return None
+    if not callable(provider):
+        raise TypeError("loss_fn.runtime_forward_state_provider(...) must return a callable or None.")
+    return provider
+
+
+def _compose_runtime_forward_state_providers(
+    first: RuntimeForwardStateProvider | None,
+    second: RuntimeForwardStateProvider | None,
+) -> RuntimeForwardStateProvider | None:
+    if first is None:
+        return second
+    if second is None:
+        return first
+
+    def provider(params: Any, functional: Any, molecule: Any):
+        return second(params, functional, first(params, functional, molecule))
+
+    return provider
+
+
+def _restricted_runtime_initial_density_matrix(molecule: Any) -> np.ndarray | None:
+    rdm1 = getattr(molecule, "rdm1", None)
+    if rdm1 is None:
+        return None
+    density = np.asarray(jax.device_get(rdm1), dtype=float)
+    if density.ndim == 3 and int(density.shape[0]) == 2:
+        density = density[0] + density[1]
+    if density.ndim != 2:
+        return None
+    return np.asarray(density, dtype=float).copy()
+
+
 def make_self_consistent_runtime_forward_provider(
     training_config: GroundStateTrainingConfig | None = None,
 ) -> RuntimeForwardStateProvider:
@@ -105,7 +160,7 @@ def make_self_consistent_runtime_forward_provider(
     The returned provider runs the self-consistent primal state before
     ``jax.value_and_grad``.  Pair it with
     ``make_runtime_forward_implicit_loss_and_grad`` so the backward pass uses
-    the existing implicit commutator VJP rather than differentiating through
+    the implicit fixed-point VJP rather than differentiating through
     SCF iterations.
     """
 
@@ -118,6 +173,7 @@ def make_self_consistent_runtime_forward_provider(
         scf_implicit_forward_mode="input_state",
     )
     scf_solver = _make_differentiable_scf(cfg)
+    cached_density_by_molecule_id: dict[int, np.ndarray] = {}
 
     def provider(params: Any, functional: Any, molecule: Any):
         backend = str(getattr(cfg, "scf_runtime_forward_backend", "auto")).lower()
@@ -144,13 +200,27 @@ def make_self_consistent_runtime_forward_provider(
             if runtime_options is None:
                 return molecule
             forward_kwargs = runtime_options.as_kwargs()
+            forward_kwargs["require_convergence"] = bool(cfg.scf_require_convergence)
+            cache_key = id(molecule)
+            initial_density_matrix = cached_density_by_molecule_id.get(cache_key)
+            if initial_density_matrix is None:
+                initial_density_matrix = _restricted_runtime_initial_density_matrix(molecule)
+            if initial_density_matrix is not None:
+                forward_kwargs["initial_density_matrix"] = initial_density_matrix
             forward = run_gpu4pyscf_rks_forward(
                 **forward_kwargs,
                 molecule_template=molecule,
                 xc_functional=functional,
                 xc_params=forward_params,
                 neural_vxc_clip=float(cfg.scf_vxc_clip),
+                neural_xc_compute_exc=bool(cfg.scf_require_convergence),
+                neural_xc_jit_payload=_gpu4pyscf_neural_payload_can_jit(functional),
+                collect_fock=False,
             )
+            cached_density_by_molecule_id[cache_key] = np.asarray(
+                forward.density_matrix,
+                dtype=float,
+            ).copy()
             return molecule_from_gpu4pyscf_rks_forward_result(molecule, forward)
         return scf_solver.run_runtime_forward(molecule, functional, forward_params)
 
@@ -233,11 +303,32 @@ def make_ground_state_loss_and_grad(
     and keep optimizer state updates outside the compiled graph.
     """
 
+    objective = ground_state_mse_loss if loss_fn is None else loss_fn
     effective_training_config, effective_runtime_provider = _resolve_runtime_forward_setup(
         training_config,
         runtime_forward_state_provider,
     )
-    objective = ground_state_mse_loss if loss_fn is None else loss_fn
+    effective_runtime_provider = _compose_runtime_forward_state_providers(
+        effective_runtime_provider,
+        _loss_runtime_forward_state_provider(objective, effective_training_config),
+    )
+
+    def compute_loss(local_params, local_data):
+        kwargs = {"training_config": effective_training_config}
+        if predictor is not None:
+            kwargs["predictor"] = predictor
+        return objective(
+            local_params,
+            functional,
+            local_data,
+            **kwargs,
+        )
+
+    loss_value_and_grad = jax.value_and_grad(
+        compute_loss,
+        has_aux=True,
+        argnums=0,
+    )
 
     def loss_and_grad(
         params: Any,
@@ -250,18 +341,7 @@ def make_ground_state_loss_and_grad(
             provider=effective_runtime_provider,
         )
 
-        def compute_loss(local_params):
-            kwargs = {"training_config": effective_training_config}
-            if predictor is not None:
-                kwargs["predictor"] = predictor
-            return objective(
-                local_params,
-                functional,
-                data_for_loss,
-                **kwargs,
-            )
-
-        (loss, metrics), grads = jax.value_and_grad(compute_loss, has_aux=True)(params)
+        (loss, metrics), grads = loss_value_and_grad(params, data_for_loss)
         cleaned_grads, nonfinite_grad_fraction = _sanitize_gradients(grads)
         metrics = dict(metrics)
         metrics["loss"] = loss
@@ -283,11 +363,15 @@ def make_ground_state_eval(
 ):
     """Create a params-only evaluation kernel aligned with the train-step policy."""
 
+    objective = ground_state_mse_loss if loss_fn is None else loss_fn
     effective_training_config, effective_runtime_provider = _resolve_runtime_forward_setup(
         training_config,
         runtime_forward_state_provider,
     )
-    objective = ground_state_mse_loss if loss_fn is None else loss_fn
+    effective_runtime_provider = _compose_runtime_forward_state_providers(
+        effective_runtime_provider,
+        _loss_runtime_forward_state_provider(objective, effective_training_config),
+    )
 
     def evaluate(
         params: Any,
@@ -323,7 +407,7 @@ def make_runtime_forward_implicit_loss_and_grad(
 
     The runtime provider is called before ``jax.value_and_grad`` and should
     return a molecule-like object containing the converged forward SCF state.
-    Gradients are then computed with the implicit commutator custom VJP using
+    Gradients are then computed with the implicit fixed-point custom VJP using
     that state as the primal density.
     """
 

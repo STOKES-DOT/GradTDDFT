@@ -24,7 +24,7 @@ import numpy as np
 import optax
 from flax.training.train_state import TrainState
 
-from td_graddft.device import put_restricted_reference_on_device
+from td_graddft.device import put_restricted_molecule_on_device
 from td_graddft.nn_rsh import (
     AtomCenteredDensityDescriptorConfig,
     ResolvedRSHParameters,
@@ -262,7 +262,7 @@ def _build_entry(
         compute_local_hfx_aux=True,
         hfx_omega_values=omega_grid,
     )
-    reference = put_restricted_reference_on_device(reference)
+    reference = put_restricted_molecule_on_device(reference)
     return QH9Entry(
         db_id=int(db_id),
         formula=_formula_from_z(z),

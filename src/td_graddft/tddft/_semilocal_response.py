@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import weakref
 
 from td_graddft.features import restricted_grid_response_variables
-from td_graddft.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
+from td_graddft.xc_backend.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
 
 
 _GRID_RESPONSE_TENSOR_CACHE: dict[

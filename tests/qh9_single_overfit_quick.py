@@ -23,8 +23,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import optax
 
-from td_graddft.device import put_restricted_reference_on_device
-from td_graddft.jax_libxc import b3lyp_component_basis
+from td_graddft.device import put_restricted_molecule_on_device
+from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
 from td_graddft.neural_xc import make_neural_xc_functional
 from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.scf import DifferentiableSCF, DifferentiableSCFConfig
@@ -368,7 +368,7 @@ def _build_entry(
     td.nstates = nstates_eff
     td.kernel()
 
-    reference = put_restricted_reference_on_device(restricted_reference_from_pyscf(mf))
+    reference = put_restricted_molecule_on_device(restricted_reference_from_pyscf(mf))
     return Entry(
         db_id=db_id,
         formula=_formula_from_z(z),

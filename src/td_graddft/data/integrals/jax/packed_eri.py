@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from functools import lru_cache, partial
-import os
 
 import numpy as np
 
@@ -9,10 +8,6 @@ import jax
 import jax.numpy as jnp
 from jax.lax import Precision
 from jaxtyping import Array
-
-
-_PACKED_ERI_JK_BACKEND_ENV = "TD_GRADDFT_PACKED_ERI_JK_BACKEND"
-_CUDA_PAIR_BACKENDS = {"cuda", "cuda_pair", "pair_cuda"}
 
 
 @lru_cache(maxsize=64)
@@ -39,11 +34,6 @@ def _metadata_arrays(nao: int, dtype) -> tuple[Array, Array, Array, Array]:
         jnp.asarray(pair_index, dtype=jnp.int32),
         jnp.asarray(multiplicity, dtype=dtype),
     )
-
-
-def _packed_eri_jk_backend() -> str:
-    raw = os.environ.get(_PACKED_ERI_JK_BACKEND_ENV, "").strip().lower()
-    return raw or "jax"
 
 
 @jax.jit
@@ -74,25 +64,6 @@ def build_jk_from_eri_pair_matrix(eri_pair_matrix: Array, density: Array) -> tup
     density = 0.5 * (jnp.asarray(density) + jnp.asarray(density).T)
     nao = int(density.shape[0])
     rows, cols, pair_index, multiplicity = _metadata_arrays(nao, density.dtype)
-
-    backend = _packed_eri_jk_backend()
-    if backend in _CUDA_PAIR_BACKENDS or backend == "auto":
-        try:
-            from .cuda_direct_jk import build_jk_from_eri_pair_matrix_cuda
-
-            j_mat, k_mat = build_jk_from_eri_pair_matrix_cuda(
-                pair,
-                density,
-                rows,
-                cols,
-            )
-            return j_mat, k_mat
-        except Exception as exc:
-            if backend in _CUDA_PAIR_BACKENDS:
-                raise RuntimeError(
-                    "TD_GRADDFT_PACKED_ERI_JK_BACKEND requests CUDA, but the "
-                    "packed AO-pair J/K FFI path could not be initialized."
-                ) from exc
 
     density_pair = density[rows, cols] * multiplicity
     j_pair = pair @ density_pair

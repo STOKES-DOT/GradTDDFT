@@ -17,7 +17,7 @@ from .rks import _build_jk
 class RHFConfig:
     """Configuration for restricted Hartree-Fock SCF iterations."""
 
-    max_cycle: int = 80
+    max_cycle: int = 800
     conv_tol: float = 1e-10
     conv_tol_density: float = 1e-8
     diis_start_cycle: int = 2

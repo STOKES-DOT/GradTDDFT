@@ -1,8 +1,6 @@
 from .api import (
     Functional,
-    LongRangeCorrection,
     make_functional,
-    make_long_range_correction,
 )
 from .config import (
     ChannelSpec,
@@ -12,6 +10,7 @@ from .config import (
 )
 from .components import (
     COMMON_SEMILOCAL_COMPONENT_SPECS,
+    FRIENDLY_XC_COMPONENT_ALIASES,
     JAXXCFunctionalInfo,
     JAXXCStatus,
     SemilocalEnergyDensityFn,
@@ -21,6 +20,7 @@ from .components import (
     available_semilocal_components,
     make_custom_semilocal_module,
     make_libxc_semilocal_module,
+    resolve_xc_component_name,
     semilocal_component_info,
 )
 from .defaults import (
@@ -65,9 +65,9 @@ __all__ = [
     "DEFAULT_NEURAL_XC_SEMILOCAL_XC",
     "SimpleMixingMLP",
     "Functional",
+    "FRIENDLY_XC_COMPONENT_ALIASES",
     "JAXXCFunctionalInfo",
     "JAXXCStatus",
-    "LongRangeCorrection",
     "NetworkSpec",
     "DEFAULT_INPUT_FEATURE_MODE",
     "DEFAULT_NETWORK_ARCHITECTURE",
@@ -82,10 +82,10 @@ __all__ = [
     "available_semilocal_components",
     "make_custom_semilocal_module",
     "make_functional",
-    "make_long_range_correction",
     "make_libxc_semilocal_module",
     "make_neural_xc_functional",
     "presets",
     "resolve_coefficient_prior_values",
+    "resolve_xc_component_name",
     "semilocal_component_info",
 ]

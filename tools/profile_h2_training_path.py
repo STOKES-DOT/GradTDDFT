@@ -135,12 +135,6 @@ def _install_wrappers(stats: dict[str, dict[str, float]]) -> None:
         "_build_vxc_matrix_from_components",
         "differentiable._build_vxc_matrix_from_components",
     )
-    wrap(
-        differentiable_module,
-        "_dm21_local_hfx_fock_correction",
-        "differentiable._dm21_local_hfx_fock_correction",
-    )
-
     # `restricted_transition_response_features` is imported directly in response.py,
     # so patch both the feature module symbol and the response-module alias.
     def wrapped_features(*args: Any, **kwargs: Any):

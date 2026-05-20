@@ -9,7 +9,7 @@ import jax.numpy as jnp
 from pyscf import dft, gto
 
 from td_graddft import neural_xc
-from td_graddft.jax_libxc import b3lyp_component_basis
+from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
 from td_graddft.tddft.response import build_restricted_response_matrices
 from td_graddft.training.targets import predict_excitation_energies
 from td_graddft.workflows.core import run_reference

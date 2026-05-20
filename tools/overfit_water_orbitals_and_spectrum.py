@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pyscf import dft, gto
 
-from td_graddft.jax_libxc import b3lyp_component_basis
+from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
 from td_graddft.scf import DifferentiableSCF, DifferentiableSCFConfig
 from td_graddft.spectra import HARTREE_TO_EV
 from td_graddft.workflows.core import run_pipeline_core

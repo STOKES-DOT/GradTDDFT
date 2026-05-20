@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Sequence
 
-from ..jax_libxc import b3lyp_component_basis, b3lyp_component_coefficients
+from ..xc_backend.jax_libxc import b3lyp_component_basis, b3lyp_component_coefficients
 
 
 DEFAULT_NEURAL_XC_SEMILOCAL_XC = b3lyp_component_basis()
@@ -11,8 +11,8 @@ DEFAULT_NEURAL_XC_DENSITY_SUPERVISION = "spin_resolved"
 DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_MODE = "mean"
 DEFAULT_NEURAL_XC_HF_INPUT_MODE = "spin_resolved"
 DEFAULT_NEURAL_XC_HF_CHANNEL_MODE = "auto"
-DEFAULT_NEURAL_XC_RESPONSE_HF_MODE = "nonlocal_exchange_only"
-DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE = "local_projected"
+DEFAULT_NEURAL_XC_RESPONSE_HF_MODE = "strict"
+DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE = "approx"
 
 DEFAULT_INPUT_FEATURE_MODE: Literal["enhanced", "canonical"] = "canonical"
 DEFAULT_NETWORK_ARCHITECTURE: Literal["simple_mlp", "graddft_residual"] = (

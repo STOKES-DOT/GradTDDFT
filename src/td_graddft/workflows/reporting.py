@@ -4,7 +4,6 @@ import csv
 from pathlib import Path
 
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
 import numpy as np
 
 from td_graddft.spectra import HARTREE_TO_EV
@@ -18,6 +17,12 @@ from .types import (
     SpectrumRun,
     TrainingRun,
 )
+
+
+def _pyplot():
+    import matplotlib.pyplot as plt
+
+    return plt
 
 
 def ensure_output_dirs(output: OutputConfig) -> None:
@@ -84,6 +89,7 @@ def plot_absorption_spectrum(
     reference_label: str,
     neural_label: str,
 ) -> None:
+    plt = _pyplot()
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
 
     axes[0].plot(spectrum.grid_ev, spectrum.reference_curve, label=reference_label, lw=2.0)
@@ -171,6 +177,7 @@ def write_training_curve_csv(path: Path, training: TrainingRun) -> None:
 
 
 def plot_training_curves(path: Path, training: TrainingRun, *, title: str) -> None:
+    plt = _pyplot()
     steps = np.arange(len(training.loss_history))
     loss_values = np.asarray(training.loss_history, dtype=float)
     density_penalty_values = np.asarray(training.density_penalty_history, dtype=float)

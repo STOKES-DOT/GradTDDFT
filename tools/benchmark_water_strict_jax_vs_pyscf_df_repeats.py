@@ -12,7 +12,7 @@ import numpy as np
 from pyscf import dft, gto
 
 from td_graddft import tdscf
-from td_graddft.reference import restricted_reference_from_spec_with_jax_rks
+from td_graddft.scf.builders import restricted_molecule_from_spec_with_jax_rks
 from td_graddft.scf import RKSConfig
 from td_graddft.spectra import HARTREE_TO_EV
 
@@ -102,7 +102,7 @@ def _build_strict_jax_reference(
         jk_backend="df",
         df_tol=1e-10,
     )
-    ref = restricted_reference_from_spec_with_jax_rks(
+    ref = restricted_molecule_from_spec_with_jax_rks(
         atom=WATER,
         basis=str(basis),
         xc_spec=str(xc),

@@ -17,8 +17,8 @@ from td_graddft.training import (
     GroundStateTrainingConfig,
     ground_state_mse_loss,
 )
-from td_graddft.workflows.core import run_reference_from_spec
-from td_graddft.workflows.types import ReferenceSpecConfig, SimulationConfig
+from td_graddft.workflows.core import run_molecule_from_spec
+from td_graddft.workflows.types import MoleculeSpecConfig, SimulationConfig
 
 
 WATER_GEOM = """
@@ -71,8 +71,8 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    reference = run_reference_from_spec(
-        ReferenceSpecConfig(
+    reference = run_molecule_from_spec(
+        MoleculeSpecConfig(
             atom=WATER_GEOM,
             basis="sto-3g",
             xc="pbe",

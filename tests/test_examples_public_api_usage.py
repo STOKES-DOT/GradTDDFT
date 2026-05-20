@@ -16,7 +16,6 @@ EXAMPLES_USING_NEURAL_XC_FACADE = (
     Path("examples/h2_fci_ground_curve.py"),
     Path("examples/h2_fci_self_consistent_train.py"),
     Path("examples/h2_fci_train_and_excited_compare.py"),
-    Path("examples/h2_long_range_excited_finetune.py"),
     Path("examples/h2_three_loss_dissociation_compare.py"),
     Path("examples/qh9_short_benchmark.py"),
     Path("examples/water_overfit_with_orbitals.py"),

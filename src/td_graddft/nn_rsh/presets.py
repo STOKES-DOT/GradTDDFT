@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from ..jax_libxc import (
+from ..xc_backend.jax_libxc import (
     RSHFunctionalPreset,
     canonical_rsh_preset_name,
     get_rsh_functional_preset,

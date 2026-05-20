@@ -17,7 +17,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from td_graddft.jax_libxc import RestrictedFeatureBundle, eval_xc_energy_density
+from td_graddft.xc_backend.jax_libxc import RestrictedFeatureBundle, eval_xc_energy_density
 from td_graddft.nn_rsh import ResolvedRSHParameters, make_pyscf_rsh_spec
 
 

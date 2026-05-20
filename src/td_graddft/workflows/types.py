@@ -79,8 +79,8 @@ class NeuralXCTrainingConfig:
     hf_input_mode: Literal["total_only", "spin_resolved"] = DEFAULT_NEURAL_XC_HF_INPUT_MODE
     include_pt2_channel: bool = False
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected"
-    response_hf_mode: Literal["nonlocal_exchange_only", "local_projected"] = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE
-    response_pt2_mode: Literal["nonlocal_correlation_only", "local_projected"] = (
+    response_hf_mode: Literal["approx", "strict"] = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE
+    response_pt2_mode: Literal["approx", "strict"] = (
         DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE
     )
     strict_feature_alignment: bool = True
@@ -115,12 +115,13 @@ class NeuralXCTrainingConfig:
     scf_stop_gradient_rms_threshold: float | None = None
     scf_gradient_mode: Literal["impl"] = "impl"
     scf_runtime_forward_backend: Literal["auto", "jax", "gpu4pyscf_rks"] = "auto"
+    implicit_response_backend: Literal["jax", "gpu4pyscf_jk"] = "jax"
     scf_implicit_diff_max_iter: int = 24
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
-    scf_implicit_diff_solver: Literal["normal_cg", "gmres", "bicgstab"] = "normal_cg"
+    scf_implicit_diff_solver: Literal["normal_cg", "gmres", "bicgstab"] = "gmres"
     scf_implicit_diff_tolerance: float = 1e-6
-    scf_implicit_diff_regularization: float = 1e-3
+    scf_implicit_diff_regularization: float = 0.0
     scf_implicit_diff_restart: int = 12
     recover_nonfinite_steps: bool = True
 
@@ -231,15 +232,6 @@ class MoleculeRun:
     oscillator_strengths: Array
     scf_elapsed_s: float
     tddft_elapsed_s: float
-
-    @property
-    def reference(self) -> Any:
-        return self.molecule
-
-
-ReferenceSpecConfig = MoleculeSpecConfig
-ReferenceRun = MoleculeRun
-
 
 @dataclass(frozen=True)
 class TrainingRun:

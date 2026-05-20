@@ -5,7 +5,7 @@ from typing import Any
 
 import jax.numpy as jnp
 
-from .jax_xc_adapter import load_jax_xc
+from .xc_backend.jax_xc_adapter import MissingJAXXCError, load_jax_xc
 from .types import GroundStateReference
 
 
@@ -34,7 +34,10 @@ def has_grad_dft() -> bool:
 
 
 def has_jax_xc() -> bool:
-    module, _ = load_jax_xc()
+    try:
+        module, _ = load_jax_xc()
+    except MissingJAXXCError:
+        return False
     return module is not None
 
 
@@ -78,4 +81,3 @@ def ground_state_from_grad_dft_molecule(molecule: Any) -> GroundStateReference:
         occupations=None if molecule.mo_occ is None else jnp.asarray(molecule.mo_occ),
         metadata=metadata,
     )
-

@@ -42,7 +42,7 @@ def test_scf_xc_components_accept_new_scf_contributions_protocol():
     )
     functional = _ToyFunctional(resolved=_ToyResolvedXC(contributions=contributions))
 
-    v_rho, v_grad, v_tau, v_lapl, xc_kind, alpha, resolved_xc, extra_fock = _scf_xc_components(
+    v_rho, v_grad, v_tau, v_lapl, xc_kind, alpha, extra_fock = _scf_xc_components(
         params={},
         functional=functional,
         molecule=molecule,
@@ -55,7 +55,6 @@ def test_scf_xc_components_accept_new_scf_contributions_protocol():
     assert np.allclose(np.asarray(v_tau), np.zeros((4,)))
     assert np.allclose(np.asarray(v_lapl), np.zeros((4,)))
     assert np.isclose(float(alpha), 0.25)
-    assert resolved_xc is functional.resolved
     assert np.allclose(np.asarray(extra_fock), np.eye(3))
 
 

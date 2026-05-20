@@ -1,7 +1,5 @@
 """Pure-JAX Gaussian integral engines (cartesian s/p/d/f)."""
 
-from .jax.cuda_direct_jk import CudaDirectJKBuilder, build_jk_from_eri_pair_matrix_cuda, cuda_ffi_available
-from .jax.cuda_one_electron import CudaOneElectronBuilder
 from .jax.direct_jk import DirectJKResult, build_direct_jk_from_basis, build_direct_jk_incremental
 from .jax.one_electron import (
     build_hcore,
@@ -42,10 +40,6 @@ __all__ = [
     "build_hcore",
     "build_j_from_eri_pair_matrix",
     "build_jk_from_eri_pair_matrix",
-    "build_jk_from_eri_pair_matrix_cuda",
-    "cuda_ffi_available",
-    "CudaDirectJKBuilder",
-    "CudaOneElectronBuilder",
     "DirectJKResult",
     "eri_element",
     "eri_pair_matrix_packed",

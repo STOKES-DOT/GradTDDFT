@@ -4,6 +4,7 @@ from typing import Any, Callable, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from flax import linen as nn
 from jax.lax import Precision
@@ -37,8 +38,8 @@ from td_graddft.training import (
 )
 from td_graddft.training.targets import _electron_count, orbital_energy_matching_penalty
 from td_graddft.training.targets import janak_frontier_finite_difference_penalty
-from td_graddft.workflows.core import run_reference_from_spec
-from td_graddft.workflows.types import ReferenceSpecConfig, SimulationConfig
+from td_graddft.workflows.core import run_molecule_from_spec
+from td_graddft.workflows.types import MoleculeSpecConfig, SimulationConfig
 from td_graddft.xc import AdiabaticDensityFunctional
 
 
@@ -351,8 +352,8 @@ def _make_hybrid_only_functional():
 
 
 def _make_h2_strict_jax_reference():
-    return run_reference_from_spec(
-        ReferenceSpecConfig(
+    return run_molecule_from_spec(
+        MoleculeSpecConfig(
             atom="""
             H 0.0 0.0 -0.35
             H 0.0 0.0  0.35
@@ -651,6 +652,79 @@ def test_koopmans_ip_ea_diagnostic_matches_noninteracting_hf_limit():
     assert jnp.allclose(diagnostic.ea_delta_scf, -0.5, atol=1e-6)
     assert jnp.allclose(diagnostic.ip_residual, 0.0, atol=1e-6)
     assert jnp.allclose(diagnostic.ea_residual, 0.0, atol=1e-6)
+
+
+def test_koopmans_ip_ea_diagnostic_uses_gpu4pyscf_uks_for_gpu4pyscf_runtime(monkeypatch):
+    molecule, bound = _make_toy_uks_neutral_reference()
+    molecule.runtime_scf_backend = "gpu4pyscf_rks"
+
+    class RuntimeOptions:
+        def as_kwargs(self):
+            return {
+                "atom": "H 0 0 0; H 0 0 0.74",
+                "basis": "sto-3g",
+                "xc_spec": "pbe",
+                "unit": "Angstrom",
+                "charge": 0,
+                "spin": 0,
+                "cart": True,
+                "grids_level": 1,
+                "conv_tol": 1e-10,
+                "max_cycle": 44,
+                "verbose": 0,
+            }
+
+    molecule.runtime_scf_options = RuntimeOptions()
+    calls = []
+
+    def unexpected_jax_uks(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("Koopmans charged branch should use GPU4PySCF UKS.")
+
+    def fake_gpu4pyscf_uks_forward(**kwargs):
+        calls.append(kwargs)
+        charge = int(kwargs["charge"])
+        if charge == 1:
+            mo_occ = np.asarray([[1.0, 0.0], [0.0, 0.0]])
+            mo_energy = np.asarray([[-1.0, 0.3], [-0.8, 0.4]])
+            total_energy = -1.0
+        elif charge == -1:
+            mo_occ = np.asarray([[1.0, 1.0], [1.0, 0.0]])
+            mo_energy = np.asarray([[-1.0, -0.5], [-0.8, 0.4]])
+            total_energy = -1.5
+        else:
+            raise AssertionError(f"Unexpected charged-state charge={charge}.")
+        return SimpleNamespace(
+            converged=True,
+            total_energy=total_energy,
+            mo_energy=mo_energy,
+            mo_coeff=np.stack([np.eye(2), np.eye(2)], axis=0),
+            mo_occ=mo_occ,
+            density_matrix=np.stack([np.eye(2), np.eye(2)], axis=0),
+            mo_energy_alpha=mo_energy[0],
+            mo_energy_beta=mo_energy[1],
+            mo_occ_alpha=mo_occ[0],
+            mo_occ_beta=mo_occ[1],
+        )
+
+    monkeypatch.setattr(training_targets, "run_uks_from_integrals", unexpected_jax_uks)
+    monkeypatch.setattr(
+        training_targets,
+        "run_gpu4pyscf_uks_forward",
+        fake_gpu4pyscf_uks_forward,
+        raising=False,
+    )
+
+    diagnostic = training_targets.koopmans_ip_ea_diagnostic(molecule, bound)
+
+    assert diagnostic.cation_converged
+    assert diagnostic.anion_converged
+    assert [call["charge"] for call in calls] == [1, -1]
+    assert [call["spin"] for call in calls] == [1, 1]
+    assert all(call["molecule_template"].rdm1.shape == (2, 2, 2) for call in calls)
+    assert all(call["xc_functional"].bound is bound for call in calls)
+    assert all(call["xc_params"] is None for call in calls)
+    assert all(call["collect_fock"] is False for call in calls)
 
 
 def test_density_matching_penalty_is_finite_and_reported_in_loss():

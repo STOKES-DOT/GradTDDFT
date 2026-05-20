@@ -16,8 +16,8 @@ from .defaults import (
 SemilocalBackend = Literal["jax_libxc"]
 HFChannelMode = Literal["total_only", "spin_resolved"]
 PT2ChannelMode = Literal["off", "scaled_projected", "local_exact"]
-ResponseHFMode = Literal["nonlocal_exchange_only", "local_projected"]
-ResponsePT2Mode = Literal["nonlocal_correlation_only", "local_projected"]
+ResponseHFMode = Literal["approx", "strict"]
+ResponsePT2Mode = Literal["approx", "strict"]
 InputFeatureMode = Literal["enhanced", "canonical"]
 
 

@@ -23,7 +23,7 @@ from td_graddft.nn_rsh import (
     make_self_supervised_rsh_loss,
     rsh_preset_default_params,
 )
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
 from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,

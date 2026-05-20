@@ -25,12 +25,11 @@ from pyscf import ao2mo, fci, gto, scf
 
 from td_graddft import neural_xc
 from td_graddft.neural_xc import (
-    GRADDFT_DEFAULT_DM21_HIDDEN_DIMS,
-    GRADDFT_DEFAULT_INPUT_FEATURE_MODE,
-    GRADDFT_DEFAULT_NETWORK_ARCHITECTURE,
+    DEFAULT_INPUT_FEATURE_MODE,
+    DEFAULT_NETWORK_ARCHITECTURE,
+    DEFAULT_NETWORK_HIDDEN_DIMS,
 )
 from td_graddft.spectra import HARTREE_TO_EV
-from td_graddft.tddft.test_module import LocalHFKhhResponseFunctionalWrapper
 from td_graddft.training import (
     ExcitedStateDatum,
     GroundStateCoreDatum,
@@ -74,7 +73,35 @@ def _get_plt():
     return plt
 
 
-def parse_args() -> argparse.Namespace:
+def _normalize_input_feature_mode(value: str) -> str:
+    mode = str(value).strip().lower()
+    if mode in {"dm21_original", "canonical"}:
+        return "canonical"
+    if mode == "enhanced":
+        return "enhanced"
+    raise ValueError(
+        f"Unsupported input feature mode {value!r}. Expected enhanced, canonical, or dm21_original."
+    )
+
+
+def _normalize_scf_gradient_mode(value: str) -> str:
+    mode = str(value).strip().lower()
+    if mode in {"implicit_commutator", "impl"}:
+        return "impl"
+    if mode in {"unrolled", "expl"}:
+        return "expl"
+    raise ValueError(
+        f"Unsupported SCF gradient mode {value!r}. Expected impl, expl, implicit_commutator, or unrolled."
+    )
+
+
+def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
+    args.input_feature_mode = _normalize_input_feature_mode(args.input_feature_mode)
+    args.scf_gradient_mode = _normalize_scf_gradient_mode(args.scf_gradient_mode)
+    return args
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
             "Train Neural_xc on the H2 S1 excitation gap only, using TDA for both "
@@ -115,17 +142,17 @@ def parse_args() -> argparse.Namespace:
         "--hidden-dims",
         type=int,
         nargs="+",
-        default=list(GRADDFT_DEFAULT_DM21_HIDDEN_DIMS),
+        default=list(DEFAULT_NETWORK_HIDDEN_DIMS),
     )
     p.add_argument(
         "--network-architecture",
         choices=("simple_mlp", "graddft_residual"),
-        default=GRADDFT_DEFAULT_NETWORK_ARCHITECTURE,
+        default=DEFAULT_NETWORK_ARCHITECTURE,
     )
     p.add_argument(
         "--input-feature-mode",
-        choices=("enhanced", "dm21_original"),
-        default=GRADDFT_DEFAULT_INPUT_FEATURE_MODE,
+        choices=("enhanced", "canonical", "dm21_original"),
+        default=DEFAULT_INPUT_FEATURE_MODE,
     )
     p.add_argument(
         "--include-pt2-channel",
@@ -138,6 +165,16 @@ def parse_args() -> argparse.Namespace:
         choices=("scaled_projected", "local_exact"),
         default="scaled_projected",
         help="Choose the PT2 local channel representation when PT2 is enabled.",
+    )
+    p.add_argument(
+        "--response-pt2-mode",
+        choices=("approx", "strict"),
+        default="approx",
+        help=(
+            "Choose how the PT2 channel enters strict TD response. "
+            "strict builds a separate nonlocal PT2 response matrix; "
+            "PT2 is not treated as an MGGA variable."
+        ),
     )
     p.add_argument(
         "--semilocal-xc",
@@ -205,6 +242,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--reference-scf-conv-tol-density", type=float, default=1e-8)
     p.add_argument("--reference-scf-damping", type=float, default=0.15)
     p.add_argument("--reference-scf-potential-clip", type=float, default=20.0)
+    p.add_argument(
+        "--reference-scf-backend",
+        choices=("pyscf", "gpu4pyscf_rks"),
+        default="pyscf",
+        help="SCF backend used to build the training/evaluation reference molecules.",
+    )
     p.add_argument("--train-scf-max-cycle", type=int, default=16)
     p.add_argument("--train-scf-damping", type=float, default=0.25)
     p.add_argument("--train-scf-conv-tol-density", type=float, default=1e-8)
@@ -216,8 +259,20 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--scf-gradient-mode",
-        choices=("unrolled", "implicit_commutator"),
-        default="implicit_commutator",
+        choices=("expl", "impl", "unrolled", "implicit_commutator"),
+        default="impl",
+    )
+    p.add_argument(
+        "--scf-runtime-forward-backend",
+        choices=("auto", "jax", "gpu4pyscf_rks"),
+        default="auto",
+        help="Runtime forward SCF backend for self-consistent prediction/training.",
+    )
+    p.add_argument(
+        "--implicit-response-backend",
+        choices=("jax", "gpu4pyscf_jk"),
+        default="jax",
+        help="Linear-response backend used by implicit SCF differentiation.",
     )
     p.add_argument(
         "--scf-implicit-diff-solver",
@@ -282,16 +337,7 @@ def parse_args() -> argparse.Namespace:
         "--outdir",
         default="outputs/h2_s1_tda_train5_dense100_vs_fci",
     )
-    p.add_argument(
-        "--test-module-local-hf-khh-response",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "Experimental: replace the TD-response-only functional binding with a "
-            "local HF K_hh wrapper. This forces response_hf_mode=local_projected."
-        ),
-    )
-    return p.parse_args()
+    return _normalize_args(p.parse_args(argv))
 
 
 def _metric_scalar(metrics: dict[str, Any], key: str, default: float = float("nan")) -> float:
@@ -382,24 +428,17 @@ def _loss_and_metrics_all_finite(loss: Any, metrics: dict[str, Any]) -> bool:
 
 
 def _make_s1_functional(args: argparse.Namespace) -> Any:
-    response_hf_mode = (
-        "local_projected"
-        if bool(args.test_module_local_hf_khh_response)
-        else "nonlocal_exchange_only"
-    )
-    base_functional = neural_xc.Functional(
+    return neural_xc.Functional(
         architecture=str(args.network_architecture),
         semilocal_xc=tuple(str(name) for name in args.semilocal_xc),
         hidden_dims=tuple(int(value) for value in args.hidden_dims),
         input_feature_mode=str(args.input_feature_mode),
         include_pt2_channel=bool(args.include_pt2_channel),
         pt2_channel_mode=str(args.pt2_channel_mode),
-        response_hf_mode=response_hf_mode,
+        response_hf_mode="strict",
+        response_pt2_mode=str(args.response_pt2_mode),
         name=f"neural_xc_h2_s1_tda_{str(args.training_mode)}",
     )
-    if not bool(args.test_module_local_hf_khh_response):
-        return base_functional
-    return LocalHFKhhResponseFunctionalWrapper(base_functional=base_functional)
 
 
 def build_s1_training_data(
@@ -444,6 +483,8 @@ def _self_consistent_prediction_config(args: argparse.Namespace) -> GroundStateT
         scf_iterate_selection=str(args.scf_iterate_selection),
         scf_require_convergence=bool(args.scf_require_convergence),
         scf_gradient_mode=str(args.scf_gradient_mode),
+        scf_runtime_forward_backend=str(args.scf_runtime_forward_backend),
+        implicit_response_backend=str(args.implicit_response_backend),
         scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
@@ -521,6 +562,8 @@ def train_functional(
         scf_stop_gradient_on_unconverged=bool(args.scf_stop_gradient_on_unconverged),
         scf_stop_gradient_rms_threshold=args.scf_stop_gradient_rms_threshold,
         scf_gradient_mode=str(args.scf_gradient_mode),
+        scf_runtime_forward_backend=str(args.scf_runtime_forward_backend),
+        implicit_response_backend=str(args.implicit_response_backend),
         scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
@@ -1417,6 +1460,9 @@ def write_summary(
         "basis": str(args.basis),
         "xc": str(args.xc),
         "training_mode": str(args.training_mode),
+        "reference_scf_backend": str(args.reference_scf_backend),
+        "scf_runtime_forward_backend": str(args.scf_runtime_forward_backend),
+        "implicit_response_backend": str(args.implicit_response_backend),
         "objective": objective_name,
         "scf_stop_gradient_on_unconverged": bool(args.scf_stop_gradient_on_unconverged),
         "scf_stop_gradient_rms_threshold": args.scf_stop_gradient_rms_threshold,
@@ -1425,6 +1471,9 @@ def write_summary(
         "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
         "include_pt2_channel": bool(args.include_pt2_channel),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
+        "response_pt2_mode": (
+            str(args.response_pt2_mode) if bool(args.include_pt2_channel) else None
+        ),
         "s1_weight": float(args.s1_weight),
         "s1_use_tda": bool(args.s1_use_tda),
         "eval_use_tda": eval_use_tda,
@@ -1472,7 +1521,10 @@ def main() -> None:
         f"lr={args.learning_rate}, training_mode={args.training_mode}, "
         f"objective=s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'}, include_pt2_channel={bool(args.include_pt2_channel)}, "
         f"pt2_channel_mode={str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else 'none'}, "
-        f"test_module_local_hf_khh_response={bool(args.test_module_local_hf_khh_response)}, "
+        f"response_pt2_mode={str(args.response_pt2_mode) if bool(args.include_pt2_channel) else 'none'}, "
+        f"reference_scf_backend={str(args.reference_scf_backend)}, "
+        f"scf_runtime_forward_backend={str(args.scf_runtime_forward_backend)}, "
+        f"implicit_response_backend={str(args.implicit_response_backend)}, "
         f"s1_weight={float(args.s1_weight)}, density_constraint_weight={float(args.density_constraint_weight)}, "
         f"train_solver={'tda' if bool(args.s1_use_tda) else 'casida'}, "
         f"eval_solver={'tda' if (bool(args.s1_use_tda) if args.eval_use_tda is None else bool(args.eval_use_tda)) else 'casida'}"
@@ -1593,10 +1645,16 @@ def main() -> None:
             "basis": str(args.basis),
             "xc": str(args.xc),
             "training_mode": str(args.training_mode),
+            "reference_scf_backend": str(args.reference_scf_backend),
+            "scf_runtime_forward_backend": str(args.scf_runtime_forward_backend),
+            "implicit_response_backend": str(args.implicit_response_backend),
             "objective": f"s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'}",
             "include_pt2_channel": bool(args.include_pt2_channel),
             "pt2_channel_mode": (
                 str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None
+            ),
+            "response_pt2_mode": (
+                str(args.response_pt2_mode) if bool(args.include_pt2_channel) else None
             ),
             "s1_weight": float(args.s1_weight),
             "s1_use_tda": bool(args.s1_use_tda),
@@ -1616,7 +1674,6 @@ def main() -> None:
             "hidden_dims": [int(value) for value in args.hidden_dims],
             "train_r_values_angstrom": [float(value) for value in train_r_values],
             "dense_points": int(args.dense_points),
-            "test_module_local_hf_khh_response": bool(args.test_module_local_hf_khh_response),
         },
     )
 

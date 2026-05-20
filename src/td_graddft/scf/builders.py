@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, is_dataclass, replace
-import hashlib
-import os
-from pathlib import Path
+from dataclasses import replace
 from typing import Any, Literal
 
 import jax
@@ -11,655 +8,32 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..data.integrals import eri_pair_matrix_to_mo_eri_slices, precompile_eri_kernels
-from ..data.integrals.jax import CudaDirectJKBuilder, cuda_ffi_available
 from ..data.integrals.libcint import LibcintGeometryGradPolicy
 from ..data.molecule import MoleculeSpec
-from ..jax_libxc import hybrid_coeff, parse_xc
-from ..jax_runtime import (
-    DEFAULT_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS,
-    DEFAULT_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES,
-    configure_jax_persistent_cache,
-)
+from ..xc_backend.jax_libxc import hybrid_coeff, parse_xc
 from ..neural_xc.inputs import (
     _local_hfx_features_from_basis_dm,
     _local_pt2_feature_from_restricted_orbitals,
 )
-from .core import _contains_jax_tracer, _hashable_static_value, _host_float_unless_traced
+from .core import _contains_jax_tracer, _host_float_unless_traced
 from .execution import (
     resolve_rks_execution_plan,
 )
 from .features import _restricted_response_eri_slices_from_mo_tensor
 from .inputs import build_rks_integral_inputs, build_uks_integral_inputs
 from .molecules import QuadratureGrid, RestrictedMolecule, UnrestrictedMolecule
-from .rks import RKSConfig, run_rks_from_integrals, run_rks_from_integrals_traceable
+from .rks import RKSConfig, run_rks_from_integrals
 from .uks import UKSConfig, run_uks_from_integrals
 from .gpu4pyscf import (
     GPU4PYSCF_RKS_RUNTIME_BACKEND,
+    GPU4PYSCF_UKS_RUNTIME_BACKEND,
     GPU4PySCFRKSForwardOptions,
+    GPU4PySCFUKSForwardOptions,
+    compute_gpu4pyscf_local_hfx_features,
     run_gpu4pyscf_rks_forward,
+    run_gpu4pyscf_uks_forward,
 )
 
-
-_CUDA_DIRECT_RKS_JIT_CACHE_MAXSIZE = 16
-_CUDA_DIRECT_RKS_JIT_CACHE: dict[tuple[Any, ...], Any] = {}
-_CUDA_DIRECT_RKS_COMPILED_CACHE_MAXSIZE = 16
-_CUDA_DIRECT_RKS_COMPILED_CACHE: dict[tuple[Any, ...], Any] = {}
-_CUDA_DIRECT_JK_BUILDER_CACHE_MAXSIZE = 16
-_CUDA_DIRECT_JK_BUILDER_CACHE: dict[tuple[Any, ...], Any] = {}
-_CUDA_DIRECT_RKS_INPUT_CACHE_MAXSIZE = 16
-_CUDA_DIRECT_RKS_INPUT_CACHE: dict[tuple[Any, ...], Any] = {}
-_CUDA_DIRECT_GRID_AO_BUCKET_SIZE_ENV = "TD_GRADDFT_CUDA_GRID_AO_BUCKET_SIZE"
-_DEFAULT_CUDA_DIRECT_GRID_AO_BUCKET_SIZE = 1024
-
-
-@dataclass(frozen=True)
-class _CudaDirectReferenceSolver:
-    static_kwargs: dict[str, Any]
-    reference_builder: Any | None = None
-    precompile_builder: Any | None = None
-
-    def __call__(self, spec: MoleculeSpec) -> Any:
-        builder = self.reference_builder or restricted_molecule_from_spec_with_jax_rks
-        return builder(atom=spec, **self.static_kwargs)
-
-    def precompile(self, spec: MoleculeSpec) -> Any:
-        builder = self.precompile_builder or precompile_restricted_cuda_direct_rks_solver
-        return builder(
-            atom=spec,
-            **self.static_kwargs,
-        )
-
-
-def _make_cuda_direct_reference_solver(
-    *,
-    reference_builder: Any | None = None,
-    precompile_builder: Any | None = None,
-    **static_kwargs: Any,
-) -> _CudaDirectReferenceSolver:
-    return _CudaDirectReferenceSolver(
-        static_kwargs=dict(static_kwargs),
-        reference_builder=reference_builder,
-        precompile_builder=precompile_builder,
-    )
-
-
-def _configure_cuda_jax_cache(*, configure_fn: Any = configure_jax_persistent_cache) -> None:
-    if os.environ.get("TD_GRADDFT_DISABLE_JAX_CACHE", "").lower() in {"1", "true", "yes", "on"}:
-        return
-    cache_dir = os.environ.get("TD_GRADDFT_JAX_CACHE_DIR")
-    if cache_dir is None or not cache_dir.strip():
-        cache_dir = str(Path.home() / ".cache" / "td_graddft" / "jax")
-    min_compile_time = float(
-        os.environ.get(
-            "TD_GRADDFT_JAX_CACHE_MIN_COMPILE_SECS",
-            DEFAULT_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS,
-        )
-    )
-    min_entry_size = int(
-        os.environ.get(
-            "TD_GRADDFT_JAX_CACHE_MIN_ENTRY_SIZE_BYTES",
-            DEFAULT_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES,
-        )
-    )
-    try:
-        configure_fn(
-            cache_dir=cache_dir,
-            min_compile_time_secs=min_compile_time,
-            min_entry_size_bytes=min_entry_size,
-        )
-    except OSError:
-        return
-
-
-def _digest_array_for_cache(value: Any) -> tuple[tuple[int, ...], str, str]:
-    if value is None:
-        return (), "none", ""
-    arr = np.ascontiguousarray(np.asarray(jax.device_get(value)))
-    digest = hashlib.sha256(arr.view(np.uint8)).hexdigest()
-    return tuple(int(item) for item in arr.shape), str(arr.dtype), digest
-
-
-def _cuda_direct_basis_cache_key(basis: Any) -> tuple[Any, ...]:
-    return (
-        int(basis.nao),
-        tuple(tuple(int(item) for item in angular) for angular in basis.ao_angulars),
-        tuple(int(item) for item in basis.ao_nprims_tuple),
-        tuple(int(item) for item in basis.shell_nprims_tuple),
-        _digest_array_for_cache(basis.atom_charges),
-        _digest_array_for_cache(basis.ao_exponents_padded),
-        _digest_array_for_cache(basis.ao_coefficients_padded),
-        _digest_array_for_cache(basis.shell_exponents_padded),
-        _digest_array_for_cache(basis.shell_coefficients_padded),
-        _digest_array_for_cache(basis.shell_ao_indices_padded),
-        _digest_array_for_cache(basis.shell_ao_sizes),
-    )
-
-
-def _cuda_direct_rks_config_cache_key(config: RKSConfig) -> tuple[Any, ...]:
-    return (
-        str(config.xc_spec),
-        int(config.max_cycle),
-        float(config.conv_tol),
-        float(config.conv_tol_density),
-        float(config.damping),
-        float(config.level_shift),
-        float(config.orthogonalization_eps),
-        float(config.density_floor),
-        None if config.potential_clip is None else float(config.potential_clip),
-        str(config.iteration_backend),
-        str(config.jk_backend),
-        str(config.direct_jk_engine),
-        float(config.df_tol),
-        None if config.df_max_rank is None else int(config.df_max_rank),
-        float(config.direct_scf_tol),
-        bool(config.direct_scf_incremental),
-    )
-
-
-def _cuda_direct_rks_input_config_cache_key(config: RKSConfig) -> tuple[Any, ...]:
-    """Config key for molecule input construction.
-
-    The SCF iteration backend changes execution strategy, not the PySCF/libcint
-    input tensors. Keeping it out of this key lets native Python CUDA runs reuse
-    inputs warmed by an explicit lax/XLA precompile and vice versa.
-    """
-
-    return (
-        str(config.xc_spec),
-        int(config.max_cycle),
-        float(config.conv_tol),
-        float(config.conv_tol_density),
-        float(config.damping),
-        float(config.level_shift),
-        float(config.orthogonalization_eps),
-        float(config.density_floor),
-        None if config.potential_clip is None else float(config.potential_clip),
-        str(config.jk_backend),
-        str(config.direct_jk_engine),
-        float(config.df_tol),
-        None if config.df_max_rank is None else int(config.df_max_rank),
-        float(config.direct_scf_tol),
-        bool(config.direct_scf_incremental),
-    )
-
-def _cuda_direct_reference_inputs_cache_key(
-    *,
-    atom: Any,
-    basis: Any,
-    xc_spec: str,
-    unit: str,
-    charge: int,
-    spin: int,
-    cart: bool,
-    grids_level: int,
-    max_l: int,
-    config: RKSConfig,
-    grid_ao_backend: str,
-    integral_backend: str,
-    libcint_geometry_grad_policy: str,
-    include_dipole_integrals: bool,
-    init_guess: Any = "minao",
-    chkfile: str | None = None,
-    sap_basis: Any | None = None,
-    init_guess_chkfile_project: bool | None = None,
-    precompile_eri: bool,
-    precompile_eri_chunk_size: int,
-    verbose: int,
-    mol_kwargs: dict[str, Any],
-) -> tuple[Any, ...] | None:
-    if not isinstance(atom, MoleculeSpec) or _contains_jax_tracer(atom):
-        return None
-    return (
-        tuple(atom.symbols),
-        int(atom.charge),
-        int(atom.spin),
-        _digest_array_for_cache(atom.coords_bohr),
-        _hashable_static_value(basis),
-        str(xc_spec),
-        str(unit),
-        int(charge),
-        int(spin),
-        bool(cart),
-        int(grids_level),
-        int(max_l),
-        _cuda_direct_rks_input_config_cache_key(config),
-        str(grid_ao_backend),
-        str(integral_backend),
-        str(libcint_geometry_grad_policy),
-        bool(include_dipole_integrals),
-        _hashable_static_value(init_guess) if isinstance(init_guess, str) or init_guess is None else _digest_array_for_cache(init_guess),
-        None if chkfile is None else str(chkfile),
-        _hashable_static_value(sap_basis),
-        _hashable_static_value(init_guess_chkfile_project),
-        bool(precompile_eri),
-        int(precompile_eri_chunk_size),
-        int(verbose),
-        repr(sorted((str(key), repr(value)) for key, value in mol_kwargs.items())),
-    )
-
-
-def _cache_cuda_direct_rks_inputs(key: tuple[Any, ...] | None, scf_inputs: Any) -> None:
-    if key is None:
-        return
-    if len(_CUDA_DIRECT_RKS_INPUT_CACHE) >= _CUDA_DIRECT_RKS_INPUT_CACHE_MAXSIZE:
-        _CUDA_DIRECT_RKS_INPUT_CACHE.pop(next(iter(_CUDA_DIRECT_RKS_INPUT_CACHE)))
-    _CUDA_DIRECT_RKS_INPUT_CACHE[key] = scf_inputs
-
-
-def _cuda_direct_jk_builder_metadata_flags(config: RKSConfig) -> tuple[bool, bool]:
-    rys_fast_path = (
-        config.jk_backend == "direct"
-        and config.direct_jk_engine == "cuda"
-        and float(config.direct_scf_tol) <= 0.0
-    )
-    if rys_fast_path:
-        return False, False
-    return True, True
-
-
-def _cuda_direct_jk_builder_cache_key(
-    basis: Any,
-    config: RKSConfig,
-    *,
-    include_pair_metadata: bool | None = None,
-    include_joltqc_metadata: bool | None = None,
-) -> tuple[Any, ...]:
-    if include_pair_metadata is None or include_joltqc_metadata is None:
-        default_pair, default_joltqc = _cuda_direct_jk_builder_metadata_flags(config)
-        if include_pair_metadata is None:
-            include_pair_metadata = default_pair
-        if include_joltqc_metadata is None:
-            include_joltqc_metadata = default_joltqc
-    # The exact full-JoltQC path receives centers through dynamic basis_data, so the
-    # builder only owns static shell/layout metadata. Screened direct-SCF builders
-    # use geometry-dependent internal basis_data and must not be reused across
-    # geometries.
-    geometry_part: tuple[Any, ...] = ()
-    if float(config.direct_scf_tol) > 0.0:
-        geometry_part = (
-            _digest_array_for_cache(getattr(basis, "atom_coords", None)),
-            _digest_array_for_cache(getattr(basis, "ao_centers", None)),
-            _digest_array_for_cache(getattr(basis, "shell_centers", None)),
-        )
-    return (
-        _cuda_direct_basis_cache_key(basis),
-        float(config.direct_scf_tol),
-        bool(include_pair_metadata),
-        bool(include_joltqc_metadata),
-        geometry_part,
-    )
-
-
-def _cached_cuda_direct_jk_builder(basis: Any, config: RKSConfig) -> Any:
-    include_pair_metadata, include_joltqc_metadata = _cuda_direct_jk_builder_metadata_flags(config)
-    key = _cuda_direct_jk_builder_cache_key(
-        basis,
-        config,
-        include_pair_metadata=include_pair_metadata,
-        include_joltqc_metadata=include_joltqc_metadata,
-    )
-    builder = _CUDA_DIRECT_JK_BUILDER_CACHE.get(key)
-    if builder is not None:
-        return builder
-    builder = CudaDirectJKBuilder(
-        basis,
-        include_pair_metadata=include_pair_metadata,
-        include_joltqc_metadata=include_joltqc_metadata,
-    )
-    if not include_pair_metadata and not bool(getattr(builder, "has_rys_direct_jk", False)):
-        include_pair_metadata = True
-        include_joltqc_metadata = True
-        key = _cuda_direct_jk_builder_cache_key(
-            basis,
-            config,
-            include_pair_metadata=include_pair_metadata,
-            include_joltqc_metadata=include_joltqc_metadata,
-        )
-        cached_builder = _CUDA_DIRECT_JK_BUILDER_CACHE.get(key)
-        if cached_builder is not None:
-            return cached_builder
-        builder = CudaDirectJKBuilder(
-            basis,
-            include_pair_metadata=include_pair_metadata,
-            include_joltqc_metadata=include_joltqc_metadata,
-        )
-    if len(_CUDA_DIRECT_JK_BUILDER_CACHE) >= _CUDA_DIRECT_JK_BUILDER_CACHE_MAXSIZE:
-        _CUDA_DIRECT_JK_BUILDER_CACHE.pop(next(iter(_CUDA_DIRECT_JK_BUILDER_CACHE)))
-    _CUDA_DIRECT_JK_BUILDER_CACHE[key] = builder
-    return builder
-
-
-def _cuda_direct_rks_runner_cache_key(scf_inputs: Any, config: RKSConfig) -> tuple[Any, ...]:
-    direct_basis = scf_inputs.direct_basis
-    if direct_basis is None:
-        raise RuntimeError("CUDA direct RKS JIT runner requires direct_basis.")
-    has_init_density = getattr(scf_inputs, "init_density", None) is not None
-    has_init_mo_coeff = getattr(scf_inputs, "init_mo_coeff", None) is not None
-    has_init_mo_occ = getattr(scf_inputs, "init_mo_occ", None) is not None
-    has_init_mo_energy = getattr(scf_inputs, "init_mo_energy", None) is not None
-    return (
-        _cuda_direct_jk_builder_cache_key(direct_basis, config),
-        _cuda_direct_rks_config_cache_key(config),
-        int(scf_inputs.nelectron),
-        has_init_density,
-        has_init_mo_coeff,
-        has_init_mo_occ,
-        has_init_mo_energy,
-    )
-
-
-def _cached_cuda_direct_rks_runner(scf_inputs: Any, config: RKSConfig) -> Any:
-    key = _cuda_direct_rks_runner_cache_key(scf_inputs, config)
-    runner = _CUDA_DIRECT_RKS_JIT_CACHE.get(key)
-    if runner is not None:
-        return runner
-
-    direct_basis = scf_inputs.direct_basis
-    if direct_basis is None:
-        raise RuntimeError("CUDA direct RKS JIT runner requires direct_basis.")
-    direct_cuda_jk_builder = _cached_cuda_direct_jk_builder(direct_basis, config)
-    has_init_density = getattr(scf_inputs, "init_density", None) is not None
-    has_init_mo_coeff = getattr(scf_inputs, "init_mo_coeff", None) is not None
-    has_init_mo_occ = getattr(scf_inputs, "init_mo_occ", None) is not None
-    has_init_mo_energy = getattr(scf_inputs, "init_mo_energy", None) is not None
-    nelectron = int(scf_inputs.nelectron)
-
-    def _run(
-        overlap,
-        hcore,
-        nuclear_repulsion,
-        ao,
-        ao_deriv1,
-        grid_weights,
-        *init_args,
-    ):
-        init_idx = 0
-        init_density = init_args[init_idx] if has_init_density else None
-        init_idx += int(has_init_density)
-        init_mo_coeff = init_args[init_idx] if has_init_mo_coeff else None
-        init_idx += int(has_init_mo_coeff)
-        init_mo_occ = init_args[init_idx] if has_init_mo_occ else None
-        init_idx += int(has_init_mo_occ)
-        init_mo_energy = init_args[init_idx] if has_init_mo_energy else None
-        return run_rks_from_integrals_traceable(
-            overlap=overlap,
-            hcore=hcore,
-            eri=None,
-            eri_pair_matrix=None,
-            nelectron=nelectron,
-            nuclear_repulsion=nuclear_repulsion,
-            ao=ao,
-            ao_deriv1=ao_deriv1,
-            grid_weights=grid_weights,
-            df_factors=None,
-            direct_basis=direct_basis,
-            direct_cuda_jk_builder=direct_cuda_jk_builder,
-            init_density=init_density,
-            init_mo_coeff=init_mo_coeff,
-            init_mo_occ=init_mo_occ,
-            init_mo_energy=init_mo_energy,
-            config=config,
-        )
-
-    runner = jax.jit(_run)
-    if len(_CUDA_DIRECT_RKS_JIT_CACHE) >= _CUDA_DIRECT_RKS_JIT_CACHE_MAXSIZE:
-        _CUDA_DIRECT_RKS_JIT_CACHE.pop(next(iter(_CUDA_DIRECT_RKS_JIT_CACHE)))
-    _CUDA_DIRECT_RKS_JIT_CACHE[key] = runner
-    return runner
-
-
-def _cuda_direct_rks_arg_signature(args: list[Any]) -> tuple[Any, ...]:
-    signature: list[tuple[tuple[int, ...], str]] = []
-    for arg in args:
-        shape = tuple(int(dim) for dim in getattr(arg, "shape", np.shape(arg)))
-        dtype = getattr(arg, "dtype", np.asarray(arg).dtype)
-        signature.append((shape, str(dtype)))
-    return tuple(signature)
-
-
-def _cuda_direct_rks_compiled_cache_key(
-    scf_inputs: Any,
-    config: RKSConfig,
-    args: list[Any],
-) -> tuple[Any, ...]:
-    return (
-        _cuda_direct_rks_runner_cache_key(scf_inputs, config),
-        _cuda_direct_rks_arg_signature(args),
-    )
-
-
-def _cache_cuda_direct_rks_compiled(key: tuple[Any, ...], compiled: Any) -> None:
-    if len(_CUDA_DIRECT_RKS_COMPILED_CACHE) >= _CUDA_DIRECT_RKS_COMPILED_CACHE_MAXSIZE:
-        _CUDA_DIRECT_RKS_COMPILED_CACHE.pop(next(iter(_CUDA_DIRECT_RKS_COMPILED_CACHE)))
-    _CUDA_DIRECT_RKS_COMPILED_CACHE[key] = compiled
-
-
-def _cuda_direct_rks_args(scf_inputs: Any) -> list[Any]:
-    args: list[Any] = [
-        scf_inputs.overlap,
-        scf_inputs.hcore,
-        scf_inputs.nuclear_repulsion,
-        scf_inputs.ao,
-        scf_inputs.ao_deriv1,
-        scf_inputs.grid_weights,
-    ]
-    if getattr(scf_inputs, "init_density", None) is not None:
-        args.append(scf_inputs.init_density)
-    if getattr(scf_inputs, "init_mo_coeff", None) is not None:
-        args.append(scf_inputs.init_mo_coeff)
-    if getattr(scf_inputs, "init_mo_occ", None) is not None:
-        args.append(scf_inputs.init_mo_occ)
-    if getattr(scf_inputs, "init_mo_energy", None) is not None:
-        args.append(scf_inputs.init_mo_energy)
-    return args
-
-
-def _cuda_direct_grid_ao_bucket_size(config: RKSConfig) -> int:
-    if not (
-        config.jk_backend == "direct"
-        and config.direct_jk_engine == "cuda"
-        and config.iteration_backend == "lax"
-    ):
-        return 0
-    raw = os.environ.get(_CUDA_DIRECT_GRID_AO_BUCKET_SIZE_ENV)
-    if raw is None or not str(raw).strip():
-        return _DEFAULT_CUDA_DIRECT_GRID_AO_BUCKET_SIZE
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        return _DEFAULT_CUDA_DIRECT_GRID_AO_BUCKET_SIZE
-
-
-def _pad_array_axis_to(value: Any, *, axis: int, target: int, fill: str = "zero") -> Any:
-    arr = jnp.asarray(value)
-    current = int(arr.shape[axis])
-    if target <= current:
-        return arr
-    if fill == "first":
-        pad_shape = list(arr.shape)
-        pad_shape[axis] = int(target) - current
-        first = jnp.expand_dims(jnp.take(arr, 0, axis=axis), axis=axis)
-        padding = jnp.broadcast_to(first, tuple(pad_shape))
-        return jnp.concatenate([arr, padding], axis=axis)
-    pad_width = [(0, 0)] * arr.ndim
-    pad_width[axis] = (0, int(target) - current)
-    return jnp.pad(arr, tuple(pad_width), mode="constant")
-
-
-def _bucket_cuda_direct_rks_grid_inputs(scf_inputs: Any, *, bucket_size: int) -> Any:
-    if int(bucket_size) <= 0 or not is_dataclass(scf_inputs):
-        return scf_inputs
-    if not hasattr(scf_inputs, "grid_weights"):
-        return scf_inputs
-    grid_weights = jnp.asarray(scf_inputs.grid_weights)
-    if grid_weights.ndim != 1:
-        return scf_inputs
-    current = int(grid_weights.shape[0])
-    if current <= 0:
-        return scf_inputs
-    target = ((current + int(bucket_size) - 1) // int(bucket_size)) * int(bucket_size)
-    if target == current:
-        return scf_inputs
-    ao_laplacian = scf_inputs.ao_laplacian
-    if ao_laplacian is not None:
-        ao_laplacian = _pad_array_axis_to(ao_laplacian, axis=0, target=target, fill="first")
-    return replace(
-        scf_inputs,
-        coords=_pad_array_axis_to(scf_inputs.coords, axis=0, target=target, fill="first"),
-        grid_weights=_pad_array_axis_to(grid_weights, axis=0, target=target),
-        ao=_pad_array_axis_to(scf_inputs.ao, axis=0, target=target, fill="first"),
-        ao_deriv1=_pad_array_axis_to(scf_inputs.ao_deriv1, axis=1, target=target, fill="first"),
-        ao_laplacian=ao_laplacian,
-    )
-
-
-def _bucket_cuda_direct_rks_inputs_for_config(scf_inputs: Any, config: RKSConfig) -> Any:
-    return _bucket_cuda_direct_rks_grid_inputs(
-        scf_inputs,
-        bucket_size=_cuda_direct_grid_ao_bucket_size(config),
-    )
-
-
-def _dummy_cuda_direct_rks_args(args: list[Any]) -> list[Any]:
-    return [
-        jnp.zeros(
-            tuple(int(dim) for dim in np.shape(arg)),
-            dtype=jnp.asarray(arg).dtype,
-        )
-        for arg in args
-    ]
-
-
-def precompile_cuda_direct_rks_inputs(scf_inputs: Any, config: RKSConfig) -> Any:
-    args = _cuda_direct_rks_args(scf_inputs)
-    key = _cuda_direct_rks_compiled_cache_key(scf_inputs, config, args)
-    cached_compiled = _CUDA_DIRECT_RKS_COMPILED_CACHE.get(key)
-    if cached_compiled is not None:
-        return cached_compiled
-    runner = _cached_cuda_direct_rks_runner(scf_inputs, config)
-    compiled = runner.lower(*args).compile()
-    _cache_cuda_direct_rks_compiled(key, compiled)
-    return compiled
-
-
-def precompile_cuda_direct_rks_signature(scf_inputs: Any, config: RKSConfig) -> Any:
-    scf_inputs = _bucket_cuda_direct_rks_inputs_for_config(scf_inputs, config)
-    args = _cuda_direct_rks_args(scf_inputs)
-    key = _cuda_direct_rks_compiled_cache_key(scf_inputs, config, args)
-    cached_compiled = _CUDA_DIRECT_RKS_COMPILED_CACHE.get(key)
-    if cached_compiled is not None:
-        return cached_compiled
-    runner = _cached_cuda_direct_rks_runner(scf_inputs, config)
-    compiled = runner.lower(*_dummy_cuda_direct_rks_args(args)).compile()
-    _cache_cuda_direct_rks_compiled(key, compiled)
-    return compiled
-
-
-def precompile_restricted_cuda_direct_rks_solver(
-    *,
-    atom: Any,
-    basis: Any,
-    xc_spec: str = "pbe",
-    unit: str = "Angstrom",
-    charge: int = 0,
-    spin: int = 0,
-    cart: bool = True,
-    grids_level: int = 0,
-    max_l: int = 3,
-    rks_config: RKSConfig | None = None,
-    grid_ao_backend: Literal["jax"] = "jax",
-    integral_backend: Literal["jax", "libcint"] = "libcint",
-    libcint_geometry_grad_policy: LibcintGeometryGradPolicy = "analytic",
-    include_dipole_integrals: bool = True,
-    precompile_eri: bool = False,
-    precompile_eri_chunk_size: int = 512,
-    compute_local_hfx_features: bool = False,
-    compute_local_hfx_aux: bool = False,
-    compute_local_pt2_features: bool = False,
-    hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
-    hfx_chunk_size: int = 512,
-    verbose: int = 0,
-    **mol_kwargs: Any,
-) -> Any:
-    """Compile the cached CUDA-direct RKS executable for the current structure."""
-
-    if isinstance(atom, MoleculeSpec):
-        charge = int(atom.charge)
-        spin = int(atom.spin)
-    if int(spin) != 0:
-        raise NotImplementedError("CUDA direct RKS precompile only supports closed-shell systems.")
-    if not bool(cart):
-        raise NotImplementedError("CUDA direct RKS precompile currently supports cart=True only.")
-
-    xc_spec_resolved = str(xc_spec)
-    parse_xc(xc_spec_resolved)
-    cfg = RKSConfig(xc_spec=xc_spec_resolved) if rks_config is None else rks_config
-    if cfg.xc_spec != xc_spec_resolved:
-        cfg = replace(cfg, xc_spec=xc_spec_resolved)
-    if not (
-        cfg.jk_backend == "direct"
-        and cfg.direct_jk_engine == "cuda"
-        and cfg.iteration_backend == "lax"
-    ):
-        raise ValueError("CUDA direct RKS precompile requires direct CUDA lax configuration.")
-    input_cache_key = _cuda_direct_reference_inputs_cache_key(
-        atom=atom,
-        basis=basis,
-        xc_spec=xc_spec_resolved,
-        unit=unit,
-        charge=charge,
-        spin=spin,
-        cart=cart,
-        grids_level=grids_level,
-        max_l=max_l,
-        config=cfg,
-        grid_ao_backend=grid_ao_backend,
-        integral_backend=integral_backend,
-        libcint_geometry_grad_policy=libcint_geometry_grad_policy,
-        include_dipole_integrals=include_dipole_integrals,
-        precompile_eri=precompile_eri,
-        precompile_eri_chunk_size=precompile_eri_chunk_size,
-        verbose=verbose,
-        mol_kwargs=mol_kwargs,
-    )
-    scf_inputs = (
-        _CUDA_DIRECT_RKS_INPUT_CACHE[input_cache_key]
-        if input_cache_key in _CUDA_DIRECT_RKS_INPUT_CACHE
-        else build_rks_integral_inputs(
-            atom=atom,
-            basis=basis,
-            config=cfg,
-            xc_spec=xc_spec_resolved,
-            unit=unit,
-            charge=charge,
-            spin=spin,
-            cart=cart,
-            grids_level=grids_level,
-            max_l=max_l,
-            grid_ao_backend=grid_ao_backend,
-            integral_backend=integral_backend,
-            libcint_geometry_grad_policy=libcint_geometry_grad_policy,
-            include_dipole_integrals=include_dipole_integrals,
-            precompile_eri=precompile_eri,
-            precompile_eri_chunk_size=precompile_eri_chunk_size,
-            _precompile_eri_kernels=precompile_eri_kernels,
-            verbose=verbose,
-            **mol_kwargs,
-        )
-    )
-    _cache_cuda_direct_rks_inputs(input_cache_key, scf_inputs)
-    return precompile_cuda_direct_rks_signature(scf_inputs, cfg)
-
-
-def _run_cached_cuda_direct_rks(scf_inputs: Any, config: RKSConfig) -> Any:
-    scf_inputs = _bucket_cuda_direct_rks_inputs_for_config(scf_inputs, config)
-    args = _cuda_direct_rks_args(scf_inputs)
-    key = _cuda_direct_rks_compiled_cache_key(scf_inputs, config, args)
-    compiled = _CUDA_DIRECT_RKS_COMPILED_CACHE.get(key)
-    if compiled is not None:
-        return compiled(*args)
-    runner = _cached_cuda_direct_rks_runner(scf_inputs, config)
-    return runner(*args)
 
 def _host_array(value: Any, dtype: Any | None = None) -> np.ndarray:
     return np.asarray(jax.device_get(value), dtype=dtype)
@@ -786,64 +160,31 @@ def restricted_molecule_from_spec_with_jax_rks(
         )
 
     exact_exchange_fraction = float(hybrid_coeff(xc_spec_resolved))
-    input_cache_key = (
-        _cuda_direct_reference_inputs_cache_key(
-            atom=atom,
-            basis=basis,
-            xc_spec=xc_spec_resolved,
-            unit=unit,
-            charge=charge,
-            spin=spin,
-            cart=cart,
-            grids_level=grids_level,
-            max_l=max_l,
-            config=cfg,
-            grid_ao_backend=grid_ao_backend,
-            integral_backend=integral_backend,
-            libcint_geometry_grad_policy=libcint_geometry_grad_policy,
-            include_dipole_integrals=include_dipole_integrals,
-            init_guess=init_guess,
-            chkfile=chkfile,
-            sap_basis=init_guess_sap_basis,
-            init_guess_chkfile_project=init_guess_chkfile_project,
-            precompile_eri=precompile_eri,
-            precompile_eri_chunk_size=precompile_eri_chunk_size,
-            verbose=verbose,
-            mol_kwargs=mol_kwargs,
-        )
-        if cfg.jk_backend == "direct" and cfg.direct_jk_engine == "cuda"
-        else None
+    scf_inputs = build_rks_integral_inputs(
+        atom=atom,
+        basis=basis,
+        config=cfg,
+        xc_spec=xc_spec_resolved,
+        unit=unit,
+        charge=charge,
+        spin=spin,
+        cart=cart,
+        grids_level=grids_level,
+        max_l=max_l,
+        grid_ao_backend=grid_ao_backend,
+        integral_backend=integral_backend,
+        libcint_geometry_grad_policy=libcint_geometry_grad_policy,
+        include_dipole_integrals=include_dipole_integrals,
+        init_guess=init_guess,
+        chkfile=chkfile,
+        init_guess_sap_basis=init_guess_sap_basis,
+        init_guess_chkfile_project=init_guess_chkfile_project,
+        precompile_eri=precompile_eri,
+        precompile_eri_chunk_size=precompile_eri_chunk_size,
+        _precompile_eri_kernels=precompile_eri_kernels,
+        verbose=verbose,
+        **mol_kwargs,
     )
-    scf_inputs = (
-        _CUDA_DIRECT_RKS_INPUT_CACHE[input_cache_key]
-        if input_cache_key in _CUDA_DIRECT_RKS_INPUT_CACHE
-        else build_rks_integral_inputs(
-            atom=atom,
-            basis=basis,
-            config=cfg,
-            xc_spec=xc_spec_resolved,
-            unit=unit,
-            charge=charge,
-            spin=spin,
-            cart=cart,
-            grids_level=grids_level,
-            max_l=max_l,
-            grid_ao_backend=grid_ao_backend,
-            integral_backend=integral_backend,
-            libcint_geometry_grad_policy=libcint_geometry_grad_policy,
-            include_dipole_integrals=include_dipole_integrals,
-            init_guess=init_guess,
-            chkfile=chkfile,
-            init_guess_sap_basis=init_guess_sap_basis,
-            init_guess_chkfile_project=init_guess_chkfile_project,
-            precompile_eri=precompile_eri,
-            precompile_eri_chunk_size=precompile_eri_chunk_size,
-            _precompile_eri_kernels=precompile_eri_kernels,
-            verbose=verbose,
-            **mol_kwargs,
-        )
-    )
-    _cache_cuda_direct_rks_inputs(input_cache_key, scf_inputs)
     basis_cart = scf_inputs.basis
     s = scf_inputs.overlap
     h1e = scf_inputs.hcore
@@ -862,33 +203,11 @@ def restricted_molecule_from_spec_with_jax_rks(
             "Use implicit differential SCF instead."
         )
     nelectron = scf_inputs.nelectron
-    use_cached_cuda_direct_runner = (
-        cfg.jk_backend == "direct"
-        and cfg.direct_jk_engine == "cuda"
-        and cfg.iteration_backend == "lax"
-        and cuda_ffi_available()
+    rks = run_rks_from_integrals(
+        **scf_inputs.as_rks_kwargs(),
+        config=cfg,
     )
-    if use_cached_cuda_direct_runner:
-        rks = _run_cached_cuda_direct_rks(scf_inputs, cfg)
-        rks_is_traceable = True
-    else:
-        rks_kwargs = scf_inputs.as_rks_kwargs()
-        if (
-            cfg.jk_backend == "direct"
-            and cfg.direct_jk_engine == "cuda"
-            and cuda_ffi_available()
-            and scf_inputs.direct_basis is not None
-        ):
-            rks_kwargs["direct_cuda_jk_builder"] = _cached_cuda_direct_jk_builder(
-                scf_inputs.direct_basis,
-                cfg,
-            )
-        rks = run_rks_from_integrals(
-            **rks_kwargs,
-            config=cfg,
-        )
-        rks_is_traceable = False
-    if not rks_is_traceable and not rks.converged:
+    if not rks.converged:
         if not (
             jnp.all(jnp.isfinite(rks.mo_coeff))
             and jnp.all(jnp.isfinite(rks.mo_energy))
@@ -898,18 +217,11 @@ def restricted_molecule_from_spec_with_jax_rks(
                 "Pure JAX RKS from molecule specs did not converge to a finite solution."
             )
 
-    if rks_is_traceable:
-        dm_total = jnp.asarray(rks.density_matrix)
-        half_dm = dm_total / 2.0
-        mo_coeff = jnp.asarray(rks.mo_coeff)
-        mo_occ = jnp.asarray(rks.mo_occ) / 2.0
-        mo_energy = jnp.asarray(rks.mo_energy)
-    else:
-        dm_total = _host_array(rks.density_matrix)
-        half_dm = dm_total * 0.5
-        mo_coeff = _host_array(rks.mo_coeff)
-        mo_occ = _host_array(rks.mo_occ) * 0.5
-        mo_energy = _host_array(rks.mo_energy)
+    dm_total = _host_array(rks.density_matrix)
+    half_dm = dm_total * 0.5
+    mo_coeff = _host_array(rks.mo_coeff)
+    mo_occ = _host_array(rks.mo_occ) * 0.5
+    mo_energy = _host_array(rks.mo_energy)
     hfx_local = None
     hfx_nu = None
     pt2_local = None
@@ -933,24 +245,14 @@ def restricted_molecule_from_spec_with_jax_rks(
         if energy_target is None
         else _host_float_unless_traced(energy_target)
     )
-    nocc = nelectron // 2 if rks_is_traceable else int(np.count_nonzero(np.asarray(rks.mo_occ) > 1e-8))
+    nocc = int(np.count_nonzero(np.asarray(rks.mo_occ) > 1e-8))
     if cfg.jk_backend == "df":
         if df_factors is None:
             raise RuntimeError("DF backend requested but df_factors were not constructed.")
         eri_ovov = None
         eri_ovvo = None
         eri_oovv = None
-        rep_tensor = _empty_rep_tensor_like(s, traced=rks_is_traceable)
-    elif (
-        cfg.jk_backend == "direct"
-        and cfg.direct_jk_engine == "cuda"
-        and cuda_ffi_available()
-        and not compute_local_pt2_features
-    ):
-        eri_ovov = None
-        eri_ovvo = None
-        eri_oovv = None
-        rep_tensor = _empty_rep_tensor_like(s, traced=rks_is_traceable)
+        rep_tensor = _empty_rep_tensor_like(s, traced=False)
     else:
         if eri is None and eri_pair_matrix is None:
             if cfg.jk_backend == "direct":
@@ -959,22 +261,18 @@ def restricted_molecule_from_spec_with_jax_rks(
                 raise RuntimeError("Full ERI backend requested but exact ERI data is missing.")
         needs_exchange_slices = abs(exact_exchange_fraction) > 1e-14
         if eri_pair_matrix is not None:
-            reference_eri_pair_matrix = (
-                jnp.asarray(eri_pair_matrix, dtype=jnp.asarray(s).dtype)
-                if rks_is_traceable
-                else _host_array(eri_pair_matrix, np.asarray(s).dtype)
-            )
+            reference_eri_pair_matrix = _host_array(eri_pair_matrix, np.asarray(s).dtype)
             eri_ovov, eri_ovvo, eri_oovv = eri_pair_matrix_to_mo_eri_slices(
                 eri_pair_matrix,
                 rks.mo_coeff,
                 nocc=nocc,
                 include_oovv=needs_exchange_slices,
             )
-            rep_tensor = _empty_rep_tensor_like(s, traced=rks_is_traceable)
+            rep_tensor = _empty_rep_tensor_like(s, traced=False)
         else:
             eri_ovov, eri_ovvo, eri_oovv = _restricted_response_eri_slices_from_mo_tensor(
-                eri if rks_is_traceable else np.asarray(eri),
-                rks.mo_coeff if rks_is_traceable else np.asarray(rks.mo_coeff),
+                np.asarray(eri),
+                np.asarray(rks.mo_coeff),
                 nocc,
                 include_oovv=needs_exchange_slices,
             )
@@ -1004,26 +302,8 @@ def restricted_molecule_from_spec_with_jax_rks(
         overlap=s,
         df_factors=df_factors,
         dtype=jnp.asarray(s).dtype,
-        traced=rks_is_traceable,
+        traced=False,
     )
-    direct_basis_for_reference = None
-    direct_cuda_jk_builder_for_reference = None
-    direct_jk_engine_for_reference = None
-    direct_scf_tol_for_reference = None
-    if (
-        cfg.jk_backend == "direct"
-        and cfg.direct_jk_engine == "cuda"
-        and cuda_ffi_available()
-        and scf_inputs.direct_basis is not None
-    ):
-        direct_basis_for_reference = scf_inputs.direct_basis
-        direct_cuda_jk_builder_for_reference = _cached_cuda_direct_jk_builder(
-            scf_inputs.direct_basis,
-            cfg,
-        )
-        direct_jk_engine_for_reference = str(cfg.direct_jk_engine)
-        direct_scf_tol_for_reference = float(cfg.direct_scf_tol)
-
     return RestrictedMolecule(
         ao=ao,
         grid=QuadratureGrid(weights=weights, coords=coords),
@@ -1057,10 +337,6 @@ def restricted_molecule_from_spec_with_jax_rks(
         eri_ovvo=eri_ovvo,
         eri_oovv=eri_oovv,
         scf_converged=bool(rks.converged),
-        direct_jk_engine=direct_jk_engine_for_reference,
-        direct_scf_tol=direct_scf_tol_for_reference,
-        direct_basis=direct_basis_for_reference,
-        direct_cuda_jk_builder=direct_cuda_jk_builder_for_reference,
     )
 
 
@@ -1083,6 +359,7 @@ def restricted_molecule_from_spec_with_gpu4pyscf_rks(
     compute_local_hfx_features: bool = False,
     compute_local_hfx_aux: bool = False,
     compute_local_pt2_features: bool = False,
+    compute_response_eri_slices: bool = True,
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
     hfx_chunk_size: int = 512,
     include_dipole_integrals: bool = True,
@@ -1119,10 +396,10 @@ def restricted_molecule_from_spec_with_gpu4pyscf_rks(
     cfg_forward = RKSConfig(xc_spec=xc_spec_resolved) if rks_config is None else rks_config
     if cfg_forward.xc_spec != xc_spec_resolved:
         cfg_forward = replace(cfg_forward, xc_spec=xc_spec_resolved)
+    build_mo_eri_slices = bool(compute_response_eri_slices) or bool(compute_local_pt2_features)
     cfg_inputs = replace(
         cfg_forward,
         jk_backend="full",
-        direct_jk_engine="jax",
         iteration_backend="runtime",
     )
 
@@ -1197,14 +474,21 @@ def restricted_molecule_from_spec_with_gpu4pyscf_rks(
     pt2_local = None
     reference_eri_pair_matrix = None
     if compute_local_hfx_features:
-        hfx_result = _local_hfx_features_from_basis_dm(
-            basis_cart,
-            ao,
-            (half_dm, half_dm),
-            coords,
+        hfx_result = compute_gpu4pyscf_local_hfx_features(
+            atom=atom,
+            basis=basis,
+            unit=unit,
+            charge=charge,
+            spin=spin,
+            cart=cart,
+            coords=coords,
+            ao=ao,
+            dm_spin=(half_dm, half_dm),
             omega_values=tuple(float(omega) for omega in hfx_omega_values),
             chunk_size=hfx_chunk_size,
             return_nu=bool(compute_local_hfx_aux),
+            verbose=verbose,
+            **mol_kwargs,
         )
         if compute_local_hfx_aux:
             hfx_local, hfx_nu = hfx_result
@@ -1223,11 +507,21 @@ def restricted_molecule_from_spec_with_gpu4pyscf_rks(
         else float(hybrid_coeff(xc_spec_resolved))
     )
     needs_exchange_slices = abs(exact_exchange_fraction) > 1e-14
-    if eri is None and eri_pair_matrix is None:
+    if build_mo_eri_slices and eri is None and eri_pair_matrix is None:
         raise RuntimeError(
             "GPU4PySCF RKS reference requires exact ERI pair data for downstream JAX use."
         )
-    if eri_pair_matrix is not None:
+    if not build_mo_eri_slices:
+        if eri_pair_matrix is None:
+            raise RuntimeError(
+                "GPU4PySCF RKS reference requires AO-pair ERI data for ground-state energy."
+            )
+        reference_eri_pair_matrix = _host_array(eri_pair_matrix, np.asarray(s).dtype)
+        rep_tensor = _empty_rep_tensor_like(s, traced=False)
+        eri_ovov = None
+        eri_ovvo = None
+        eri_oovv = None
+    elif eri_pair_matrix is not None:
         reference_eri_pair_matrix = jnp.asarray(eri_pair_matrix, dtype=jnp.asarray(s).dtype)
         eri_ovov, eri_ovvo, eri_oovv = eri_pair_matrix_to_mo_eri_slices(
             eri_pair_matrix,
@@ -1253,6 +547,7 @@ def restricted_molecule_from_spec_with_gpu4pyscf_rks(
             mo_energy,
             rep_tensor=rep_tensor,
             eri_ovov=eri_ovov,
+            eri_pair_matrix=reference_eri_pair_matrix,
             df_factors=df_factors,
             nocc=nocc,
             density_floor=cfg_inputs.density_floor,
@@ -1345,8 +640,6 @@ def build_restricted_reference_from_facade(
     include_dipole_integrals: bool,
     geometry_is_traced: bool,
     reference_builder: Any,
-    cuda_direct_solver_getter: Any,
-    cuda_available: bool,
 ) -> Any:
     plan = resolve_rks_execution_plan(
         rks_config,
@@ -1354,16 +647,7 @@ def build_restricted_reference_from_facade(
         grid_ao_backend=grid_ao_backend,
         include_dipole_integrals=include_dipole_integrals,
         geometry_is_traced=geometry_is_traced,
-        cuda_available=cuda_available,
     )
-    if plan.use_cuda_direct_reference_solver:
-        solver = cuda_direct_solver_getter(
-            spec,
-            rks_config=plan.config,
-            integral_backend=plan.integral_backend,
-            include_dipole_integrals=plan.include_dipole_integrals,
-        )
-        return solver(spec)
     return reference_builder(
         atom=spec,
         basis=mol.basis,
@@ -1421,7 +705,6 @@ def build_restricted_scf_result_from_facade(
         grid_ao_backend=grid_ao_backend,
         include_dipole_integrals=False,
         geometry_is_traced=geometry_is_traced,
-        cuda_available=False,
     )
     scf_inputs = build_inputs_fn(
         atom=spec,
@@ -1612,6 +895,181 @@ def unrestricted_molecule_from_spec_with_jax_uks(
     )
 
 
+def unrestricted_molecule_from_spec_with_gpu4pyscf_uks(
+    *,
+    atom: Any,
+    basis: Any,
+    xc_spec: str = "pbe",
+    unit: str = "Angstrom",
+    charge: int = 0,
+    spin: int = 1,
+    cart: bool = True,
+    grids_level: int = 0,
+    max_l: int = 3,
+    uks_config: UKSConfig | None = None,
+    grid_ao_backend: Literal["jax"] = "jax",
+    integral_backend: Literal["jax", "libcint"] = "libcint",
+    libcint_geometry_grad_policy: LibcintGeometryGradPolicy = "error",
+    energy_target: float | None = None,
+    compute_local_hfx_features: bool = False,
+    compute_local_hfx_aux: bool = False,
+    hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
+    hfx_chunk_size: int = 512,
+    init_guess: Any = "minao",
+    chkfile: str | None = None,
+    init_guess_sap_basis: Any | None = None,
+    init_guess_chkfile_project: bool | None = None,
+    precompile_eri: bool = False,
+    precompile_eri_chunk_size: int = 512,
+    verbose: int = 0,
+    **mol_kwargs: Any,
+) -> UnrestrictedMolecule:
+    """Build an unrestricted reference using exact GPU4PySCF UKS as the SCF forward."""
+
+    if not bool(cart):
+        raise NotImplementedError(
+            "unrestricted_molecule_from_spec_with_gpu4pyscf_uks currently supports cart=True only."
+        )
+    if isinstance(atom, MoleculeSpec):
+        charge = int(atom.charge)
+        spin = int(atom.spin)
+
+    xc_spec_resolved = str(xc_spec)
+    parse_xc(xc_spec_resolved)
+    cfg_forward = UKSConfig(xc_spec=xc_spec_resolved) if uks_config is None else uks_config
+    if cfg_forward.xc_spec != xc_spec_resolved:
+        cfg_forward = replace(cfg_forward, xc_spec=xc_spec_resolved)
+
+    scf_inputs = build_uks_integral_inputs(
+        atom=atom,
+        basis=basis,
+        config=cfg_forward,
+        xc_spec=xc_spec_resolved,
+        unit=unit,
+        charge=charge,
+        spin=spin,
+        cart=cart,
+        grids_level=grids_level,
+        max_l=max_l,
+        grid_ao_backend=grid_ao_backend,
+        integral_backend=integral_backend,
+        libcint_geometry_grad_policy=libcint_geometry_grad_policy,
+        precompile_eri=precompile_eri,
+        precompile_eri_chunk_size=precompile_eri_chunk_size,
+        _precompile_eri_kernels=precompile_eri_kernels,
+        init_guess=init_guess,
+        chkfile=chkfile,
+        init_guess_sap_basis=init_guess_sap_basis,
+        init_guess_chkfile_project=init_guess_chkfile_project,
+        verbose=verbose,
+        **mol_kwargs,
+    )
+    if scf_inputs.geometry_is_traced:
+        raise NotImplementedError(
+            "GPU4PySCF UKS forward is host/GPU-external and cannot run for traced geometries."
+        )
+
+    forward = run_gpu4pyscf_uks_forward(
+        atom=atom,
+        basis=basis,
+        xc_spec=xc_spec_resolved,
+        unit=unit,
+        charge=charge,
+        spin=spin,
+        cart=cart,
+        grids_level=grids_level,
+        conv_tol=cfg_forward.conv_tol,
+        max_cycle=cfg_forward.max_cycle,
+        verbose=verbose,
+        **mol_kwargs,
+    )
+
+    basis_cart = scf_inputs.basis
+    s = scf_inputs.overlap
+    h1e = scf_inputs.hcore
+    eri = scf_inputs.eri
+    coords = scf_inputs.coords
+    weights = scf_inputs.grid_weights
+    ao = scf_inputs.ao
+    ao_deriv1 = scf_inputs.ao_deriv1
+    ao_laplacian = scf_inputs.ao_laplacian
+    dipole_integrals = scf_inputs.dipole_integrals
+    dtype = np.asarray(s).dtype
+
+    mo_coeff = np.asarray(forward.mo_coeff, dtype=dtype)
+    mo_occ = np.asarray(forward.mo_occ, dtype=dtype)
+    mo_energy = np.asarray(forward.mo_energy, dtype=dtype)
+    density_matrix = np.asarray(forward.density_matrix, dtype=dtype)
+
+    hfx_local = None
+    hfx_nu = None
+    if compute_local_hfx_features:
+        hfx_result = _local_hfx_features_from_basis_dm(
+            basis_cart,
+            ao,
+            (density_matrix[0], density_matrix[1]),
+            coords,
+            omega_values=tuple(float(omega) for omega in hfx_omega_values),
+            chunk_size=hfx_chunk_size,
+            return_nu=bool(compute_local_hfx_aux),
+        )
+        if compute_local_hfx_aux:
+            hfx_local, hfx_nu = hfx_result
+        else:
+            hfx_local = hfx_result
+
+    mf_energy = (
+        float(forward.total_energy)
+        if energy_target is None
+        else _host_float_unless_traced(energy_target)
+    )
+    nocc_alpha = int(np.count_nonzero(mo_occ[0] > 1e-8))
+    nocc_beta = int(np.count_nonzero(mo_occ[1] > 1e-8))
+    return UnrestrictedMolecule(
+        ao=ao,
+        grid=QuadratureGrid(weights=weights, coords=coords),
+        dipole_integrals=dipole_integrals,
+        rep_tensor=jnp.asarray(eri),
+        mo_coeff=jnp.asarray(mo_coeff),
+        mo_occ=jnp.asarray(mo_occ),
+        mo_energy=jnp.asarray(mo_energy),
+        rdm1=jnp.asarray(density_matrix),
+        h1e=jnp.asarray(h1e),
+        nuclear_repulsion=_host_float_unless_traced(scf_inputs.nuclear_repulsion),
+        atom_coords=jnp.asarray(basis_cart.atom_coords),
+        atom_charges=jnp.asarray(basis_cart.atom_charges),
+        overlap_matrix=jnp.asarray(s),
+        ao_deriv1=ao_deriv1,
+        ao_laplacian=ao_laplacian,
+        mf_energy=mf_energy,
+        exact_exchange_fraction=float(hybrid_coeff(xc_spec_resolved)),
+        nocc_alpha=nocc_alpha,
+        nocc_beta=nocc_beta,
+        hfx_omega_values=(
+            jnp.asarray(hfx_omega_values, dtype=jnp.asarray(mo_coeff).dtype)
+            if compute_local_hfx_features
+            else None
+        ),
+        hfx_local=hfx_local,
+        hfx_nu=hfx_nu,
+        runtime_scf_backend=GPU4PYSCF_UKS_RUNTIME_BACKEND,
+        runtime_scf_options=GPU4PySCFUKSForwardOptions(
+            atom=atom,
+            basis=basis,
+            xc_spec=xc_spec_resolved,
+            unit=unit,
+            charge=charge,
+            spin=spin,
+            cart=cart,
+            grids_level=grids_level,
+            conv_tol=cfg_forward.conv_tol,
+            max_cycle=cfg_forward.max_cycle,
+            verbose=verbose,
+            mol_kwargs=dict(mol_kwargs),
+        ),
+    )
+
+
 def build_unrestricted_reference_from_facade(
     spec: MoleculeSpec,
     *,
@@ -1651,24 +1109,13 @@ def build_unrestricted_reference_from_facade(
     )
 
 
-precompile_restricted_cuda_direct_rks_reference = precompile_restricted_cuda_direct_rks_solver
-restricted_reference_from_spec_with_jax_rks = restricted_molecule_from_spec_with_jax_rks
-restricted_reference_from_spec_with_gpu4pyscf_rks = restricted_molecule_from_spec_with_gpu4pyscf_rks
-unrestricted_reference_from_spec_with_jax_uks = unrestricted_molecule_from_spec_with_jax_uks
-
 __all__ = [
-    "_configure_cuda_jax_cache",
-    "_cuda_direct_basis_cache_key",
-    "_default_cuda_direct_iteration_backend",
-    "_differentiable_rks_config",
-    "_make_cuda_direct_reference_solver",
     "_restricted_reference_array_packaging",
     "build_restricted_reference_from_facade",
     "build_restricted_scf_result_from_facade",
     "build_unrestricted_reference_from_facade",
-    "precompile_restricted_cuda_direct_rks_solver",
     "restricted_molecule_from_spec_with_gpu4pyscf_rks",
     "restricted_molecule_from_spec_with_jax_rks",
-    "restricted_reference_from_spec_with_gpu4pyscf_rks",
+    "unrestricted_molecule_from_spec_with_gpu4pyscf_uks",
     "unrestricted_molecule_from_spec_with_jax_uks",
 ]

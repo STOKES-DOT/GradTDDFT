@@ -1,7 +1,5 @@
 """JAX-native Gaussian integral backbone and derived J/K backends."""
 
-from .cuda_direct_jk import CudaDirectJKBuilder, build_jk_from_eri_pair_matrix_cuda, cuda_ffi_available
-from .cuda_one_electron import CudaOneElectronBuilder
 from .direct_jk import DirectJKResult, build_direct_jk_from_basis, build_direct_jk_incremental
 from .one_electron import (
     build_hcore,
@@ -40,10 +38,6 @@ __all__ = [
     "build_hcore",
     "build_j_from_eri_pair_matrix",
     "build_jk_from_eri_pair_matrix",
-    "build_jk_from_eri_pair_matrix_cuda",
-    "cuda_ffi_available",
-    "CudaDirectJKBuilder",
-    "CudaOneElectronBuilder",
     "DirectJKResult",
     "eri_element",
     "eri_pair_matrix_packed",

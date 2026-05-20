@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 
-from .jax_xc_adapter import load_jax_xc
+from .xc_backend.jax_xc_adapter import load_jax_xc
 from .upstreams import MissingDependencyError
 
 

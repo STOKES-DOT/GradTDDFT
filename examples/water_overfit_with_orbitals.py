@@ -27,7 +27,7 @@ import optax
 from pyscf import dft, gto
 
 from td_graddft import neural_xc, tdscf
-from td_graddft.device import put_restricted_reference_on_device
+from td_graddft.device import put_restricted_molecule_on_device
 from td_graddft.neural_xc_presets import (
     DM21_B3LYP_NEURAL_XC_PRESET,
     resolve_coefficient_prior_values,
@@ -765,7 +765,7 @@ def main() -> None:
 
     t0 = time.perf_counter()
     mol, mf = _make_water_mf(basis=args.basis, xc=args.xc)
-    reference = put_restricted_reference_on_device(
+    reference = put_restricted_molecule_on_device(
         restricted_reference_from_pyscf(
             mf,
             compute_local_hfx_features=(args.feature_mode == "dm21_original"),
