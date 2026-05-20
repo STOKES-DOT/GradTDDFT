@@ -1,6 +1,6 @@
-# TD-GradDFT
+# TD-GradDFT/GradTDDFT
 
-TD-GradDFT is a JAX research codebase for differentiable ground-state DFT,
+TD-GradDFT/GradTDDFT is a JAX research codebase for differentiable ground-state DFT,
 TDDFT/TDA response calculations, and Neural XC/RSH training. The Python package
 name is `td-graddft`; the import namespace is `td_graddft`.
 
