@@ -57,7 +57,7 @@ src/td_graddft/
   tddft/               Response matrices, TDA/Casida solvers, response kernels
   xc_backend/          jax_xc adapter, XC parser, RSH preset metadata
   neural_xc/           Neural XC construction, channels, response logic
-  nn_rsh/              Neural range-separated hybrid models
+  nn_rsh/              Neural range-separated hybrid models(under coding!)
   training/            Ground-state and excited-state training utilities
   workflows/           Config-driven workflow helpers
   data/                Basis data, grids, integral helpers, references
