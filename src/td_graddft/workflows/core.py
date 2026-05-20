@@ -18,6 +18,7 @@ from td_graddft.jax_runtime import configure_jax_persistent_cache
 from td_graddft.scf.builders import (
     restricted_molecule_from_spec_with_gpu4pyscf_rks,
     restricted_molecule_from_spec_with_jax_rks,
+    unrestricted_molecule_from_spec_with_gpu4pyscf_uks,
     unrestricted_molecule_from_spec_with_jax_uks,
 )
 from td_graddft.scf import RHFConfig, RKSConfig, UKSConfig
@@ -101,8 +102,8 @@ def _canonicalize_graddft_ground_state_config(
         network_architecture="graddft_residual",
         input_feature_mode="canonical",
         hf_input_mode="spin_resolved",
-        response_hf_mode="nonlocal_exchange_only",
-        response_pt2_mode="local_projected",
+        response_hf_mode="strict",
+        response_pt2_mode="approx",
         density_supervision="spin_resolved",
         strict_feature_alignment=True,
         hfx_channels=max(int(config.hfx_channels), 2),
@@ -231,10 +232,10 @@ def run_molecule_from_spec(
     """Build a strict-JAX molecule and excited states directly from molecule specs."""
 
     backend = str(simulation.scf_backend).lower()
-    if backend not in {"jax_rks", "jax_uks", "gpu4pyscf_rks"}:
+    if backend not in {"jax_rks", "jax_uks", "gpu4pyscf_rks", "gpu4pyscf_uks"}:
         raise NotImplementedError(
             "run_molecule_from_spec currently supports simulation.scf_backend in "
-            "{'jax_rks', 'jax_uks', 'gpu4pyscf_rks'} only."
+            "{'jax_rks', 'jax_uks', 'gpu4pyscf_rks', 'gpu4pyscf_uks'} only."
         )
 
     configure_jax_persistent_cache(
@@ -302,7 +303,12 @@ def run_molecule_from_spec(
                 density_floor=simulation.jax_uks_density_floor,
                 potential_clip=simulation.jax_uks_potential_clip,
             )
-            reference = unrestricted_molecule_from_spec_with_jax_uks(
+            uks_builder = (
+                unrestricted_molecule_from_spec_with_gpu4pyscf_uks
+                if backend == "gpu4pyscf_uks"
+                else unrestricted_molecule_from_spec_with_jax_uks
+            )
+            reference = uks_builder(
                 atom=spec.atom,
                 basis=spec.basis,
                 xc_spec=uks_xc,
@@ -378,9 +384,6 @@ def run_molecule_from_spec(
         scf_elapsed_s=scf_elapsed,
         tddft_elapsed_s=elapsed,
     )
-
-
-run_reference_from_spec = run_molecule_from_spec
 
 
 def train_neural_xc(
@@ -563,6 +566,7 @@ def train_neural_xc(
         scf_stop_gradient_rms_threshold=config.scf_stop_gradient_rms_threshold,
         scf_gradient_mode=selected_scf_gradient_mode,
         scf_runtime_forward_backend=config.scf_runtime_forward_backend,
+        implicit_response_backend=config.implicit_response_backend,
         scf_implicit_diff_max_iter=config.scf_implicit_diff_max_iter,
         scf_implicit_diff_step_size=config.scf_implicit_diff_step_size,
         scf_implicit_diff_clip=config.scf_implicit_diff_clip,
@@ -585,6 +589,7 @@ def train_neural_xc(
         spectrum_constraint_eta_ev=float(spectrum_config.eta_ev),
         spectrum_mse_weight=config.spectrum_mse_weight,
         spectrum_mae_weight=config.spectrum_mae_weight,
+        implicit_response_backend=config.implicit_response_backend,
     )
     gs_training = GroundStateTrainingConfig.from_parts(
         core=gs_core_training,

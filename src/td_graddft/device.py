@@ -156,7 +156,3 @@ def put_molecule_on_device(
             )
 
     return replace(molecule, **updates)
-
-
-put_restricted_reference_on_device = put_restricted_molecule_on_device
-put_reference_on_device = put_molecule_on_device

@@ -1,4 +1,4 @@
-from td_graddft.jax_libxc import b3lyp_component_basis, b3lyp_component_coefficients
+from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis, b3lyp_component_coefficients
 from td_graddft.neural_xc import (
     DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_MODE,
     DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_VALUES,

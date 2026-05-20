@@ -5,7 +5,8 @@ from typing import Any, Callable, Sequence
 
 import jax.numpy as jnp
 from jaxtyping import Array
-from ..jax_libxc import (
+from ..xc_backend.jax_libxc import (
+    FRIENDLY_XC_COMPONENT_ALIASES,
     JAXXCFunctionalInfo,
     JAXXCStatus,
     RestrictedFeatureBundle,
@@ -13,6 +14,7 @@ from ..jax_libxc import (
     jax_xc_functional_info,
     list_jax_xc_functionals,
     parse_xc,
+    resolve_xc_component_name,
     resolve_semilocal_xc_specs,
 )
 from .config import ComponentSpec
@@ -30,6 +32,7 @@ COMMON_SEMILOCAL_COMPONENT_SPECS = {
     "lda_c_vwn_rpa": "lda_c_vwn_rpa",
     "gga_c_lyp": "gga_c_lyp",
     "gga_c_pbe": "gga_c_pbe",
+    **FRIENDLY_XC_COMPONENT_ALIASES,
 }
 
 
@@ -44,18 +47,7 @@ def normalize_semilocal_xc_names(
     )
 
 
-def normalize_semilocal_selection(
-    semilocal_xc: str | Sequence[str],
-    *,
-    allow_experimental_jax_xc: bool = False,
-) -> tuple[str, ...]:
-    return tuple(
-        str(name)
-        for name in normalize_semilocal_xc_names(
-            semilocal_xc,
-            allow_experimental_jax_xc=allow_experimental_jax_xc,
-        )
-    )
+normalize_semilocal_selection = normalize_semilocal_xc_names
 
 
 @dataclass(frozen=True)
@@ -112,7 +104,7 @@ SemilocalModule = SemilocalEnergyDensityModule
 
 
 def semilocal_component_info(name: str) -> JAXXCFunctionalInfo:
-    return jax_xc_functional_info(name)
+    return jax_xc_functional_info(resolve_xc_component_name(name))
 
 
 def available_semilocal_component_infos(
@@ -157,11 +149,10 @@ def make_libxc_semilocal_module(
         channel_specs,
         allow_experimental_jax_xc=allow_experimental_jax_xc,
     )
-    resolved_specs = tuple(COMMON_SEMILOCAL_COMPONENT_SPECS.get(spec, spec) for spec in specs)
-    for spec in resolved_specs:
+    for spec in specs:
         parse_xc(spec, allow_experimental_jax_xc=allow_experimental_jax_xc)
     names = specs if channel_names is None else tuple(str(label) for label in channel_names)
-    if len(names) != len(resolved_specs):
+    if len(names) != len(specs):
         raise ValueError("channel_names must match the number of semilocal channel specs.")
 
     def energy_density_channels_fn(features: RestrictedFeatureBundle) -> Array:
@@ -172,7 +163,7 @@ def make_libxc_semilocal_module(
                     features,
                     allow_experimental_jax_xc=allow_experimental_jax_xc,
                 )
-                for spec in resolved_specs
+                for spec in specs
             ],
             axis=-1,
         )
@@ -263,6 +254,7 @@ def resolve_component_module(spec: ComponentSpec) -> SemilocalEnergyDensityModul
 
 __all__ = [
     "COMMON_SEMILOCAL_COMPONENT_SPECS",
+    "FRIENDLY_XC_COMPONENT_ALIASES",
     "JAXXCFunctionalInfo",
     "JAXXCStatus",
     "SemilocalEnergyDensityFn",
@@ -276,6 +268,7 @@ __all__ = [
     "make_libxc_semilocal_module",
     "normalize_semilocal_selection",
     "normalize_semilocal_xc_names",
+    "resolve_xc_component_name",
     "resolve_component_module",
     "semilocal_component_info",
 ]

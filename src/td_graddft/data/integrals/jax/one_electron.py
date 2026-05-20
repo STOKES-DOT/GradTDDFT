@@ -1162,19 +1162,15 @@ def overlap_hcore_matrices(
     atom_coords: Array | None = None,
     atom_charges: Array | None = None,
     engine: str = "auto",
-    backend: Literal["jax", "cuda", "auto"] = "auto",
+    backend: Literal["jax", "auto"] = "auto",
 ) -> tuple[Array, Array]:
     """Build overlap and H_core matrices in one AO-pair pass."""
 
     backend_mode = str(backend).lower()
-    if backend_mode not in {"auto", "jax", "cuda"}:
+    if backend_mode not in {"auto", "jax"}:
         raise ValueError(
-            f"Unsupported overlap_hcore backend={backend!r}. Expected 'auto', 'jax', or 'cuda'."
+            f"Unsupported overlap_hcore backend={backend!r}. Expected 'auto' or 'jax'."
         )
-    if backend_mode == "cuda":
-        from .cuda_one_electron import CudaOneElectronBuilder
-
-        return CudaOneElectronBuilder(basis).build_overlap_hcore()
 
     coords = basis.atom_coords if atom_coords is None else atom_coords
     charges = basis.atom_charges if atom_charges is None else atom_charges

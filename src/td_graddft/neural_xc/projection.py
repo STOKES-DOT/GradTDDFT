@@ -1,38 +1,44 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Literal, Sequence
+import copy
+from dataclasses import is_dataclass, replace
+from typing import Any
 
 import jax
 import jax.numpy as jnp
-from flax import linen as nn
 from jax.lax import Precision
-from jax.scipy import special as jsp_special
-from jaxtyping import Array, PRNGKeyArray, PyTree
+from jaxtyping import Array, PyTree
 
 from ..features import (
-    restricted_feature_bundle_from_response_variables,
     restricted_grid_features,
-    restricted_grid_features_with_gradients,
-    restricted_grid_response_variables,
 )
-from ..jax_libxc import RestrictedFeatureBundle, _LDA_X_LOCAL_PREFAC
-from .components import (
-    SemilocalEnergyDensityFn,
-    SemilocalEnergyDensityModule,
-    legacy_semilocal_module as _legacy_semilocal_module,
-    normalize_semilocal_xc_names,
-)
-from .defaults import (
-    DEFAULT_NEURAL_XC_SEMILOCAL_XC,
-    DEFAULT_NETWORK_ARCHITECTURE,
-    DEFAULT_NETWORK_HIDDEN_DIMS,
-)
-from .inputs import canonical_input_features, enhanced_input_features
-from .networks import SimpleMixingMLP, ResidualMixingMLP, normalize_hidden_dims
+from ..xc_backend.jax_libxc import RestrictedFeatureBundle
 
 
 class NeuralXCProjectionMixin:
+    def scf_molecule_with_density(self, molecule: Any, density: Array) -> Any:
+        """Return a restricted molecule view with a new spin-summed density."""
+
+        density_arr = jnp.asarray(density)
+        if density_arr.ndim == 2:
+            rdm1 = jnp.stack([0.5 * density_arr, 0.5 * density_arr], axis=0)
+        elif density_arr.ndim == 3 and density_arr.shape[0] == 2:
+            rdm1 = density_arr
+        else:
+            raise ValueError(
+                "SCF density callback expects density with shape (nao, nao) "
+                "or spin density with shape (2, nao, nao)."
+            )
+
+        updates: dict[str, Any] = {"rdm1": rdm1}
+        if is_dataclass(molecule):
+            return replace(molecule, **updates)
+
+        molecule_out = copy.copy(molecule)
+        for key, value in updates.items():
+            setattr(molecule_out, key, value)
+        return molecule_out
+
     def _restricted_spin_density_blocks(self, molecule: Any) -> Array:
         if getattr(molecule, "rdm1", None) is None:
             raise AttributeError("Molecule-like object must define rdm1.")
@@ -157,19 +163,16 @@ class NeuralXCProjectionMixin:
         )
         return eps_hf
 
-    def _local_exact_pt2_grid_contribution(
+    def _restricted_mp2_projection_components(
         self,
         molecule: Any,
         *,
         features: RestrictedFeatureBundle | None = None,
         occupation_tolerance: float = 1e-8,
-    ) -> Array:
-        """Restricted closed-shell MP2 local pair gauge without global rescaling."""
-        cached = getattr(molecule, "pt2_local", None)
-        if cached is not None:
-            cached_arr = jnp.asarray(cached)
-            return jnp.nan_to_num(cached_arr, nan=0.0, posinf=0.0, neginf=0.0)
-
+        cached_local: Array | None = None,
+    ) -> tuple[Array, Array]:
+        """Restricted closed-shell MP2 local pair gauge and canonical total energy."""
+        del features
         if getattr(molecule, "rep_tensor", None) is None:
             raise AttributeError("Molecule-like object must define rep_tensor.")
         if getattr(molecule, "mo_coeff", None) is None:
@@ -182,10 +185,6 @@ class NeuralXCProjectionMixin:
             raise AttributeError("Molecule-like object must define ao.")
         if getattr(molecule, "grid", None) is None:
             raise AttributeError("Molecule-like object must define grid.weights.")
-
-        if features is None:
-            features = restricted_grid_features(molecule)
-        del features
 
         rep_tensor = jnp.asarray(molecule.rep_tensor)
         ao = jnp.asarray(molecule.ao)
@@ -238,26 +237,50 @@ class NeuralXCProjectionMixin:
         direct = eri_ovov
         exchange = jnp.transpose(eri_ovov, (0, 3, 2, 1))
         pair_weights = (2.0 * direct - exchange) / denom
-        rho_o = jnp.einsum("rp,pi->ri", ao, orbo, precision=Precision.HIGHEST)
-        rho_v = jnp.einsum("rp,pa->ra", ao, orbv, precision=Precision.HIGHEST)
-        rho_ov = jnp.einsum("ri,ra->ria", rho_o, rho_v, precision=Precision.HIGHEST)
-        pair_potential = jnp.einsum(
-            "gp,gq,pqrs,rj,sb->gjb",
-            ao,
-            ao,
-            rep_tensor,
-            orbo,
-            orbv,
-            precision=Precision.HIGHEST,
-        )
-        local_energy = jnp.einsum(
-            "ria,rjb,iajb->r",
-            rho_ov,
-            pair_potential,
-            pair_weights,
-            precision=Precision.HIGHEST,
-        )
+        total_energy = jnp.sum(direct * pair_weights)
+        if cached_local is None:
+            rho_o = jnp.einsum("rp,pi->ri", ao, orbo, precision=Precision.HIGHEST)
+            rho_v = jnp.einsum("rp,pa->ra", ao, orbv, precision=Precision.HIGHEST)
+            rho_ov = jnp.einsum("ri,ra->ria", rho_o, rho_v, precision=Precision.HIGHEST)
+            pair_potential = jnp.einsum(
+                "gp,gq,pqrs,rj,sb->gjb",
+                ao,
+                ao,
+                rep_tensor,
+                orbo,
+                orbv,
+                precision=Precision.HIGHEST,
+            )
+            local_energy = jnp.einsum(
+                "ria,rjb,iajb->r",
+                rho_ov,
+                pair_potential,
+                pair_weights,
+                precision=Precision.HIGHEST,
+            )
+        else:
+            local_energy = jnp.asarray(cached_local)
         local_energy = jnp.nan_to_num(local_energy, nan=0.0, posinf=0.0, neginf=0.0)
+        total_energy = jnp.nan_to_num(total_energy, nan=0.0, posinf=0.0, neginf=0.0)
+        return local_energy, total_energy
+
+    def _local_exact_pt2_grid_contribution(
+        self,
+        molecule: Any,
+        *,
+        features: RestrictedFeatureBundle | None = None,
+        occupation_tolerance: float = 1e-8,
+    ) -> Array:
+        """Restricted closed-shell MP2 local pair gauge without global rescaling."""
+        cached = getattr(molecule, "pt2_local", None)
+        if cached is not None:
+            cached_arr = jnp.asarray(cached)
+            return jnp.nan_to_num(cached_arr, nan=0.0, posinf=0.0, neginf=0.0)
+        local_energy, _ = self._restricted_mp2_projection_components(
+            molecule,
+            features=features,
+            occupation_tolerance=occupation_tolerance,
+        )
         return local_energy
 
     def _legacy_projected_pt2_grid_contribution(
@@ -270,54 +293,13 @@ class NeuralXCProjectionMixin:
         if getattr(molecule, "grid", None) is None:
             raise AttributeError("Molecule-like object must define grid.weights.")
         weights = jnp.asarray(molecule.grid.weights)
-        projected = self._local_exact_pt2_grid_contribution(
+        cached = getattr(molecule, "pt2_local", None)
+        projected, total_energy = self._restricted_mp2_projection_components(
             molecule,
             features=features,
             occupation_tolerance=occupation_tolerance,
+            cached_local=None if cached is None else jnp.asarray(cached),
         )
-        rep_tensor = jnp.asarray(molecule.rep_tensor)
-        mo_coeff = jnp.asarray(molecule.mo_coeff)
-        mo_occ = jnp.asarray(molecule.mo_occ)
-        mo_energy = jnp.asarray(molecule.mo_energy)
-        if mo_coeff.ndim == 3:
-            mo_coeff = mo_coeff[0]
-        if mo_occ.ndim == 2:
-            mo_occ = mo_occ[0]
-        if mo_energy.ndim == 2:
-            mo_energy = mo_energy[0]
-        nocc = getattr(molecule, "nocc", None)
-        if nocc is None:
-            nocc = int(jnp.count_nonzero(mo_occ > occupation_tolerance))
-        else:
-            nocc = int(nocc)
-        orbo = mo_coeff[:, :nocc]
-        orbv = mo_coeff[:, nocc:]
-        eps_occ = mo_energy[:nocc]
-        eps_vir = mo_energy[nocc:]
-        eri_ovov = getattr(molecule, "eri_ovov", None)
-        if eri_ovov is None:
-            eri_ovov = jnp.einsum(
-                "pqrs,pi,qa,rj,sb->iajb",
-                rep_tensor,
-                orbo,
-                orbv,
-                orbo,
-                orbv,
-                precision=Precision.HIGHEST,
-            )
-        else:
-            eri_ovov = jnp.asarray(eri_ovov)
-        denom = (
-            eps_occ[:, None, None, None]
-            + eps_occ[None, None, :, None]
-            - eps_vir[None, :, None, None]
-            - eps_vir[None, None, None, :]
-        )
-        denom = jnp.where(jnp.abs(denom) > self.density_floor, denom, -self.density_floor)
-        direct = eri_ovov
-        exchange = jnp.transpose(eri_ovov, (0, 3, 2, 1))
-        pair_weights = (2.0 * direct - exchange) / denom
-        total_energy = jnp.sum(direct * pair_weights)
         projected_energy = jnp.tensordot(weights, projected, axes=(0, 0))
         scale = jnp.where(
             jnp.abs(projected_energy) > self.density_floor,
@@ -423,6 +405,28 @@ class NeuralXCProjectionMixin:
         - graddft_coeff_basis_hf_pt2_heads:
           [c_1 e_1, ..., c_n e_n, fpt2 e_c^PT2, fx e_x^HF]
         """
+        _, coefficients, basis = self._channel_coefficients_and_basis(
+            params,
+            molecule,
+            features=features,
+            semilocal_energy_density=semilocal_energy_density,
+            hf_energy_density=hf_energy_density,
+            hf_spin_energy_density=hf_spin_energy_density,
+            pt2_energy_density=pt2_energy_density,
+        )
+        return self._assemble_channel_contributions(coefficients, basis)
+
+    def _channel_coefficients_and_basis(
+        self,
+        params: PyTree,
+        molecule: Any,
+        *,
+        features: RestrictedFeatureBundle | None = None,
+        semilocal_energy_density: Array | None = None,
+        hf_energy_density: Array | None = None,
+        hf_spin_energy_density: tuple[Array, Array] | None = None,
+        pt2_energy_density: Array | None = None,
+    ) -> tuple[RestrictedFeatureBundle, Array, Array]:
         if features is None:
             features = restricted_grid_features(molecule)
         semilocal_channels = self.semilocal_energy_density_channels(features)
@@ -437,9 +441,15 @@ class NeuralXCProjectionMixin:
                 features=features,
             )
             hf_spin_inputs: tuple[Array, Array] | None = (hf_projected_a, hf_projected_b)
+            coefficient_molecule: Any | None = molecule
         else:
             hf_projected = hf_energy_density
-            hf_spin_inputs = hf_spin_energy_density
+            if hf_spin_energy_density is None:
+                hf_spin_inputs = (hf_projected, hf_projected)
+                coefficient_molecule = None
+            else:
+                hf_spin_inputs = hf_spin_energy_density
+                coefficient_molecule = molecule
         if pt2_energy_density is None and self.include_pt2_channel:
             pt2_energy_density = self.projected_pt2_grid_contribution(
                 molecule,
@@ -448,7 +458,7 @@ class NeuralXCProjectionMixin:
         coefficients = self.channel_coefficients(
             params,
             features,
-            molecule=molecule,
+            molecule=coefficient_molecule,
             semilocal_energy_density=semilocal_total,
             hf_energy_density=hf_projected,
             pt2_energy_density=pt2_energy_density,
@@ -468,7 +478,7 @@ class NeuralXCProjectionMixin:
                 "Model output_dim must match basis channels "
                 f"(got {coefficients.shape[-1]}, expected {basis.shape[-1]})."
             )
-        return self._assemble_channel_contributions(coefficients, basis)
+        return features, coefficients, basis
 
     def effective_exchange_fraction(
         self,
@@ -477,28 +487,13 @@ class NeuralXCProjectionMixin:
         *,
         features: RestrictedFeatureBundle | None = None,
     ) -> Array:
-        if features is None:
-            features = restricted_grid_features(molecule)
-        weights = jnp.asarray(molecule.grid.weights)
-        rho = jnp.maximum(features.rho, self.density_floor)
-        semilocal = self.semilocal_energy_density(features)
-        hf_projected, hf_projected_a, hf_projected_b = self.projected_hf_grid_contribution_components(
+        features, coefficients, _ = self._channel_coefficients_and_basis(
+            params,
             molecule,
             features=features,
         )
-        coefficients = self.channel_coefficients(
-            params,
-            features,
-            molecule=molecule,
-            semilocal_energy_density=semilocal,
-            hf_energy_density=hf_projected,
-            pt2_energy_density=(
-                self.projected_pt2_grid_contribution(molecule, features=features)
-                if self.include_pt2_channel
-                else None
-            ),
-            hf_spin_energy_density=(hf_projected_a, hf_projected_b),
-        )
+        weights = jnp.asarray(molecule.grid.weights)
+        rho = jnp.maximum(features.rho, self.density_floor)
         hf_field = self._local_hf_fraction_from_coefficients(coefficients)
         numerator = jnp.tensordot(weights, rho * hf_field, axes=(0, 0))
         denominator = jnp.tensordot(weights, rho, axes=(0, 0))
@@ -541,14 +536,93 @@ class NeuralXCProjectionMixin:
         return jnp.tensordot(jnp.asarray(weights), local, axes=(0, 0))
 
     def energy_from_molecule(self, params: PyTree, molecule: Any) -> Array:
-        features = restricted_grid_features(molecule)
-        local_xc = self.grid_contribution(
+        energy, _ = self._scf_xc_energy_and_alpha_from_molecule(params, molecule)
+        return energy
+
+    def _scf_xc_energy_and_alpha_from_molecule(
+        self,
+        params: PyTree,
+        molecule: Any,
+    ) -> tuple[Array, Array]:
+        features, coefficients, basis = self._channel_coefficients_and_basis(
             params,
             molecule,
-            features=features,
+            )
+        local_xc = jnp.sum(self._assemble_channel_contributions(coefficients, basis), axis=-1)
+        weights = jnp.asarray(molecule.grid.weights)
+        energy = jnp.tensordot(weights, local_xc, axes=(0, 0))
+        energy = jnp.nan_to_num(energy, nan=0.0, posinf=0.0, neginf=0.0)
+
+        hf_field = self._local_hf_fraction_from_coefficients(coefficients)
+        rho = jnp.maximum(features.rho, self.density_floor)
+        numerator = jnp.tensordot(weights, rho * hf_field, axes=(0, 0))
+        denominator = jnp.tensordot(weights, rho, axes=(0, 0))
+        alpha = numerator / jnp.maximum(denominator, self.density_floor)
+        alpha = jnp.nan_to_num(alpha, nan=0.0, posinf=1.0, neginf=0.0)
+        alpha = jnp.clip(alpha, 0.0, 1.0)
+        return energy, alpha
+
+    def scf_xc_energy_and_alpha_for_density(
+        self,
+        params: PyTree,
+        molecule: Any,
+        density: Array,
+    ) -> tuple[Array, Array]:
+        """Return SCF XC energy and effective HF fraction in one feature pass."""
+
+        energy, alpha = self._scf_xc_energy_and_alpha_from_molecule(
+            params,
+            self.scf_molecule_with_density(molecule, density),
         )
-        energy = jnp.tensordot(jnp.asarray(molecule.grid.weights), local_xc, axes=(0, 0))
-        return jnp.nan_to_num(energy, nan=0.0, posinf=0.0, neginf=0.0)
+        return energy, self._alpha_for_scf_fock(
+            alpha,
+            uses_explicit_hfx_fock=getattr(molecule, "hfx_nu", None) is not None,
+        )
+
+    def scf_xc_energy_for_density(
+        self,
+        params: PyTree,
+        molecule: Any,
+        density: Array,
+    ) -> Array:
+        """GradDFT-style SCF entrypoint: E_xc as a function of AO density."""
+
+        energy, _ = self.scf_xc_energy_and_alpha_for_density(
+            params,
+            molecule,
+            density,
+        )
+        return energy
+
+    def scf_exact_exchange_fraction(
+        self,
+        params: PyTree,
+        molecule: Any,
+        density: Array,
+    ) -> Array:
+        """Effective HF fraction paired with `scf_xc_energy_for_density`."""
+
+        _, alpha = self.scf_xc_energy_and_alpha_for_density(
+            params,
+            molecule,
+            density,
+        )
+        return alpha
+
+    def scf_extra_fock_for_density(
+        self,
+        params: PyTree,
+        molecule: Any,
+        density: Array,
+    ) -> Array:
+        """DM21-style explicit local-HFX contribution to the SCF Fock."""
+
+        if getattr(molecule, "hfx_nu", None) is None:
+            density_arr = jnp.asarray(density)
+            return jnp.zeros_like(density_arr)
+        molecule_iter = self.scf_molecule_with_density(molecule, density)
+        hfx_fock, _ = self._explicit_hfx_fock_from_molecule(params, molecule_iter)
+        return hfx_fock
 
     def energy_xc_only(self, params: PyTree, molecule: Any) -> Array:
         """GradDFT-compatible XC-only energy alias."""

@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 
-from td_graddft.jax_libxc import (
+from td_graddft.xc_backend.jax_libxc import (
     RestrictedFeatureBundle,
     eval_xc_energy_density,
 )

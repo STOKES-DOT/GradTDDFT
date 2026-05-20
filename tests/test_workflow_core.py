@@ -374,9 +374,12 @@ def test_train_neural_xc_propagates_gpu4pyscf_runtime_forward_backend(monkeypatc
             steps=0,
             training_mode="self_consistent",
             scf_runtime_forward_backend="gpu4pyscf_rks",
+            implicit_response_backend="gpu4pyscf_jk",
         ),
         SpectrumGridConfig(),
     )
 
     assert captured["train_step_config"].scf_runtime_forward_backend == "gpu4pyscf_rks"
     assert captured["eval_config"].scf_runtime_forward_backend == "gpu4pyscf_rks"
+    assert captured["train_step_config"].implicit_response_backend == "gpu4pyscf_jk"
+    assert captured["eval_config"].implicit_response_backend == "gpu4pyscf_jk"

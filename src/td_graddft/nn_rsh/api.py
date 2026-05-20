@@ -30,6 +30,7 @@ class RSH:
         ffn_expansion: int = 4,
         lambda_init: float = 5.0,
         dropout_rate: float = 0.0,
+        parameter_output_scale: float = 2.0,
         fallback_omega_values: Sequence[float] | None = None,
         hidden_dims: Sequence[int] | None = None,
     ) -> TrainableRSHFunctional:
@@ -72,6 +73,7 @@ class RSH:
             ffn_expansion=int(ffn_expansion),
             lambda_init=float(lambda_init),
             dropout_rate=float(dropout_rate),
+            parameter_output_scale=float(parameter_output_scale),
             template=template,
             fallback_omega_values=resolved_fallback_omegas,
             name=template.name,

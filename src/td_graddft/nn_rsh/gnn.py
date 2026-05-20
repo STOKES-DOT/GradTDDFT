@@ -8,6 +8,13 @@ from flax import linen as nn
 from jaxtyping import Array
 
 
+def _scaled_sigmoid_output(preactivation: Array, scale: float = 2.0) -> Array:
+    value = jnp.asarray(preactivation)
+    if float(scale) <= 0.0:
+        return value
+    return jnp.asarray(scale, dtype=value.dtype) * jax.nn.sigmoid(value)
+
+
 class DistanceGatedAttention(nn.Module):
     """Multi-head self-attention with a learnable pair-distance gate."""
 
@@ -115,6 +122,7 @@ class RSHGNNHead(nn.Module):
     lambda_init: float = 5.0
     dropout_rate: float = 0.0
     activation: Callable[[Array], Array] = nn.gelu
+    sigmoid_scale_factor: float = 2.0
 
     def _block_count(self) -> int:
         if self.num_layers is not None and self.num_interaction_blocks is not None:
@@ -173,7 +181,8 @@ class RSHGNNHead(nn.Module):
         for index, width in enumerate(self.global_hidden_dims):
             y = nn.Dense(int(width), name=f"global_mlp_{index}")(y)
             y = self.activation(y)
-        return nn.Dense(3, name="output")(y)
+        y = nn.Dense(3, name="output")(y)
+        return _scaled_sigmoid_output(y, self.sigmoid_scale_factor)
 
 
 __all__ = [

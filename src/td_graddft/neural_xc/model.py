@@ -7,31 +7,31 @@ import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from jax.lax import Precision
-from jax.scipy import special as jsp_special
 from jaxtyping import Array, PRNGKeyArray, PyTree
 
 from ..features import (
     restricted_feature_bundle_from_response_variables,
     restricted_grid_features,
     restricted_grid_features_with_gradients,
-    restricted_grid_response_variables,
+    restricted_transition_response_features,
 )
-from ..jax_libxc import RestrictedFeatureBundle, _LDA_X_LOCAL_PREFAC
+from ..xc_backend.jax_libxc import RestrictedFeatureBundle
 from .components import (
     SemilocalEnergyDensityFn,
     SemilocalEnergyDensityModule,
     legacy_semilocal_module as _legacy_semilocal_module,
-    normalize_semilocal_xc_names,
 )
 from .defaults import (
+    DEFAULT_INPUT_FEATURE_MODE,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
+    resolve_coefficient_prior_values,
 )
 from .inputs import (
     assemble_basis_channels,
     build_coefficient_inputs,
     resolve_canonical_hfx_feature_channels,
+    _strict_pt2_transition_feature_from_restricted_orbitals,
 )
-from .networks import normalize_hidden_dims
 from .projection import NeuralXCProjectionMixin
 from .binding import NeuralXCBindingMixin
 
@@ -188,7 +188,39 @@ class AssemblyMixin:
             molecule=molecule,
             hf_spin_energy_density=hf_spin_inputs,
         )
-        return self.init(rng, inputs)
+        params = self.init(rng, inputs)
+        if self.non_hf_module is not None or self.semilocal_energy_density_fn is not None:
+            return params
+        prior = resolve_coefficient_prior_values(self.semilocal_xc)
+        if prior is None:
+            return params
+        n_semilocal = int(self.resolved_non_hf_module().n_channels)
+        expected = n_semilocal + 1 + int(bool(self.include_pt2_channel))
+        if len(prior) != expected or "params" not in params:
+            return params
+        scale = float(getattr(self.model, "sigmoid_scale_factor", 0.0))
+        target = jnp.asarray(prior)
+        if scale > 0.0:
+            head_start = n_semilocal
+            target = target.at[head_start:].set(target[head_start:] * scale)
+            clipped = jnp.clip(target / scale, 1e-6, 1.0 - 1e-6)
+            raw_bias = scale * jnp.log(clipped / (1.0 - clipped))
+        else:
+            raw_bias = target
+        variables = params["params"]
+        head_name = "HeadDense"
+        if head_name not in variables:
+            head_name = f"Dense_{len(tuple(getattr(self.model, 'hidden_dims', ())))}"
+        if head_name not in variables:
+            return params
+        head = variables[head_name]
+        variables = dict(variables)
+        variables[head_name] = {
+            **head,
+            "kernel": jnp.zeros_like(head["kernel"]),
+            "bias": raw_bias.astype(head["bias"].dtype),
+        }
+        return {**params, "params": variables}
 
     def compute_densities(
         self,
@@ -515,8 +547,7 @@ class ResponseMixin:
         self,
         features: RestrictedFeatureBundle,
         total_gradient: Array | None = None,
-        laplacian: Array | None = None,
-    ) -> tuple[Array, Array, Array, Array | None, Array]:
+    ) -> tuple[Array, Array, Array, Array]:
         response_floor = self._effective_response_density_floor()
         rho0 = jnp.maximum(features.rho, response_floor)
         tau0 = jnp.maximum(features.tau_a + features.tau_b, 0.0)
@@ -532,7 +563,7 @@ class ResponseMixin:
             [rho0[..., None], grad0, tau0[..., None]],
             axis=-1,
         )
-        return rho0, grad0, tau0, None, variables
+        return rho0, grad0, tau0, variables
 
     def _strict_response_payload(
         self,
@@ -542,13 +573,10 @@ class ResponseMixin:
         *,
         pt2_projected: Array | None = None,
         hf_spin_energy_density: tuple[Array, Array] | None = None,
-        laplacian: Array | None = None,
-        exchange_anchor: Array | None = None,
-    ) -> tuple[Array, Array, Array, Array, Array, Array | None, Array | None]:
-        rho0, _, _, _, response_variables = self._response_variables(
+    ) -> tuple[Array, Array, Array, Array, Array]:
+        rho0, _, _, response_variables = self._response_variables(
             features,
             total_gradient,
-            laplacian=laplacian,
         )
         if hf_spin_energy_density is None:
             hf_feature_a = hf_projected
@@ -567,17 +595,7 @@ class ResponseMixin:
             hf_feature_a,
             hf_feature_b,
             pt2_feature,
-            None,
-            None,
         )
-
-    def _strict_aux_fields(
-        self,
-        molecule: Any | None,
-        features: RestrictedFeatureBundle,
-    ) -> tuple[Array | None, Array | None]:
-        del molecule, features
-        return None, None
 
     def _semilocal_point_local_energy_from_variables(self, variables: Array) -> Array:
         response_floor = self._effective_response_density_floor()
@@ -604,11 +622,10 @@ class ResponseMixin:
         hf_point: Array,
         hf_point_a: Array,
         hf_point_b: Array,
-        exchange_anchor_point: Array | None = None,
         *,
         pt2_point: Array | None = None,
-        response_hf_mode: Literal["nonlocal_exchange_only", "local_projected"] | None = None,
-        response_pt2_mode: Literal["nonlocal_correlation_only", "local_projected"] | None = None,
+        response_hf_mode: Literal["approx", "strict"] | None = None,
+        response_pt2_mode: Literal["approx", "strict"] | None = None,
     ) -> Array:
         hf_mode = self.response_hf_mode if response_hf_mode is None else response_hf_mode
         pt2_mode = self.response_pt2_mode if response_pt2_mode is None else response_pt2_mode
@@ -616,7 +633,6 @@ class ResponseMixin:
         rho_point = jnp.maximum(variables[0], response_floor)
         grad_point = variables[1:4]
         tau_point = jnp.maximum(variables[4], 0.0)
-        lapl_point = variables[5] if variables.shape[0] > 5 else None
         point_features = restricted_feature_bundle_from_response_variables(
             rho_point,
             grad_point,
@@ -629,35 +645,28 @@ class ResponseMixin:
             semilocal_channels,
         )
         semilocal_total = jnp.sum(semilocal_channels, axis=-1)
-        if hf_mode == "local_projected":
-            hf_input = hf_point
-            hf_basis = hf_point
-            hf_spin_inputs: tuple[Array, Array] | None = (hf_point_a, hf_point_b)
-        elif hf_mode == "nonlocal_exchange_only":
+        if hf_mode in {"approx", "strict"}:
             hf_input = jax.lax.stop_gradient(hf_point)
             hf_basis = jnp.zeros_like(hf_input)
-            hf_spin_inputs = (
+            hf_spin_inputs: tuple[Array, Array] | None = (
                 jax.lax.stop_gradient(hf_point_a),
                 jax.lax.stop_gradient(hf_point_b),
             )
         else:
             raise ValueError(
                 f"Unsupported response_hf_mode={hf_mode!r}. "
-                "Expected 'nonlocal_exchange_only' or 'local_projected'."
+                "Expected 'strict' or 'approx'."
             )
         if pt2_point is None:
             pt2_point = jnp.zeros_like(hf_point)
         if self.include_pt2_channel:
-            if pt2_mode == "local_projected":
-                pt2_input = pt2_point
-                pt2_basis = pt2_point
-            elif pt2_mode == "nonlocal_correlation_only":
+            if pt2_mode in {"approx", "strict"}:
                 pt2_input = jax.lax.stop_gradient(pt2_point)
                 pt2_basis = jnp.zeros_like(pt2_input)
             else:
                 raise ValueError(
                     f"Unsupported response_pt2_mode={pt2_mode!r}. "
-                    "Expected 'nonlocal_correlation_only' or 'local_projected'."
+                    "Expected 'approx' or 'strict'."
                 )
         else:
             pt2_input = None
@@ -683,6 +692,448 @@ class ResponseMixin:
         channels = self._assemble_channel_contributions(coefficients, basis)
         return jnp.sum(channels, axis=-1)
 
+    def _hf_channel_point_energy_from_response_variables(
+        self,
+        params: PyTree,
+        variables: Array,
+        *,
+        pt2_point: Array | None = None,
+    ) -> Array:
+        response_floor = self._effective_response_density_floor()
+        rho_point = jnp.maximum(variables[0], response_floor)
+        grad_point = variables[1:4]
+        tau_point = jnp.maximum(variables[4], 0.0)
+        point_features = restricted_feature_bundle_from_response_variables(
+            rho_point,
+            grad_point,
+            tau_point,
+            density_floor=response_floor,
+        )
+        semilocal_channels = self.semilocal_energy_density_channels(point_features)
+        semilocal_total = jnp.sum(semilocal_channels, axis=-1)
+
+        offset = 5
+        if self.input_feature_mode == "canonical":
+            n_hfx = max(int(self.hfx_channels), 1)
+            hfx_a = variables[offset : offset + n_hfx]
+            hfx_b = variables[offset + n_hfx : offset + 2 * n_hfx]
+            hf_total = hfx_a[0] + hfx_b[0]
+            hf_spin_inputs: tuple[Array, Array] | None = (hfx_a, hfx_b)
+        elif self.hf_input_mode == "total_only":
+            hf_total = variables[offset]
+            hf_spin_inputs = None
+        elif self.hf_input_mode == "spin_resolved":
+            hfx_a = variables[offset]
+            hfx_b = variables[offset + 1]
+            hf_total = hfx_a + hfx_b
+            hf_spin_inputs = (hfx_a, hfx_b)
+        else:
+            raise ValueError(
+                f"Unsupported hf_input_mode={self.hf_input_mode!r}. "
+                "Expected 'total_only' or 'spin_resolved'."
+            )
+
+        pt2_input = None
+        if self.include_pt2_channel:
+            if pt2_point is None:
+                pt2_input = jnp.zeros_like(hf_total)
+            else:
+                pt2_input = jax.lax.stop_gradient(pt2_point)
+        coefficients = self.channel_coefficients(
+            params,
+            point_features,
+            semilocal_energy_density=semilocal_total,
+            hf_energy_density=hf_total,
+            pt2_energy_density=pt2_input,
+            hf_spin_energy_density=hf_spin_inputs,
+        )
+        return self._local_hf_fraction_from_coefficients(coefficients) * hf_total
+
+    def _strict_hf_nonlocal_response_matrices(
+        self,
+        params: PyTree,
+        molecule: Any,
+        features: RestrictedFeatureBundle,
+        total_gradient: Array,
+        hf_projected: Array,
+        *,
+        hf_spin_energy_density: tuple[Array, Array],
+        pt2_projected: Array | None = None,
+        occupation_tolerance: float = 1e-8,
+    ) -> tuple[Array, Array]:
+        response_floor = self._effective_response_density_floor()
+        rho0, _, _, response_variables = self._response_variables(
+            features,
+            total_gradient,
+        )
+        active = rho0 > response_floor
+        hfx_a_raw, hfx_b_raw = hf_spin_energy_density
+        hfx_a_raw = jnp.asarray(hfx_a_raw)
+        hfx_b_raw = jnp.asarray(hfx_b_raw)
+        if hfx_a_raw.ndim == features.rho.ndim:
+            hfx_a = hfx_a_raw[:, None]
+        else:
+            hfx_a = hfx_a_raw
+        if hfx_b_raw.ndim == features.rho.ndim:
+            hfx_b = hfx_b_raw[:, None]
+        else:
+            hfx_b = hfx_b_raw
+
+        if self.input_feature_mode == "canonical":
+            n_hfx = max(int(self.hfx_channels), 1)
+            if hfx_a.shape[-1] < n_hfx or hfx_b.shape[-1] < n_hfx:
+                raise ValueError(
+                    "Strict HF response requires canonical HFX feature channels "
+                    f"with at least {n_hfx} omega values."
+                )
+            hfx_a_vars = hfx_a[:, :n_hfx]
+            hfx_b_vars = hfx_b[:, :n_hfx]
+            point_variables = jnp.concatenate(
+                [response_variables, hfx_a_vars, hfx_b_vars],
+                axis=-1,
+            )
+            hvar_kind = "canonical"
+        elif self.hf_input_mode == "total_only":
+            point_variables = jnp.concatenate(
+                [response_variables, hf_projected[:, None]],
+                axis=-1,
+            )
+            hvar_kind = "total_only"
+            n_hfx = 1
+        else:
+            point_variables = jnp.concatenate(
+                [response_variables, hfx_a[:, :1], hfx_b[:, :1]],
+                axis=-1,
+            )
+            hvar_kind = "spin_resolved"
+            n_hfx = 1
+
+        nu_cache = getattr(molecule, "hfx_nu", None)
+        if nu_cache is None:
+            raise AttributeError("Strict HF response requires molecule.hfx_nu.")
+        nu = jnp.asarray(nu_cache, dtype=point_variables.dtype)
+        if nu.ndim != 4:
+            raise ValueError(
+                "molecule.hfx_nu must have shape (n_omega, ngrids, nao, nao), "
+                f"got {nu.shape}."
+            )
+        if nu.shape[0] < n_hfx:
+            raise ValueError(
+                "molecule.hfx_nu omega axis is shorter than the HFX response "
+                f"feature count ({nu.shape[0]} vs {n_hfx})."
+            )
+        nu = nu[:n_hfx]
+
+        pt2_values = (
+            jnp.zeros_like(hf_projected)
+            if pt2_projected is None
+            else jnp.asarray(pt2_projected, dtype=point_variables.dtype)
+        )
+        point_grad_fn = jax.grad(
+            self._hf_channel_point_energy_from_response_variables,
+            argnums=1,
+        )
+        point_hessian_fn = jax.hessian(
+            self._hf_channel_point_energy_from_response_variables,
+            argnums=1,
+        )
+
+        def point_grad_hessian(variables: Array, pt2_point: Array) -> tuple[Array, Array]:
+            grad = point_grad_fn(params, variables, pt2_point=pt2_point)
+            hessian = point_hessian_fn(params, variables, pt2_point=pt2_point)
+            return grad, hessian
+
+        gradients, hessians = jax.vmap(point_grad_hessian)(point_variables, pt2_values)
+        gradients = jnp.nan_to_num(gradients, nan=0.0, posinf=0.0, neginf=0.0)
+        hessians = jnp.nan_to_num(hessians, nan=0.0, posinf=0.0, neginf=0.0)
+        gradients = self._maybe_clip_response(gradients)
+        hessians = self._maybe_clip_response(hessians)
+        gradients = gradients * active[:, None].astype(gradients.dtype)
+        hessians = hessians * active[:, None, None].astype(hessians.dtype)
+
+        mo_coeff = jnp.asarray(molecule.mo_coeff, dtype=point_variables.dtype)
+        mo_occ = jnp.asarray(molecule.mo_occ)
+        if mo_coeff.ndim == 3:
+            mo_coeff = mo_coeff[0]
+            mo_occ = mo_occ[0]
+        nocc = getattr(molecule, "nocc", None)
+        if nocc is None:
+            nocc = int(jnp.count_nonzero(mo_occ > occupation_tolerance))
+        else:
+            nocc = int(nocc)
+        nvir = int(mo_coeff.shape[1]) - nocc
+        orbo = mo_coeff[:, :nocc]
+        orbv = mo_coeff[:, nocc:]
+        ao = jnp.asarray(molecule.ao, dtype=point_variables.dtype)
+        rho_o = jnp.einsum("gp,pi->gi", ao, orbo, precision=Precision.HIGHEST)
+        rho_v = jnp.einsum("gp,pa->ga", ao, orbv, precision=Precision.HIGHEST)
+
+        dm_spin = self._restricted_spin_density_blocks(molecule)
+        dm_spin = jnp.asarray(dm_spin, dtype=point_variables.dtype)
+        e_spin = jnp.einsum("gp,spq->sgq", ao, dm_spin, precision=Precision.HIGHEST)
+        v_nu_e = jnp.einsum(
+            "pa,wgpq,sgq->swga",
+            orbv,
+            nu,
+            e_spin,
+            precision=Precision.HIGHEST,
+        )
+        hprime_spin = -0.5 * jnp.einsum(
+            "gi,swga->swgia",
+            rho_o,
+            v_nu_e,
+            precision=Precision.HIGHEST,
+        )
+
+        if hvar_kind == "canonical":
+            hprime_vars = jnp.concatenate([hprime_spin[0], hprime_spin[1]], axis=0)
+            grad_h = gradients[:, 5 : 5 + 2 * n_hfx]
+        elif hvar_kind == "total_only":
+            hprime_vars = (hprime_spin[0, 0] + hprime_spin[1, 0])[None, ...]
+            grad_h = gradients[:, 5:6]
+        else:
+            hprime_vars = jnp.stack([hprime_spin[0, 0], hprime_spin[1, 0]], axis=0)
+            grad_h = gradients[:, 5:7]
+
+        semilocal_response_features = restricted_transition_response_features(
+            molecule,
+            feature_kind="MGGA",
+            occupation_tolerance=occupation_tolerance,
+        )
+        response_features = jnp.concatenate(
+            [semilocal_response_features, hprime_vars],
+            axis=0,
+        )
+        weighted_hessian = (
+            hessians.transpose(1, 2, 0)
+            * jnp.asarray(molecule.grid.weights, dtype=hessians.dtype)[None, None, :]
+        )
+        common_matrix = 2.0 * jnp.einsum(
+            "xyr,xria,yrjb->iajb",
+            weighted_hessian,
+            response_features,
+            response_features,
+            precision=Precision.HIGHEST,
+        )
+
+        nu_vv = jnp.einsum(
+            "pa,wgpq,qb->wgab",
+            orbv,
+            nu,
+            orbv,
+            precision=Precision.HIGHEST,
+        )
+        nu_vo = jnp.einsum(
+            "pa,wgpq,qj->wgaj",
+            orbv,
+            nu,
+            orbo,
+            precision=Precision.HIGHEST,
+        )
+        weights = jnp.asarray(molecule.grid.weights, dtype=point_variables.dtype)
+
+        def second_matrix(
+            grad_values: Array,
+            omega_index: int,
+            spin_weight: float,
+        ) -> tuple[Array, Array]:
+            weighted_grad = weights * grad_values * spin_weight
+            matrix_a = -jnp.einsum(
+                "g,gi,gj,gab->iajb",
+                weighted_grad,
+                rho_o,
+                rho_o,
+                nu_vv[omega_index],
+                precision=Precision.HIGHEST,
+            )
+            matrix_b = -jnp.einsum(
+                "g,gi,gb,gaj->iajb",
+                weighted_grad,
+                rho_o,
+                rho_v,
+                nu_vo[omega_index],
+                precision=Precision.HIGHEST,
+            )
+            return matrix_a, matrix_b
+
+        second_a = jnp.zeros((nocc, nvir, nocc, nvir), dtype=point_variables.dtype)
+        second_b = jnp.zeros_like(second_a)
+        if hvar_kind == "canonical":
+            for idx in range(n_hfx):
+                matrix_a, matrix_b = second_matrix(grad_h[:, idx], idx, 0.5)
+                second_a = second_a + matrix_a
+                second_b = second_b + matrix_b
+            for idx in range(n_hfx):
+                matrix_a, matrix_b = second_matrix(grad_h[:, n_hfx + idx], idx, 0.5)
+                second_a = second_a + matrix_a
+                second_b = second_b + matrix_b
+        elif hvar_kind == "total_only":
+            matrix_a, matrix_b = second_matrix(grad_h[:, 0], 0, 1.0)
+            second_a = second_a + matrix_a
+            second_b = second_b + matrix_b
+        else:
+            matrix_a, matrix_b = second_matrix(grad_h[:, 0], 0, 0.5)
+            second_a = second_a + matrix_a
+            second_b = second_b + matrix_b
+            matrix_a, matrix_b = second_matrix(grad_h[:, 1], 0, 0.5)
+            second_a = second_a + matrix_a
+            second_b = second_b + matrix_b
+
+        matrix_a = common_matrix + second_a
+        matrix_b = common_matrix + second_b
+        matrix_a = jnp.nan_to_num(matrix_a, nan=0.0, posinf=0.0, neginf=0.0)
+        matrix_b = jnp.nan_to_num(matrix_b, nan=0.0, posinf=0.0, neginf=0.0)
+        return (
+            matrix_a.reshape(int(nocc * nvir), int(nocc * nvir)),
+            matrix_b.reshape(int(nocc * nvir), int(nocc * nvir)),
+        )
+
+    def _total_point_local_energy_from_semilocal_pt2_variables(
+        self,
+        params: PyTree,
+        variables: Array,
+        hf_point: Array,
+        hf_point_a: Array,
+        hf_point_b: Array,
+    ) -> Array:
+        response_floor = self._effective_response_density_floor()
+        rho_point = jnp.maximum(variables[0], response_floor)
+        grad_point = variables[1:4]
+        tau_point = jnp.maximum(variables[4], 0.0)
+        pt2_point = variables[5]
+        point_features = restricted_feature_bundle_from_response_variables(
+            rho_point,
+            grad_point,
+            tau_point,
+            density_floor=response_floor,
+        )
+        semilocal_channels = self.semilocal_energy_density_channels(point_features)
+        semilocal_local_channels = self._semilocal_local_contribution_channels(
+            point_features,
+            semilocal_channels,
+        )
+        semilocal_total = jnp.sum(semilocal_channels, axis=-1)
+        coefficients = self.channel_coefficients(
+            params,
+            point_features,
+            semilocal_energy_density=semilocal_total,
+            hf_energy_density=jax.lax.stop_gradient(hf_point),
+            pt2_energy_density=pt2_point,
+            hf_spin_energy_density=(
+                jax.lax.stop_gradient(hf_point_a),
+                jax.lax.stop_gradient(hf_point_b),
+            ),
+        )
+        basis = self._assemble_basis_channels(
+            semilocal_local_channels,
+            hf_projected=jnp.zeros_like(hf_point),
+            pt2_projected=pt2_point,
+        )
+        channels = self._assemble_channel_contributions(coefficients, basis)
+        return jnp.sum(channels, axis=-1)
+
+    def _strict_pt2_nonlocal_response_matrix(
+        self,
+        params: PyTree,
+        molecule: Any,
+        features: RestrictedFeatureBundle,
+        total_gradient: Array,
+        hf_projected: Array,
+        pt2_projected: Array,
+        *,
+        hf_spin_energy_density: tuple[Array, Array],
+        occupation_tolerance: float = 1e-8,
+    ) -> Array:
+        if not self.include_pt2_channel or self.response_pt2_mode != "strict":
+            mo_coeff = jnp.asarray(molecule.mo_coeff)
+            mo_occ = jnp.asarray(molecule.mo_occ)
+            if mo_coeff.ndim == 3:
+                mo_coeff = mo_coeff[0]
+                mo_occ = mo_occ[0]
+            nocc = getattr(molecule, "nocc", None)
+            if nocc is None:
+                nocc = int(jnp.count_nonzero(mo_occ > occupation_tolerance))
+            nvir = int(mo_coeff.shape[1]) - int(nocc)
+            return jnp.zeros((int(nocc * nvir), int(nocc * nvir)), dtype=features.rho.dtype)
+
+        response_floor = self._effective_response_density_floor()
+        rho0 = jnp.maximum(features.rho, response_floor)
+        tau0 = jnp.maximum(features.tau_a + features.tau_b, 0.0)
+        response_variables = jnp.concatenate(
+            [rho0[..., None], jnp.asarray(total_gradient), tau0[..., None], pt2_projected[..., None]],
+            axis=-1,
+        )
+        active = rho0 > response_floor
+        point_hessian_fn = jax.hessian(
+            self._total_point_local_energy_from_semilocal_pt2_variables,
+            argnums=1,
+        )
+        hf_feature_a, hf_feature_b = hf_spin_energy_density
+
+        def point_tensor(
+            variables: Array,
+            hf_point: Array,
+            hf_point_a: Array,
+            hf_point_b: Array,
+        ) -> Array:
+            return point_hessian_fn(
+                params,
+                variables,
+                hf_point,
+                hf_point_a,
+                hf_point_b,
+            )
+
+        tensor = jax.vmap(point_tensor)(
+            response_variables,
+            hf_projected,
+            hf_feature_a,
+            hf_feature_b,
+        )
+        tensor = jnp.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+        tensor = self._maybe_clip_response(tensor)
+        tensor = tensor * active[:, None, None].astype(tensor.dtype)
+        tensor = jnp.asarray(tensor).transpose(1, 2, 0)
+
+        semilocal_response_features = restricted_transition_response_features(
+            molecule,
+            feature_kind="MGGA",
+            occupation_tolerance=occupation_tolerance,
+        )
+        pt2_response_feature = _strict_pt2_transition_feature_from_restricted_orbitals(
+            molecule.ao,
+            molecule.mo_coeff,
+            molecule.mo_occ,
+            molecule.mo_energy,
+            rep_tensor=getattr(molecule, "rep_tensor", None),
+            eri_pair_matrix=getattr(molecule, "eri_pair_matrix", None),
+            df_factors=getattr(molecule, "df_factors", None),
+            nocc=getattr(molecule, "nocc", None),
+            occupation_tolerance=occupation_tolerance,
+            density_floor=self.density_floor,
+        )
+        response_features = jnp.concatenate(
+            [semilocal_response_features, pt2_response_feature[None, ...]],
+            axis=0,
+        )
+        mask = jnp.zeros((6, 6), dtype=tensor.dtype)
+        mask = mask.at[5, :].set(1.0)
+        mask = mask.at[:, 5].set(1.0)
+        weighted_tensor = (
+            tensor
+            * mask[:, :, None]
+            * jnp.asarray(molecule.grid.weights, dtype=tensor.dtype)[None, None, :]
+        )
+        matrix = 2.0 * jnp.einsum(
+            "xyr,xria,yrjb->iajb",
+            weighted_tensor,
+            response_features,
+            response_features,
+            precision=Precision.HIGHEST,
+        )
+        nocc, nvir = matrix.shape[:2]
+        return matrix.reshape(int(nocc * nvir), int(nocc * nvir))
+
     def _strict_total_potential_components(
         self,
         params: PyTree,
@@ -692,12 +1143,10 @@ class ResponseMixin:
         *,
         pt2_projected: Array | None = None,
         hf_spin_energy_density: tuple[Array, Array] | None = None,
-        response_hf_mode: Literal["nonlocal_exchange_only", "local_projected"] | None = None,
-        response_pt2_mode: Literal["nonlocal_correlation_only", "local_projected"] | None = None,
-        reference_coefficient_inputs: Array | None = None,
-        return_hf_field: bool = False,
-        strict_payload: tuple[Array, Array, Array, Array, Array, Array | None, Array | None] | None = None,
-    ) -> tuple[Array, Array, Array, Array] | tuple[Array, Array, Array, Array, Array]:
+        response_hf_mode: Literal["approx", "strict"] | None = None,
+        response_pt2_mode: Literal["approx", "strict"] | None = None,
+        strict_payload: tuple[Array, Array, Array, Array, Array] | None = None,
+    ) -> tuple[Array, Array, Array, Array]:
         if strict_payload is None:
             strict_payload = self._strict_response_payload(
                 features,
@@ -706,18 +1155,7 @@ class ResponseMixin:
                 pt2_projected=pt2_projected,
                 hf_spin_energy_density=hf_spin_energy_density,
             )
-        response_variables, active, hf_feature_a, hf_feature_b, pt2_feature, _, exchange_anchor = strict_payload
-        hf_field = None
-        if return_hf_field:
-            if reference_coefficient_inputs is None:
-                raise ValueError(
-                    "reference_coefficient_inputs must be provided when return_hf_field=True."
-                )
-            reference_coefficients = self.channel_coefficients_from_inputs(
-                params,
-                reference_coefficient_inputs,
-            )
-            hf_field = self._local_hf_fraction_from_coefficients(reference_coefficients)
+        response_variables, active, hf_feature_a, hf_feature_b, pt2_feature = strict_payload
         point_gradient_fn = jax.grad(
             self._total_point_local_energy_from_variables,
             argnums=1,
@@ -728,7 +1166,6 @@ class ResponseMixin:
             hf_point: Array,
             hf_point_a: Array,
             hf_point_b: Array,
-            exchange_anchor_point: Array | None,
             pt2_point: Array,
         ) -> Array:
             return point_gradient_fn(
@@ -737,7 +1174,6 @@ class ResponseMixin:
                 hf_point,
                 hf_point_a,
                 hf_point_b,
-                exchange_anchor_point,
                 pt2_point=pt2_point,
                 response_hf_mode=response_hf_mode,
                 response_pt2_mode=response_pt2_mode,
@@ -748,11 +1184,6 @@ class ResponseMixin:
             hf_projected,
             hf_feature_a,
             hf_feature_b,
-            (
-                jnp.zeros_like(hf_projected)
-                if exchange_anchor is None
-                else exchange_anchor
-            ),
             pt2_feature,
         )
         gradients = jnp.nan_to_num(gradients, nan=0.0, posinf=0.0, neginf=0.0)
@@ -760,19 +1191,14 @@ class ResponseMixin:
         v_rho = jnp.where(active, gradients[:, 0], 0.0)
         v_grad = jnp.where(active[:, None], gradients[:, 1:4], 0.0)
         v_tau = jnp.where(active, gradients[:, 4], 0.0)
-        if gradients.shape[1] > 5:
-            v_lapl = jnp.where(active, gradients[:, 5], 0.0)
-        else:
-            v_lapl = jnp.zeros_like(v_rho)
-        if return_hf_field:
-            return v_rho, v_grad, v_tau, v_lapl, jnp.asarray(hf_field)
+        v_lapl = jnp.zeros_like(v_rho)
         return v_rho, v_grad, v_tau, v_lapl
 
     def _projected_semilocal_kernel(
         self,
         features: RestrictedFeatureBundle,
     ) -> Array:
-        rho0, _, _, _, response_variables = self._response_variables(features)
+        rho0, _, _, response_variables = self._response_variables(features)
         point_hessian = jax.vmap(jax.hessian(self._semilocal_point_local_energy_from_variables))(
             response_variables
         )
@@ -780,19 +1206,6 @@ class ResponseMixin:
         kernel = jnp.nan_to_num(kernel, nan=0.0, posinf=0.0, neginf=0.0)
         kernel = self._maybe_clip_response(kernel)
         return jnp.where(rho0 <= self._effective_response_density_floor(), 0.0, kernel)
-
-    def _projected_semilocal_potential(
-        self,
-        features: RestrictedFeatureBundle,
-    ) -> Array:
-        rho0, _, _, _, response_variables = self._response_variables(features)
-        gradients = jax.vmap(jax.grad(self._semilocal_point_local_energy_from_variables))(
-            response_variables
-        )
-        potential = gradients[:, 0]
-        potential = jnp.nan_to_num(potential, nan=0.0, posinf=0.0, neginf=0.0)
-        potential = self._maybe_clip_response(potential)
-        return jnp.where(rho0 <= self._effective_response_density_floor(), 0.0, potential)
 
     def _projected_total_potential_kernel(
         self,
@@ -804,23 +1217,20 @@ class ResponseMixin:
         pt2_projected: Array | None = None,
         total_gradient: Array | None = None,
         hf_spin_energy_density: tuple[Array, Array] | None = None,
-        response_hf_mode: Literal["nonlocal_exchange_only", "local_projected"] | None = None,
-        response_pt2_mode: Literal["nonlocal_correlation_only", "local_projected"] | None = None,
+        response_hf_mode: Literal["approx", "strict"] | None = None,
+        response_pt2_mode: Literal["approx", "strict"] | None = None,
     ) -> tuple[Array, Array]:
         grad = (
             self._default_total_gradient_from_features(features)
             if total_gradient is None
             else jnp.asarray(total_gradient)
         )
-        laplacian, exchange_anchor = self._strict_aux_fields(molecule, features)
         strict_payload = self._strict_response_payload(
             features,
             grad,
             hf_projected,
             pt2_projected=pt2_projected,
             hf_spin_energy_density=hf_spin_energy_density,
-            laplacian=laplacian,
-            exchange_anchor=exchange_anchor,
         )
         potential, _, _, _ = self._strict_total_potential_components(
             params,
@@ -851,47 +1261,6 @@ class ResponseMixin:
         kernel = tensor[0, 0]
         return potential, kernel
 
-    def _projected_total_potential_only(
-        self,
-        params: PyTree,
-        features: RestrictedFeatureBundle,
-        hf_projected: Array,
-        molecule: Any | None = None,
-        *,
-        pt2_projected: Array | None = None,
-        total_gradient: Array | None = None,
-        hf_spin_energy_density: tuple[Array, Array] | None = None,
-        response_hf_mode: Literal["nonlocal_exchange_only", "local_projected"] | None = None,
-        response_pt2_mode: Literal["nonlocal_correlation_only", "local_projected"] | None = None,
-    ) -> Array:
-        grad = (
-            self._default_total_gradient_from_features(features)
-            if total_gradient is None
-            else jnp.asarray(total_gradient)
-        )
-        laplacian, exchange_anchor = self._strict_aux_fields(molecule, features)
-        strict_payload = self._strict_response_payload(
-            features,
-            grad,
-            hf_projected,
-            pt2_projected=pt2_projected,
-            hf_spin_energy_density=hf_spin_energy_density,
-            laplacian=laplacian,
-            exchange_anchor=exchange_anchor,
-        )
-        potential, _, _, _ = self._strict_total_potential_components(
-            params,
-            features,
-            grad,
-            hf_projected,
-            pt2_projected=pt2_projected,
-            hf_spin_energy_density=hf_spin_energy_density,
-            response_hf_mode=response_hf_mode,
-            response_pt2_mode=response_pt2_mode,
-            strict_payload=strict_payload,
-        )
-        return potential
-
     def _strict_total_response_tensor(
         self,
         params: PyTree,
@@ -901,9 +1270,9 @@ class ResponseMixin:
         *,
         pt2_projected: Array | None = None,
         hf_spin_energy_density: tuple[Array, Array],
-        response_hf_mode: Literal["nonlocal_exchange_only", "local_projected"] | None = None,
-        response_pt2_mode: Literal["nonlocal_correlation_only", "local_projected"] | None = None,
-        strict_payload: tuple[Array, Array, Array, Array, Array, Array | None, Array | None] | None = None,
+        response_hf_mode: Literal["approx", "strict"] | None = None,
+        response_pt2_mode: Literal["approx", "strict"] | None = None,
+        strict_payload: tuple[Array, Array, Array, Array, Array] | None = None,
     ) -> Array:
         """Return the strict restricted semilocal response tensor on the grid.
 
@@ -919,7 +1288,7 @@ class ResponseMixin:
                 pt2_projected=pt2_projected,
                 hf_spin_energy_density=hf_spin_energy_density,
             )
-        response_variables, active, hf_projected_a, hf_projected_b, pt2_feature, _, exchange_anchor = strict_payload
+        response_variables, active, hf_projected_a, hf_projected_b, pt2_feature = strict_payload
         point_hessian_fn = jax.hessian(
             self._total_point_local_energy_from_variables,
             argnums=1,
@@ -930,7 +1299,6 @@ class ResponseMixin:
             hf_point: Array,
             hf_point_a: Array,
             hf_point_b: Array,
-            exchange_anchor_point: Array | None,
             pt2_point: Array,
         ) -> Array:
             tensor = point_hessian_fn(
@@ -939,7 +1307,6 @@ class ResponseMixin:
                 hf_point,
                 hf_point_a,
                 hf_point_b,
-                exchange_anchor_point,
                 pt2_point=pt2_point,
                 response_hf_mode=response_hf_mode,
                 response_pt2_mode=response_pt2_mode,
@@ -953,11 +1320,6 @@ class ResponseMixin:
             hf_projected,
             hf_projected_a,
             hf_projected_b,
-            (
-                jnp.zeros_like(hf_projected)
-                if exchange_anchor is None
-                else exchange_anchor
-            ),
             pt2_feature,
         )
         tensor = tensor * active[:, None, None].astype(tensor.dtype)
@@ -977,12 +1339,12 @@ class NeuralXCModel(
     non_hf_module: SemilocalEnergyDensityModule | None = None
     semilocal_xc: str | Sequence[str] = DEFAULT_NEURAL_XC_SEMILOCAL_XC
     semilocal_energy_density_fn: SemilocalEnergyDensityFn | None = None
-    input_feature_mode: Literal["enhanced", "canonical"] = "enhanced"
+    input_feature_mode: Literal["enhanced", "canonical"] = DEFAULT_INPUT_FEATURE_MODE
     hf_input_mode: Literal["total_only", "spin_resolved"] = "spin_resolved"
     include_pt2_channel: bool = False
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected"
-    response_hf_mode: Literal["nonlocal_exchange_only", "local_projected"] = "nonlocal_exchange_only"
-    response_pt2_mode: Literal["nonlocal_correlation_only", "local_projected"] = "local_projected"
+    response_hf_mode: Literal["approx", "strict"] = "strict"
+    response_pt2_mode: Literal["approx", "strict"] = "approx"
     strict_feature_alignment: bool = True
     allow_experimental_jax_xc: bool = False
     density_floor: float = 1e-12

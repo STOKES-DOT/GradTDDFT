@@ -14,22 +14,22 @@ from td_graddft.data.integrals import (
     overlap_hcore_matrices,
     overlap_matrix,
 )
-from td_graddft.jax_libxc import parse_xc
+from td_graddft.xc_backend.jax_libxc import parse_xc
 from td_graddft.neural_xc.inputs import (
     _local_hfx_features_from_basis_dm,
     _local_hfx_features_from_dm,
     _local_pt2_feature_from_restricted_orbitals,
 )
-from td_graddft.scf.builders import restricted_reference_from_spec_with_jax_rks
+from td_graddft.scf.builders import restricted_molecule_from_spec_with_jax_rks
 from td_graddft.scf.features import (
     _charge_center,
     _eval_grid_ao,
     _restricted_response_eri_slices_from_mo_tensor,
 )
 from td_graddft.scf.molecules import (
-    GridReference,
-    RestrictedMoleculeReference,
-    UnrestrictedMoleculeReference,
+    QuadratureGrid,
+    RestrictedMolecule,
+    UnrestrictedMolecule,
 )
 from td_graddft.scf import (
     RHFConfig,
@@ -57,17 +57,8 @@ def _hybrid_fraction_from_mf(mf: Any) -> float:
     return float(hyb)
 
 
-def _uses_cuda_direct_jk(cfg: RKSConfig) -> bool:
-    return cfg.jk_backend == "direct" and cfg.direct_jk_engine == "cuda"
-
-
 def _overlap_hcore_for_jax_rks_reference(basis: Any, cfg: RKSConfig) -> tuple[Any, Any]:
-    if _uses_cuda_direct_jk(cfg):
-        from td_graddft.data.integrals.jax.cuda_direct_jk import cuda_ffi_available
-        from td_graddft.data.integrals.jax.cuda_one_electron import CudaOneElectronBuilder
-
-        if cuda_ffi_available():
-            return CudaOneElectronBuilder(basis).build_overlap_hcore()
+    del cfg
     return overlap_hcore_matrices(basis)
 
 
@@ -117,7 +108,7 @@ def restricted_reference_from_pyscf(
     compute_local_pt2_features: bool = False,
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
     hfx_chunk_size: int = 512,
-) -> RestrictedMoleculeReference:
+) -> RestrictedMolecule:
     """Convert a restricted PySCF SCF/DFT object to a TD-GradDFT-ready reference."""
 
     try:
@@ -183,9 +174,9 @@ def restricted_reference_from_pyscf(
             nocc=nocc,
         )
 
-    return RestrictedMoleculeReference(
+    return RestrictedMolecule(
         ao=ao,
-        grid=GridReference(weights=weights, coords=jnp.asarray(mf.grids.coords)),
+        grid=QuadratureGrid(weights=weights, coords=jnp.asarray(mf.grids.coords)),
         dipole_integrals=dipole_integrals,
         rep_tensor=rep_tensor,
         mo_coeff=jnp.stack([mo_coeff, mo_coeff], axis=0),
@@ -215,7 +206,7 @@ def restricted_reference_from_pyscf(
     )
 
 
-def unrestricted_reference_from_pyscf(mf: Any) -> UnrestrictedMoleculeReference:
+def unrestricted_reference_from_pyscf(mf: Any) -> UnrestrictedMolecule:
     """Convert an unrestricted PySCF SCF/DFT object to a TD-GradDFT-ready reference."""
 
     try:
@@ -249,9 +240,9 @@ def unrestricted_reference_from_pyscf(mf: Any) -> UnrestrictedMoleculeReference:
     with mf.mol.with_common_orig(_charge_center(mf.mol)):
         dipole_integrals = jnp.asarray(mf.mol.intor_symmetric("int1e_r", comp=3))
 
-    return UnrestrictedMoleculeReference(
+    return UnrestrictedMolecule(
         ao=ao,
-        grid=GridReference(weights=weights, coords=jnp.asarray(mf.grids.coords)),
+        grid=QuadratureGrid(weights=weights, coords=jnp.asarray(mf.grids.coords)),
         dipole_integrals=dipole_integrals,
         rep_tensor=jnp.asarray(mf.mol.intor("int2e")),
         mo_coeff=mo_coeff,
@@ -284,7 +275,7 @@ def restricted_reference_from_pyscf_with_jax_rhf(
     compute_local_pt2_features: bool = False,
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
     hfx_chunk_size: int = 512,
-) -> RestrictedMoleculeReference:
+) -> RestrictedMolecule:
     """Build a restricted molecule reference with pure-JAX RHF orbitals/integrals."""
 
     if getattr(mf.mol, "spin", 0) != 0:
@@ -366,9 +357,9 @@ def restricted_reference_from_pyscf_with_jax_rhf(
 
     mf_energy = float(rhf.total_energy) if energy_target is None else float(energy_target)
 
-    return RestrictedMoleculeReference(
+    return RestrictedMolecule(
         ao=ao,
-        grid=GridReference(weights=weights, coords=coords),
+        grid=QuadratureGrid(weights=weights, coords=coords),
         dipole_integrals=dipole_integrals,
         rep_tensor=jnp.asarray(eri),
         mo_coeff=jnp.stack([mo_coeff, mo_coeff], axis=0),
@@ -406,7 +397,7 @@ def restricted_reference_from_pyscf_with_jax_rks(
     compute_local_pt2_features: bool = False,
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
     hfx_chunk_size: int = 512,
-) -> RestrictedMoleculeReference:
+) -> RestrictedMolecule:
     """Build a restricted molecule reference with pure-JAX RKS orbitals/integrals."""
 
     if getattr(mf.mol, "spin", 0) != 0:
@@ -432,7 +423,7 @@ def restricted_reference_from_pyscf_with_jax_rks(
     basis = basis_from_pyscf_mol_cart(
         mol_cart,
         max_l=max_l,
-        precompute_eri_groups=not _uses_cuda_direct_jk(cfg),
+        precompute_eri_groups=True,
     )
     s, h1e = _overlap_hcore_for_jax_rks_reference(basis, cfg)
     eri_pair_matrix = None
@@ -520,9 +511,9 @@ def restricted_reference_from_pyscf_with_jax_rks(
             density_floor=cfg.density_floor,
         )
 
-    return RestrictedMoleculeReference(
+    return RestrictedMolecule(
         ao=ao,
-        grid=GridReference(weights=weights, coords=coords),
+        grid=QuadratureGrid(weights=weights, coords=coords),
         dipole_integrals=dipole_integrals,
         rep_tensor=jnp.zeros((0, 0, 0, 0), dtype=jnp.asarray(s).dtype),
         mo_coeff=jnp.stack([mo_coeff, mo_coeff], axis=0),
@@ -568,10 +559,10 @@ def restricted_reference_from_pyscf_spec_with_jax_rks(
     hfx_chunk_size: int = 512,
     verbose: int = 0,
     **mol_kwargs: Any,
-) -> RestrictedMoleculeReference:
+) -> RestrictedMolecule:
     """Legacy compatibility alias for the strict-JAX spec-driven reference builder."""
 
-    return restricted_reference_from_spec_with_jax_rks(
+    return restricted_molecule_from_spec_with_jax_rks(
         atom=atom,
         basis=basis,
         xc_spec=xc_spec,
@@ -606,7 +597,7 @@ def unrestricted_reference_from_pyscf_with_jax_uks(
     compute_local_hfx_aux: bool = False,
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
     hfx_chunk_size: int = 512,
-) -> UnrestrictedMoleculeReference:
+) -> UnrestrictedMolecule:
     """Build an unrestricted molecule reference with pure-JAX UKS orbitals/integrals."""
 
     if getattr(mf, "grids", None) is None:
@@ -711,9 +702,9 @@ def unrestricted_reference_from_pyscf_with_jax_uks(
             hfx_local, hfx_nu = hfx_result
         else:
             hfx_local = hfx_result
-    return UnrestrictedMoleculeReference(
+    return UnrestrictedMolecule(
         ao=ao,
-        grid=GridReference(weights=weights, coords=coords),
+        grid=QuadratureGrid(weights=weights, coords=coords),
         dipole_integrals=dipole_integrals,
         rep_tensor=jnp.asarray(eri),
         mo_coeff=jnp.stack([uks.mo_coeff_alpha, uks.mo_coeff_beta], axis=0),

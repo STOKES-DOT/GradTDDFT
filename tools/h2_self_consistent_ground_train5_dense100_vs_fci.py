@@ -22,15 +22,23 @@ import numpy as np
 import optax
 from pyscf import ao2mo, dft, fci, gto, scf
 
-GRADDFT_DEFAULT_DM21_HIDDEN_DIMS = (256, 256, 256, 256, 256, 256)
-GRADDFT_DEFAULT_INPUT_FEATURE_MODE = "dm21_original"
-GRADDFT_DEFAULT_NETWORK_ARCHITECTURE = "graddft_residual"
+from td_graddft.neural_xc import (
+    DEFAULT_INPUT_FEATURE_MODE,
+    DEFAULT_NETWORK_ARCHITECTURE,
+    DEFAULT_NETWORK_HIDDEN_DIMS,
+)
+
+GRADDFT_DEFAULT_DM21_HIDDEN_DIMS = DEFAULT_NETWORK_HIDDEN_DIMS
+GRADDFT_DEFAULT_INPUT_FEATURE_MODE = DEFAULT_INPUT_FEATURE_MODE
+GRADDFT_DEFAULT_NETWORK_ARCHITECTURE = DEFAULT_NETWORK_ARCHITECTURE
 _DEFAULT_SEMILOCAL_XC = ("lda_x", "gga_x_b88", "lda_c_vwn_rpa", "gga_c_lyp")
 
 basis_from_spec = None
 evaluate_cartesian_ao = None
 neural_xc = None
 restricted_reference_from_pyscf = None
+restricted_molecule_from_spec_with_gpu4pyscf_rks = None
+RKSConfig = None
 HARTREE_TO_EV = None
 GroundStateCoreDatum = None
 GroundStateCoreTrainingConfig = None
@@ -61,6 +69,8 @@ def _load_runtime_dependencies(logger: "RunLogger | None" = None) -> None:
     global evaluate_cartesian_ao
     global neural_xc
     global restricted_reference_from_pyscf
+    global restricted_molecule_from_spec_with_gpu4pyscf_rks
+    global RKSConfig
     global HARTREE_TO_EV
     global GroundStateCoreDatum
     global GroundStateCoreTrainingConfig
@@ -85,8 +95,13 @@ def _load_runtime_dependencies(logger: "RunLogger | None" = None) -> None:
     from td_graddft.data.grid_ao import evaluate_cartesian_ao as _evaluate_cartesian_ao
     _log("[bootstrap] import td_graddft.neural_xc")
     from td_graddft import neural_xc as _neural_xc
-    _log("[bootstrap] import td_graddft.reference_legacy")
-    from td_graddft.reference_legacy import restricted_reference_from_pyscf as _restricted_reference_from_pyscf
+    _log("[bootstrap] import td_graddft.data.reference")
+    from td_graddft.data.reference import restricted_reference_from_pyscf as _restricted_reference_from_pyscf
+    _log("[bootstrap] import td_graddft.scf")
+    from td_graddft.scf import (
+        RKSConfig as _RKSConfig,
+        restricted_molecule_from_spec_with_gpu4pyscf_rks as _restricted_molecule_from_spec_with_gpu4pyscf_rks,
+    )
     _log("[bootstrap] import td_graddft.spectra")
     from td_graddft.spectra import HARTREE_TO_EV as _HARTREE_TO_EV
     _log("[bootstrap] import td_graddft.training")
@@ -114,6 +129,10 @@ def _load_runtime_dependencies(logger: "RunLogger | None" = None) -> None:
     evaluate_cartesian_ao = _evaluate_cartesian_ao
     neural_xc = _neural_xc
     restricted_reference_from_pyscf = _restricted_reference_from_pyscf
+    restricted_molecule_from_spec_with_gpu4pyscf_rks = (
+        _restricted_molecule_from_spec_with_gpu4pyscf_rks
+    )
+    RKSConfig = _RKSConfig
     HARTREE_TO_EV = _HARTREE_TO_EV
     GroundStateCoreDatum = _GroundStateCoreDatum
     GroundStateCoreTrainingConfig = _GroundStateCoreTrainingConfig
@@ -145,7 +164,35 @@ class ReferencePoint:
     fci_electron_count: float
 
 
-def parse_args() -> argparse.Namespace:
+def _normalize_input_feature_mode(value: str) -> str:
+    mode = str(value).strip().lower()
+    if mode in {"dm21_original", "canonical"}:
+        return "canonical"
+    if mode == "enhanced":
+        return "enhanced"
+    raise ValueError(
+        f"Unsupported input feature mode {value!r}. Expected enhanced, canonical, or dm21_original."
+    )
+
+
+def _normalize_scf_gradient_mode(value: str) -> str:
+    mode = str(value).strip().lower()
+    if mode in {"implicit_commutator", "impl"}:
+        return "impl"
+    if mode in {"unrolled", "expl"}:
+        return "expl"
+    raise ValueError(
+        f"Unsupported SCF gradient mode {value!r}. Expected impl, expl, implicit_commutator, or unrolled."
+    )
+
+
+def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
+    args.input_feature_mode = _normalize_input_feature_mode(args.input_feature_mode)
+    args.scf_gradient_mode = _normalize_scf_gradient_mode(args.scf_gradient_mode)
+    return args
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
             "Train Neural_xc on 5 H2 FCI dissociation points in either fixed-density "
@@ -187,7 +234,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--input-feature-mode",
-        choices=("enhanced", "dm21_original"),
+        choices=("enhanced", "canonical", "dm21_original"),
         default=GRADDFT_DEFAULT_INPUT_FEATURE_MODE,
     )
     p.add_argument(
@@ -220,8 +267,20 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--scf-gradient-mode",
-        choices=("unrolled", "implicit_commutator"),
-        default="implicit_commutator",
+        choices=("expl", "impl", "unrolled", "implicit_commutator"),
+        default="impl",
+    )
+    p.add_argument(
+        "--scf-runtime-forward-backend",
+        choices=("auto", "jax", "gpu4pyscf_rks"),
+        default="auto",
+        help="Runtime forward SCF backend for self-consistent implicit training.",
+    )
+    p.add_argument(
+        "--implicit-response-backend",
+        choices=("jax", "gpu4pyscf_jk"),
+        default="jax",
+        help="Linear-response backend used by implicit SCF differentiation.",
     )
     p.add_argument(
         "--scf-require-convergence",
@@ -250,6 +309,12 @@ def parse_args() -> argparse.Namespace:
         "--jk-backend",
         choices=("full", "df"),
         default="full",
+    )
+    p.add_argument(
+        "--reference-scf-backend",
+        choices=("pyscf", "gpu4pyscf_rks"),
+        default="pyscf",
+        help="SCF backend used to build the training/evaluation reference molecules.",
     )
     p.add_argument("--df-tol", type=float, default=1e-10)
     p.add_argument("--df-max-rank", type=int, default=None)
@@ -289,7 +354,7 @@ def parse_args() -> argparse.Namespace:
         default=1000.0,
         help="Weight for the self-consistent ground-state density matching loss.",
     )
-    return p.parse_args()
+    return _normalize_args(p.parse_args(argv))
 
 
 def build_h2_atom(r_angstrom: float) -> str:
@@ -464,6 +529,8 @@ def build_reference_point(
     excited_nstates: int,
     fci_dm0: np.ndarray | None,
     compute_local_hfx_features: bool,
+    compute_local_pt2_features: bool,
+    reference_scf_backend: str = "pyscf",
 ) -> tuple[ReferencePoint, np.ndarray]:
     atom = build_h2_atom(r_angstrom)
     (
@@ -479,82 +546,122 @@ def build_reference_point(
         dm0=fci_dm0,
     )
 
-    mol = gto.M(
-        atom=atom,
-        basis=basis,
-        unit="Angstrom",
-        spin=0,
-        charge=0,
-        cart=True,
-        verbose=0,
-    )
+    reference_backend = str(reference_scf_backend).strip().lower()
+    if reference_backend == "gpu4pyscf_rks":
+        if str(grid_ao_backend) != "jax":
+            raise ValueError("GPU4PySCF reference building requires --grid-ao-backend jax.")
+        reference = restricted_molecule_from_spec_with_gpu4pyscf_rks(
+            atom=atom,
+            basis=basis,
+            xc_spec=xc,
+            unit="Angstrom",
+            spin=0,
+            charge=0,
+            cart=True,
+            grids_level=int(grids_level),
+            max_l=int(max_l),
+            rks_config=RKSConfig(
+                xc_spec=xc,
+                max_cycle=int(reference_scf_max_cycle),
+                conv_tol=float(reference_scf_conv_tol),
+                conv_tol_density=float(reference_scf_conv_tol_density),
+                damping=float(reference_scf_damping),
+                potential_clip=float(reference_scf_potential_clip),
+                jk_backend=str(jk_backend),
+                df_tol=float(df_tol),
+                df_max_rank=df_max_rank,
+            ),
+            grid_ao_backend="jax",
+            integral_backend=str(integral_backend),
+            compute_local_hfx_features=bool(compute_local_hfx_features),
+            compute_local_hfx_aux=bool(compute_local_hfx_features),
+            compute_local_pt2_features=bool(compute_local_pt2_features),
+            compute_response_eri_slices=True,
+            verbose=0,
+        )
+    elif reference_backend == "pyscf":
+        mol = gto.M(
+            atom=atom,
+            basis=basis,
+            unit="Angstrom",
+            spin=0,
+            charge=0,
+            cart=True,
+            verbose=0,
+        )
 
-    def _run_rks(
-        *,
-        dm0_local: np.ndarray | None,
-        init_guess: str | None,
-        damping: float,
-        level_shift: float,
-        max_cycle: int,
-        use_newton: bool,
-    ) -> dft.rks.RKS:
-        mf_local = dft.RKS(mol)
-        mf_local.xc = xc
-        mf_local.grids.level = int(grids_level)
-        mf_local.conv_tol = float(reference_scf_conv_tol)
-        mf_local.max_cycle = int(max_cycle)
-        mf_local.damping = float(damping)
-        mf_local.level_shift = float(level_shift)
-        mf_local.diis_start_cycle = 1
-        if init_guess is not None:
-            mf_local.init_guess = init_guess
-        if use_newton:
-            mf_local = mf_local.newton()
+        def _run_rks(
+            *,
+            dm0_local: np.ndarray | None,
+            init_guess: str | None,
+            damping: float,
+            level_shift: float,
+            max_cycle: int,
+            use_newton: bool,
+        ) -> dft.rks.RKS:
+            mf_local = dft.RKS(mol)
+            mf_local.xc = xc
+            mf_local.grids.level = int(grids_level)
             mf_local.conv_tol = float(reference_scf_conv_tol)
             mf_local.max_cycle = int(max_cycle)
-        mf_local.kernel(dm0=dm0_local)
-        return mf_local
+            mf_local.damping = float(damping)
+            mf_local.level_shift = float(level_shift)
+            mf_local.diis_start_cycle = 1
+            if init_guess is not None:
+                mf_local.init_guess = init_guess
+            if use_newton:
+                mf_local = mf_local.newton()
+                mf_local.conv_tol = float(reference_scf_conv_tol)
+                mf_local.max_cycle = int(max_cycle)
+            mf_local.kernel(dm0=dm0_local)
+            return mf_local
 
-    rks_attempts = (
-        dict(
-            dm0_local=rhf_dm0,
-            init_guess=None if rhf_dm0 is not None else "minao",
-            damping=float(reference_scf_damping),
-            level_shift=0.0,
-            max_cycle=int(reference_scf_max_cycle),
-            use_newton=False,
-        ),
-        dict(
-            dm0_local=None,
-            init_guess="atom",
-            damping=max(float(reference_scf_damping), 0.3),
-            level_shift=0.5,
-            max_cycle=max(int(reference_scf_max_cycle), 200),
-            use_newton=False,
-        ),
-        dict(
-            dm0_local=None,
-            init_guess="atom",
-            damping=0.0,
-            level_shift=0.0,
-            max_cycle=max(int(reference_scf_max_cycle), 80),
-            use_newton=True,
-        ),
-    )
+        rks_attempts = (
+            dict(
+                dm0_local=rhf_dm0,
+                init_guess=None if rhf_dm0 is not None else "minao",
+                damping=float(reference_scf_damping),
+                level_shift=0.0,
+                max_cycle=int(reference_scf_max_cycle),
+                use_newton=False,
+            ),
+            dict(
+                dm0_local=None,
+                init_guess="atom",
+                damping=max(float(reference_scf_damping), 0.3),
+                level_shift=0.5,
+                max_cycle=max(int(reference_scf_max_cycle), 200),
+                use_newton=False,
+            ),
+            dict(
+                dm0_local=None,
+                init_guess="atom",
+                damping=0.0,
+                level_shift=0.0,
+                max_cycle=max(int(reference_scf_max_cycle), 80),
+                use_newton=True,
+            ),
+        )
 
-    mf_ref: dft.rks.RKS | None = None
-    for kwargs in rks_attempts:
-        mf_ref = _run_rks(**kwargs)
-        if bool(mf_ref.converged):
-            break
-    if mf_ref is None or not mf_ref.converged:
-        raise RuntimeError(f"PySCF RKS did not converge for atom spec: {atom}")
+        mf_ref: dft.rks.RKS | None = None
+        for kwargs in rks_attempts:
+            mf_ref = _run_rks(**kwargs)
+            if bool(mf_ref.converged):
+                break
+        if mf_ref is None or not mf_ref.converged:
+            raise RuntimeError(f"PySCF RKS did not converge for atom spec: {atom}")
 
-    reference = restricted_reference_from_pyscf(
-        mf_ref,
-        compute_local_hfx_features=bool(compute_local_hfx_features),
-        compute_local_hfx_aux=bool(compute_local_hfx_features),
-    )
+        reference = restricted_reference_from_pyscf(
+            mf_ref,
+            compute_local_hfx_features=bool(compute_local_hfx_features),
+            compute_local_hfx_aux=bool(compute_local_hfx_features),
+            compute_local_pt2_features=bool(compute_local_pt2_features),
+        )
+    else:
+        raise ValueError(
+            f"Unsupported reference_scf_backend={reference_scf_backend!r}; "
+            "expected 'pyscf' or 'gpu4pyscf_rks'."
+        )
     ao = np.asarray(reference.ao, dtype=np.float64)
     weights = np.asarray(reference.grid.weights, dtype=np.float64)
     fci_density_grid = np.einsum("pq,rp,rq->r", fci_dm_ao, ao, ao, optimize=True)
@@ -602,7 +709,9 @@ def build_reference_curve(
             reference_scf_potential_clip=float(args.reference_scf_potential_clip),
             excited_nstates=int(args.excited_nstates),
             fci_dm0=rhf_dm0,
-            compute_local_hfx_features=(str(args.input_feature_mode) == "dm21_original"),
+            compute_local_hfx_features=(str(args.input_feature_mode) == "canonical"),
+            compute_local_pt2_features=bool(getattr(args, "include_pt2_channel", False)),
+            reference_scf_backend=str(getattr(args, "reference_scf_backend", "pyscf")),
         )
         fci_s1_h = (
             float(point.fci_excitation_energies_h[0])
@@ -673,6 +782,8 @@ def train_functional(
             scf_iterate_selection=str(args.scf_iterate_selection),
             scf_require_convergence=bool(args.scf_require_convergence),
             scf_gradient_mode=str(args.scf_gradient_mode),
+            scf_runtime_forward_backend=str(args.scf_runtime_forward_backend),
+            implicit_response_backend=str(args.implicit_response_backend),
         ),
     )
     if int(args.lr_decay_every) > 0:
@@ -754,6 +865,8 @@ def train_functional(
         f"mode={str(args.training_mode)} "
         f"scf_require_convergence={bool(args.scf_require_convergence)} "
         f"scf_grad_mode={args.scf_gradient_mode} "
+        f"runtime_forward={args.scf_runtime_forward_backend} "
+        f"implicit_response={args.implicit_response_backend} "
         f"train_step_mode={train_step_mode}"
     )
 
@@ -1349,6 +1462,15 @@ def write_summary(
         handle.write(f"hidden_dims = {list(int(value) for value in args.hidden_dims)}\n")
         handle.write(f"density_constraint_weight = {float(args.density_constraint_weight)}\n")
         handle.write(f"scf_require_convergence = {bool(args.scf_require_convergence)}\n")
+        handle.write(
+            f"reference_scf_backend = {getattr(args, 'reference_scf_backend', 'pyscf')}\n"
+        )
+        handle.write(
+            f"scf_runtime_forward_backend = {getattr(args, 'scf_runtime_forward_backend', 'auto')}\n"
+        )
+        handle.write(
+            f"implicit_response_backend = {getattr(args, 'implicit_response_backend', 'jax')}\n"
+        )
         handle.write(f"steps = {int(args.steps)}\n")
         handle.write(f"learning_rate = {float(args.learning_rate)}\n")
         handle.write(f"lr_decay_every = {int(args.lr_decay_every)}\n")
@@ -1594,6 +1716,11 @@ def main() -> None:
         "steps": int(args.steps),
         "density_constraint_weight": float(args.density_constraint_weight),
         "scf_require_convergence": bool(args.scf_require_convergence),
+        "reference_scf_backend": str(getattr(args, "reference_scf_backend", "pyscf")),
+        "scf_runtime_forward_backend": str(
+            getattr(args, "scf_runtime_forward_backend", "auto")
+        ),
+        "implicit_response_backend": str(getattr(args, "implicit_response_backend", "jax")),
         "final_loss": float(training["final_loss"]),
         "min_loss": float(training["min_loss"]),
         "min_loss_step": int(training["min_loss_step"]),

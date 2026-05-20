@@ -4,10 +4,10 @@ import numpy as np
 import pytest
 
 from td_graddft.scf import UKSConfig
-from td_graddft.scf.builders import unrestricted_reference_from_spec_with_jax_uks
+from td_graddft.scf.builders import unrestricted_molecule_from_spec_with_jax_uks
 from td_graddft.scf.differentiable import _is_unrestricted_reference
-from td_graddft.workflows.core import run_reference_from_spec
-from td_graddft.workflows.types import ReferenceSpecConfig, SimulationConfig
+from td_graddft.workflows.core import run_molecule_from_spec
+from td_graddft.workflows.types import MoleculeSpecConfig, SimulationConfig
 
 
 def test_spin_resolved_charged_state_overrides_restricted_nocc_marker():
@@ -23,8 +23,8 @@ def test_spin_resolved_charged_state_overrides_restricted_nocc_marker():
     assert _is_unrestricted_reference(molecule)
 
 
-def test_unrestricted_reference_from_spec_with_jax_uks_h_atom_smoke():
-    ref = unrestricted_reference_from_spec_with_jax_uks(
+def test_unrestricted_molecule_from_spec_with_jax_uks_h_atom_smoke():
+    ref = unrestricted_molecule_from_spec_with_jax_uks(
         atom="H 0.0 0.0 0.0",
         basis="sto-3g",
         xc_spec="hf",
@@ -58,9 +58,9 @@ def test_unrestricted_reference_from_spec_with_jax_uks_h_atom_smoke():
     assert np.isfinite(float(ref.exact_exchange_fraction))
 
 
-def test_unrestricted_reference_from_spec_with_jax_uks_invalid_spin_parity_raises():
+def test_unrestricted_molecule_from_spec_with_jax_uks_invalid_spin_parity_raises():
     with pytest.raises(ValueError, match="N \\+ spin must be even"):
-        _ = unrestricted_reference_from_spec_with_jax_uks(
+        _ = unrestricted_molecule_from_spec_with_jax_uks(
             atom="H 0.0 0.0 0.0",
             basis="sto-3g",
             xc_spec="hf",
@@ -76,9 +76,9 @@ def test_unrestricted_reference_from_spec_with_jax_uks_invalid_spin_parity_raise
         )
 
 
-def test_run_reference_from_spec_accepts_jax_uks_for_open_shell():
-    reference = run_reference_from_spec(
-        ReferenceSpecConfig(
+def test_run_molecule_from_spec_accepts_jax_uks_for_open_shell():
+    reference = run_molecule_from_spec(
+        MoleculeSpecConfig(
             atom="H 0.0 0.0 0.0",
             basis="sto-3g",
             xc="hf",

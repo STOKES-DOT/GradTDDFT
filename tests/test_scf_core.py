@@ -17,10 +17,8 @@ def test_scf_modules_share_core_helper_implementations():
     assert rks._diagonalize_fock is core._diagonalize_fock
 
     assert rhf._build_density is core._build_density_closed_shell
-    assert rks._build_density is core._build_density_closed_shell
     assert rks._build_density_from_occ is core._build_density_from_occ
     assert uks._build_density_from_occ is core._build_density_from_occ
-    assert differentiable._build_density is core._build_density_from_occ
     assert rhf._build_jk is rks._build_jk
     assert differentiable._build_jk is rks._build_jk
 
@@ -28,18 +26,13 @@ def test_scf_modules_share_core_helper_implementations():
     assert builders._contains_jax_tracer is core._contains_jax_tracer
     assert inputs._contains_jax_tracer is core._contains_jax_tracer
 
-    assert facade._hashable_static_value is core._hashable_static_value
-    assert builders._hashable_static_value is core._hashable_static_value
     assert uks._host_float_unless_traced is core._host_float_unless_traced
 
 
-def test_facade_uses_builder_level_cuda_helper_functions():
-    assert facade._make_cuda_direct_reference_solver is builders._make_cuda_direct_reference_solver
-    assert facade._differentiable_rks_config is builders._differentiable_rks_config
-    assert (
-        facade._default_cuda_direct_iteration_backend
-        is builders._default_cuda_direct_iteration_backend
-    )
+def test_facade_no_longer_exposes_cuda_direct_helpers():
+    assert not hasattr(facade, "_make_cuda_direct_reference_solver")
+    assert not hasattr(builders, "_make_cuda_direct_reference_solver")
+    assert not hasattr(facade.RKS, "cuda_direct_scf")
 
 
 def test_facade_uses_builder_level_reference_and_result_helpers():

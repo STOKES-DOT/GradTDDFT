@@ -36,18 +36,10 @@ def test_dft_namespace_exposes_ks_facades():
     assert dft.UKS is scf.UKS
 
 
-def test_neural_xc_namespace_exposes_long_range_correction_facade():
-    from td_graddft import neural_xc
-
-    assert callable(neural_xc.LongRangeCorrection)
-    assert callable(neural_xc.make_long_range_correction)
-
-
 def test_top_level_exposes_recommended_neural_xc_facades():
     import td_graddft
 
     assert td_graddft.Functional is td_graddft.neural_xc.Functional
-    assert td_graddft.LongRangeCorrection is td_graddft.neural_xc.LongRangeCorrection
 
 
 def test_top_level_removes_legacy_neural_xc_exports():

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "td-graddft"
 version = "0.1.0"
-description = "JAX research toolkit for differentiable TDDFT, Neural XC/RSH training, spectra, integrals, and CUDA J/K experiments."
+description = "JAX research toolkit for differentiable TDDFT, Neural XC/RSH training, spectra, integrals, and GPU4PySCF workflows."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
@@ -44,17 +44,4 @@ where = ["src"]
   "_pyscf_basis_bundle.json",
   "_lebedev_level*.npz",
   "pyscf_basis_snapshot/**/*",
-]
-"td_graddft.data.integrals.jax" = [
-  "cuda_direct_jk_kernel.cu",
-  "cuda_one_electron_kernel.cu",
-  "rys_reference/LICENSE",
-  "rys_reference/gint/*.cuh",
-  "rys_reference/gvhf-rys/*.cu",
-  "rys_reference/gvhf-rys/*.cuh",
-  "joltqc_port/*.cu",
-  "joltqc_port/*.py",
-  "joltqc_port/*.json",
-  "libtd_graddft_cuda_direct_jk_*.so",
-  "libtd_graddft_cuda_one_electron_*.so",
 ]

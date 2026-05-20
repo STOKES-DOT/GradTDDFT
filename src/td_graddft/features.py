@@ -10,7 +10,7 @@ from jax import core as jax_core
 from jax.lax import Precision
 from jaxtyping import Array
 
-from .jax_libxc import (
+from .xc_backend.jax_libxc import (
     RestrictedFeatureBundle,
     restricted_feature_bundle_from_rho_grad_tau,
 )
@@ -18,6 +18,18 @@ from .jax_libxc import (
 
 _MAX_TRANSITION_RESPONSE_FEATURE_CACHE_SIZE = 64
 _TRANSITION_RESPONSE_FEATURE_CACHE: dict[tuple[int, str], tuple[weakref.ReferenceType[Any], Array]] = {}
+_RESPONSE_FEATURE_KINDS = ("LDA", "GGA", "MGGA", "MGGA_LAPL")
+_RESPONSE_FEATURE_KIND_BY_COUNT = {
+    1: "LDA",
+    4: "GGA",
+    5: "MGGA",
+    6: "MGGA_LAPL",
+}
+_REMOVED_PT2_RESPONSE_FEATURE_KINDS = {"MGGA_PT2", "MGGA_LAPL_PT2"}
+_REMOVED_PT2_RESPONSE_FEATURE_MESSAGE = (
+    "PT2 strict response features were removed because the previous "
+    "linearized PT2 path was not a complete response kernel."
+)
 
 
 def _pytree_dataclass(cls):
@@ -123,6 +135,38 @@ def _cache_transition_response_features(
         while len(_TRANSITION_RESPONSE_FEATURE_CACHE) >= _MAX_TRANSITION_RESPONSE_FEATURE_CACHE_SIZE:
             _TRANSITION_RESPONSE_FEATURE_CACHE.pop(next(iter(_TRANSITION_RESPONSE_FEATURE_CACHE)))
         _TRANSITION_RESPONSE_FEATURE_CACHE[cache_key] = (weakref.ref(molecule), value)
+
+
+def normalize_response_feature_kind(
+    value: Any,
+    *,
+    default: str = "LDA",
+    label: str = "feature_kind",
+) -> str:
+    if value is None:
+        kind = str(default).upper()
+    else:
+        kind = str(value).upper()
+    if kind in _REMOVED_PT2_RESPONSE_FEATURE_KINDS:
+        raise ValueError(_REMOVED_PT2_RESPONSE_FEATURE_MESSAGE)
+    if kind not in _RESPONSE_FEATURE_KINDS:
+        expected = "/".join(_RESPONSE_FEATURE_KINDS)
+        raise ValueError(f"Unsupported {label}={value!r}. Expected one of {expected}.")
+    return kind
+
+
+def infer_response_feature_kind(values: Any) -> str:
+    shape = getattr(values, "shape", None)
+    if shape is None:
+        shape = jnp.asarray(values).shape
+    feature_count = int(shape[0])
+    kind = _RESPONSE_FEATURE_KIND_BY_COUNT.get(feature_count)
+    if kind is None:
+        raise ValueError(
+            "Strict response tensor must have feature dimension 1, 4, 5, or 6 "
+            f"(got {shape})."
+        )
+    return kind
 
 
 def _ao_and_derivatives(molecule: Any) -> tuple[Array, Array]:
@@ -320,13 +364,13 @@ def restricted_grid_response_variables(
     feature_kind: str = "LDA",
 ) -> tuple[Array, Array | None, Array | None, Array | None]:
     ao, ao_deriv1, rdm1, mo_coeff, mo_occ = _restricted_spin_inputs(molecule)
-    kind = str(feature_kind).upper()
+    kind = normalize_response_feature_kind(feature_kind)
     if kind == "LDA":
         return _restricted_rho_kernel(ao, rdm1), None, None, None
     if kind == "GGA":
         rho, grad = _restricted_rho_grad_kernel(ao, ao_deriv1, rdm1)
         return rho, grad, None, None
-    if kind in {"MGGA", "MGGA_PT2"}:
+    if kind == "MGGA":
         rho, grad, tau = _restricted_rho_grad_tau_kernel(
             ao,
             ao_deriv1,
@@ -335,7 +379,7 @@ def restricted_grid_response_variables(
             mo_occ,
         )
         return rho, grad, tau, None
-    if kind in {"MGGA_LAPL", "MGGA_LAPL_PT2"}:
+    if kind == "MGGA_LAPL":
         rho, grad, tau = _restricted_rho_grad_tau_kernel(
             ao,
             ao_deriv1,
@@ -456,74 +500,6 @@ def _restricted_transition_response_mgga_lapl_kernel(
     return jnp.concatenate([mgga_features, lapl_ov[None, ...]], axis=0)
 
 
-def _restricted_transition_response_pt2_linearized_feature(
-    molecule: Any,
-    ao: Array,
-    orbo: Array,
-    orbv: Array,
-    mo_energy: Array,
-) -> Array:
-    """Return a linearized PT2 response feature delta p(r) / delta kappa_{ia}.
-
-    This keeps the local pair potential and MP2 pair weights fixed and
-    differentiates only the leading occupied-virtual transition factor in the
-    current local exact-pair gauge definition. It removes the fully frozen PT2
-    field approximation without attempting the full orbital/denominator response
-    of the PT2 field.
-    """
-
-    rep_tensor = getattr(molecule, "rep_tensor", None)
-    if rep_tensor is None:
-        raise AttributeError(
-            "Molecule-like object must define rep_tensor for PT2 response features."
-        )
-    rep_tensor = jnp.asarray(rep_tensor)
-
-    nocc = int(orbo.shape[1])
-    eps_occ = mo_energy[:nocc]
-    eps_vir = mo_energy[nocc:]
-
-    eri_ovov = getattr(molecule, "eri_ovov", None)
-    if eri_ovov is None:
-        eri_ovov = jnp.einsum(
-            "pqrs,pi,qa,rj,sb->iajb",
-            rep_tensor,
-            orbo,
-            orbv,
-            orbo,
-            orbv,
-            precision=Precision.HIGHEST,
-        )
-    else:
-        eri_ovov = jnp.asarray(eri_ovov)
-
-    denom = (
-        eps_occ[:, None, None, None]
-        + eps_occ[None, None, :, None]
-        - eps_vir[None, :, None, None]
-        - eps_vir[None, None, None, :]
-    )
-    denom = jnp.where(jnp.abs(denom) > 1e-12, denom, -1e-12)
-    exchange = jnp.transpose(eri_ovov, (0, 3, 2, 1))
-    pair_weights = (2.0 * eri_ovov - exchange) / denom
-    pair_potential = jnp.einsum(
-        "gp,gq,pqrs,rj,sb->gjb",
-        ao,
-        ao,
-        rep_tensor,
-        orbo,
-        orbv,
-        precision=Precision.HIGHEST,
-    )
-    pt2_ov = jnp.einsum(
-        "rjb,iajb->ria",
-        pair_potential,
-        pair_weights,
-        precision=Precision.HIGHEST,
-    )
-    return jnp.nan_to_num(pt2_ov, nan=0.0, posinf=0.0, neginf=0.0)
-
-
 def scale_restricted_grid_features(
     features: RestrictedFeatureBundle,
     scale: Array,
@@ -552,11 +528,9 @@ def restricted_transition_response_features(
     - ``LDA``: ``[rho_ov]``
     - ``GGA``: ``[rho_ov, d_x rho_ov, d_y rho_ov, d_z rho_ov]``
     - ``MGGA``: GGA channels plus ``tau_ov``
-    - ``MGGA_PT2``: MGGA channels plus linearized ``pt2_ov``
     - ``MGGA_LAPL``: MGGA channels plus ``lapl_ov``
-    - ``MGGA_LAPL_PT2``: MGGA_LAPL channels plus linearized ``pt2_ov``
     """
-    kind = feature_kind.upper()
+    kind = normalize_response_feature_kind(feature_kind)
     cache_key = (id(molecule), kind)
     cached = _cached_transition_response_features(cache_key, molecule)
     if cached is not None:
@@ -565,7 +539,6 @@ def restricted_transition_response_features(
     ao = jnp.asarray(molecule.ao)
     mo_coeff = jnp.asarray(molecule.mo_coeff)
     mo_occ = jnp.asarray(molecule.mo_occ)
-    mo_energy = jnp.asarray(molecule.mo_energy)
 
     if mo_coeff.ndim == 3:
         if mo_coeff.shape[0] != 2:
@@ -574,9 +547,6 @@ def restricted_transition_response_features(
             )
         mo_coeff = mo_coeff[0]
         mo_occ = mo_occ[0]
-        mo_energy = mo_energy[0]
-    elif mo_energy.ndim == 2:
-        mo_energy = mo_energy[0]
 
     nocc = getattr(molecule, "nocc", None)
     if nocc is None:
@@ -616,19 +586,7 @@ def restricted_transition_response_features(
         out = _restricted_transition_response_mgga_kernel(ao_deriv1, orbo, orbv)
         _cache_transition_response_features(cache_key, molecule, out)
         return out
-    if kind == "MGGA_PT2":
-        mgga = _restricted_transition_response_mgga_kernel(ao_deriv1, orbo, orbv)
-        pt2_ov = _restricted_transition_response_pt2_linearized_feature(
-            molecule,
-            ao,
-            orbo,
-            orbv,
-            mo_energy,
-        )
-        out = jnp.concatenate([mgga, pt2_ov[None, ...]], axis=0)
-        _cache_transition_response_features(cache_key, molecule, out)
-        return out
-    if kind not in {"MGGA_LAPL", "MGGA_LAPL_PT2"}:
+    if kind != "MGGA_LAPL":
         raise ValueError(f"Unsupported feature_kind={feature_kind!r}.")
     ao_laplacian = _ao_laplacian(molecule)
     mgga_lapl = _restricted_transition_response_mgga_lapl_kernel(
@@ -637,17 +595,7 @@ def restricted_transition_response_features(
         orbo,
         orbv,
     )
-    if kind == "MGGA_LAPL":
-        out = mgga_lapl
-    else:
-        pt2_ov = _restricted_transition_response_pt2_linearized_feature(
-            molecule,
-            ao,
-            orbo,
-            orbv,
-            mo_energy,
-        )
-        out = jnp.concatenate([mgga_lapl, pt2_ov[None, ...]], axis=0)
+    out = mgga_lapl
     _cache_transition_response_features(cache_key, molecule, out)
     return out
 
@@ -667,81 +615,3 @@ def restricted_feature_bundle_from_response_variables(
         tau,
         density_floor=density_floor,
     )
-
-
-def enhanced_neural_xc_input_features(
-    features: RestrictedFeatureBundle,
-    semilocal_energy_density: Array,
-    *,
-    density_floor: float = 1e-12,
-) -> Array:
-    rho_a = jnp.maximum(features.rho_a, density_floor)
-    rho_b = jnp.maximum(features.rho_b, density_floor)
-    rho = jnp.maximum(features.rho, density_floor)
-    sigma = jnp.maximum(features.sigma, 0.0)
-    tau = jnp.maximum(features.tau_a + features.tau_b, 0.0)
-    return jnp.stack(
-        [
-            rho_a,
-            rho_b,
-            rho,
-            jnp.log1p(rho),
-            jnp.sqrt(rho),
-            features.sigma_aa,
-            features.sigma_ab,
-            features.sigma_bb,
-            sigma,
-            features.tau_a,
-            features.tau_b,
-            tau,
-            semilocal_energy_density,
-        ],
-        axis=-1,
-    )
-
-
-def canonical_neural_xc_input_features(
-    features: RestrictedFeatureBundle,
-    hfx_a: Array,
-    hfx_b: Array,
-    *,
-    density_floor: float = 1e-12,
-) -> Array:
-    """Canonical local feature stack used by the neural XC runtime.
-
-    The returned channels follow the historical coefficient-input order:
-    [rho_a, rho_b, norm_grad_rho, norm_grad_rho_a, norm_grad_rho_b,
-     tau_a, tau_b, hfx_a(omega*), hfx_b(omega*)].
-    """
-
-    rho_a = jnp.maximum(features.rho_a, density_floor)
-    rho_b = jnp.maximum(features.rho_b, density_floor)
-    tau_a = jnp.maximum(features.tau_a, 0.0)
-    tau_b = jnp.maximum(features.tau_b, 0.0)
-    norm_grad_a = jnp.maximum(features.sigma_aa, 0.0)
-    norm_grad_b = jnp.maximum(features.sigma_bb, 0.0)
-    norm_grad = jnp.maximum(features.sigma, 0.0)
-    hfx_a = jnp.asarray(hfx_a)
-    hfx_b = jnp.asarray(hfx_b)
-    if hfx_a.ndim == rho_a.ndim:
-        hfx_a = hfx_a[..., None]
-    if hfx_b.ndim == rho_b.ndim:
-        hfx_b = hfx_b[..., None]
-    if hfx_a.shape[:-1] != rho_a.shape or hfx_b.shape[:-1] != rho_b.shape:
-        raise ValueError(
-            "Local HFX features must broadcast to the grid shape "
-            f"(rho={rho_a.shape}, hfx_a={hfx_a.shape}, hfx_b={hfx_b.shape})."
-        )
-    leading = jnp.stack(
-        [
-            rho_a,
-            rho_b,
-            norm_grad,
-            norm_grad_a,
-            norm_grad_b,
-            tau_a,
-            tau_b,
-        ],
-        axis=-1,
-    )
-    return jnp.concatenate([leading, hfx_a, hfx_b], axis=-1)

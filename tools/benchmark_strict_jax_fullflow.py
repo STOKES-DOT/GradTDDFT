@@ -273,7 +273,7 @@ def _pick_device(platform: str):
 def _build_strict_jax_reference(args: argparse.Namespace, *, device: Any):
     import jax
 
-    from td_graddft.reference import restricted_reference_from_spec_with_jax_rks
+    from td_graddft.scf.builders import restricted_molecule_from_spec_with_jax_rks
     from td_graddft.scf import RKSConfig
 
     cfg = RKSConfig(
@@ -289,7 +289,7 @@ def _build_strict_jax_reference(args: argparse.Namespace, *, device: Any):
         direct_scf_incremental=not bool(args.disable_direct_incremental),
     )
     with jax.default_device(device):
-        return restricted_reference_from_spec_with_jax_rks(
+        return restricted_molecule_from_spec_with_jax_rks(
             atom=MOLECULES[str(args.molecule)],
             basis=str(args.basis),
             xc_spec=str(args.xc),

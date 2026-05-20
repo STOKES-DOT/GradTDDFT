@@ -19,7 +19,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 from td_graddft import neural_xc
-from td_graddft.jax_libxc import b3lyp_component_basis
+from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
 from td_graddft.neural_xc import (
     GRADDFT_DEFAULT_DM21_HIDDEN_DIMS,
     GRADDFT_DEFAULT_INPUT_FEATURE_MODE,

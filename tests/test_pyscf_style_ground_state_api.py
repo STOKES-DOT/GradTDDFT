@@ -79,7 +79,7 @@ def test_rks_kernel_runs_ground_state_without_building_reference(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "td_graddft.scf.facade.restricted_reference_from_spec_with_jax_rks",
+        "td_graddft.scf.facade.restricted_molecule_from_spec_with_jax_rks",
         forbidden_reference_builder,
     )
     monkeypatch.setattr("td_graddft.scf.facade.configure_jax_persistent_cache", fake_cache)
@@ -129,7 +129,7 @@ def test_rks_lazy_reference_passes_hfx_feature_options(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "td_graddft.scf.facade.restricted_reference_from_spec_with_jax_rks",
+        "td_graddft.scf.facade.restricted_molecule_from_spec_with_jax_rks",
         fake_builder,
     )
 
@@ -158,7 +158,7 @@ def test_tdscf_builds_reference_lazily_after_ground_state_kernel(monkeypatch):
         )
 
     monkeypatch.setattr(
-        "td_graddft.scf.facade.restricted_reference_from_spec_with_jax_rks",
+        "td_graddft.scf.facade.restricted_molecule_from_spec_with_jax_rks",
         fake_builder,
     )
 
@@ -170,74 +170,6 @@ def test_tdscf_builds_reference_lazily_after_ground_state_kernel(monkeypatch):
     assert mf.reference is None
     assert td.reference is mf.reference
     assert mf.reference.mf_energy == -1.0
-
-
-def test_rks_cuda_ground_state_skips_dipole_input_construction(monkeypatch):
-    captured = {}
-
-    def fake_builder(**kwargs):
-        captured.update(kwargs)
-        return types.SimpleNamespace(
-            mf_energy=-76.0,
-            mo_energy=None,
-            mo_coeff=None,
-            mo_occ=None,
-        )
-
-    monkeypatch.setattr("td_graddft.scf.facade.cuda_ffi_available", lambda: True)
-    monkeypatch.setattr(
-        "td_graddft.scf.facade.restricted_reference_from_spec_with_jax_rks",
-        fake_builder,
-    )
-
-    mf = scf.RKS(gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g"))
-    mf.cuda_direct_scf(execution_device="gpu")
-    mf._build_reference(mf._spec())
-
-    assert captured["include_dipole_integrals"] is False
-
-
-def test_cuda_direct_scf_reuses_hqc_style_reference_solver_for_lazy_reference(monkeypatch):
-    monkeypatch.setattr("td_graddft.scf.facade.cuda_ffi_available", lambda: True)
-    build_calls = []
-    solver_calls = []
-
-    def fake_solver_factory(**kwargs):
-        build_calls.append(kwargs)
-
-        def _solver(spec):
-            solver_calls.append(spec)
-            return types.SimpleNamespace(
-                mf_energy=-1.0 - 0.1 * len(solver_calls),
-                mo_energy=None,
-                mo_coeff=None,
-                mo_occ=None,
-            )
-
-        return _solver
-
-    monkeypatch.setattr(
-        "td_graddft.scf.facade._make_cuda_direct_reference_solver",
-        fake_solver_factory,
-    )
-
-    mol = gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g")
-    mf = scf.RKS(mol, xc="pbe0")
-    mf.cuda_direct_scf(execution_device="gpu")
-    mf.execution_device = "auto"
-    mf.e_tot = -1.0
-
-    first_reference = mf._ensure_reference()
-    mf.mol = gto.M(atom="H 0.1 0 0; H 0.1 0 0.74", basis="sto-3g")
-    mf.reference = None
-    second_reference = mf._ensure_reference()
-
-    assert len(build_calls) == 1
-    assert len(solver_calls) == 2
-    assert build_calls[0]["basis"] == "sto-3g"
-    assert build_calls[0]["xc_spec"] == "pbe0"
-    assert first_reference.mf_energy == -1.1
-    assert second_reference.mf_energy == -1.2
 
 
 def test_uks_kernel_calls_existing_unrestricted_reference_builder(monkeypatch):
@@ -258,7 +190,7 @@ def test_uks_kernel_calls_existing_unrestricted_reference_builder(monkeypatch):
         return kwargs["cache_dir"]
 
     monkeypatch.setattr(
-        "td_graddft.scf.facade.unrestricted_reference_from_spec_with_jax_uks",
+        "td_graddft.scf.facade.unrestricted_molecule_from_spec_with_jax_uks",
         fake_builder,
     )
     monkeypatch.setattr("td_graddft.scf.facade.configure_jax_persistent_cache", fake_cache)
@@ -306,186 +238,6 @@ def test_rks_run_and_backend_helpers(monkeypatch):
     assert mf.jk_backend == "direct"
     assert mf.run() is mf
     assert mf.e_tot == -1.0
-
-
-def test_cuda_direct_scf_selects_gpu_cuda_backbone_when_available(monkeypatch, tmp_path):
-    monkeypatch.setattr("td_graddft.scf.facade.cuda_ffi_available", lambda: True)
-    monkeypatch.delenv("TD_GRADDFT_JAX_CACHE_DIR", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    cache_calls = []
-
-    def fake_cache(**kwargs):
-        cache_calls.append(kwargs)
-        return kwargs["cache_dir"]
-
-    monkeypatch.setattr("td_graddft.scf.facade.configure_jax_persistent_cache", fake_cache)
-
-    mf = scf.RKS(gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g"))
-    mf.integral_backend = "jax"
-
-    assert mf.cuda_direct_scf() is mf
-    assert mf.jk_backend == "direct"
-    assert mf.direct_jk_engine == "cuda"
-    assert mf.integral_backend == "libcint"
-    assert mf.grid_ao_backend == "jax"
-    assert mf._config().iteration_backend == "runtime"
-    assert cache_calls == [
-        {
-            "cache_dir": str(Path(tmp_path) / ".cache" / "td_graddft" / "jax"),
-            "min_compile_time_secs": 0.0,
-            "min_entry_size_bytes": 0,
-        }
-    ]
-
-
-def test_cuda_direct_scf_defaults_to_runtime_iteration_when_available(monkeypatch):
-    monkeypatch.setattr("td_graddft.scf.facade.cuda_ffi_available", lambda: True)
-
-    mf = scf.RKS(gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g"))
-
-    assert mf.cuda_direct_scf(execution_device="gpu") is mf
-    assert mf.jk_backend == "direct"
-    assert mf.direct_jk_engine == "cuda"
-    assert mf.integral_backend == "libcint"
-    assert mf.grid_ao_backend == "jax"
-    assert mf._config().iteration_backend == "runtime"
-
-
-def test_cuda_direct_scf_ignores_removed_runtime_disable_env(monkeypatch):
-    monkeypatch.setattr("td_graddft.scf.facade.cuda_ffi_available", lambda: True)
-    monkeypatch.setenv("TD_GRADDFT_DISABLE_CUDA_RUNTIME_SCF", "1")
-
-    mf = scf.RKS(gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g"))
-
-    assert mf.cuda_direct_scf(execution_device="gpu") is mf
-    assert mf.jk_backend == "direct"
-    assert mf.direct_jk_engine == "cuda"
-    assert mf.integral_backend == "libcint"
-    assert mf.grid_ao_backend == "jax"
-    assert mf._config().iteration_backend == "runtime"
-
-
-def test_cuda_direct_scf_no_longer_exposes_iteration_backend_selection(monkeypatch):
-    monkeypatch.setattr("td_graddft.scf.facade.cuda_ffi_available", lambda: True)
-
-    mf = scf.RKS(gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g"))
-
-    with pytest.raises(TypeError):
-        mf.cuda_direct_scf(execution_device="gpu", iteration_backend="lax")  # type: ignore[call-arg]
-
-
-def test_cuda_direct_scf_configures_jax_cache_when_env_requests_it(monkeypatch):
-    monkeypatch.setattr("td_graddft.scf.facade.cuda_ffi_available", lambda: True)
-    monkeypatch.setenv("TD_GRADDFT_JAX_CACHE_DIR", ".jax_cache/test")
-    monkeypatch.setenv("TD_GRADDFT_JAX_CACHE_MIN_COMPILE_SECS", "2.5")
-    monkeypatch.setenv("TD_GRADDFT_JAX_CACHE_MIN_ENTRY_SIZE_BYTES", "131072")
-    captured_cache = {}
-
-    def fake_cache(**kwargs):
-        captured_cache.update(kwargs)
-        return kwargs["cache_dir"]
-
-    monkeypatch.setattr("td_graddft.scf.facade.configure_jax_persistent_cache", fake_cache)
-
-    mf = scf.RKS(gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g"))
-
-    assert mf.cuda_direct_scf() is mf
-    assert captured_cache["cache_dir"] == ".jax_cache/test"
-    assert captured_cache["min_compile_time_secs"] == 2.5
-    assert captured_cache["min_entry_size_bytes"] == 131072
-
-
-def test_cuda_direct_scf_can_precompile_current_geometry(monkeypatch):
-    monkeypatch.setattr("td_graddft.scf.facade.cuda_ffi_available", lambda: True)
-    captured = {}
-
-    def fake_precompile(**kwargs):
-        captured.update(kwargs)
-
-    monkeypatch.setattr(
-        "td_graddft.scf.facade.precompile_restricted_cuda_direct_rks_reference",
-        fake_precompile,
-    )
-
-    mf = scf.RKS(gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g"), xc="pbe0")
-    mf.max_cycle = 23
-    assert mf.cuda_direct_scf(execution_device="gpu", precompile=True) is mf
-
-    assert mf._cuda_direct_reference_solver is not None
-    assert captured["atom"].symbols == ("H", "H")
-    assert captured["basis"] == "sto-3g"
-    assert captured["xc_spec"] == "pbe0"
-    assert captured["rks_config"].max_cycle == 23
-    assert mf._config().iteration_backend == "runtime"
-    assert captured["grid_ao_backend"] == "jax"
-    assert captured["integral_backend"] == "libcint"
-    assert captured["include_dipole_integrals"] is False
-
-
-def test_cuda_direct_scf_falls_back_to_cpu_libcint_when_cuda_unavailable(monkeypatch):
-    monkeypatch.setattr("td_graddft.scf.facade.cuda_ffi_available", lambda: False)
-
-    mf = scf.RKS(gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g"))
-    mf.integral_backend = "jax"
-
-    assert mf.cuda_direct_scf() is mf
-    assert mf.jk_backend == "full"
-    assert mf.direct_jk_engine == "jax"
-    assert mf.integral_backend == "libcint"
-    assert mf._config().iteration_backend == "runtime"
-
-
-def test_rks_cpu_execution_uses_ground_state_runner(monkeypatch):
-    captured = {}
-
-    def fake_inputs(**kwargs):
-        captured.update(kwargs)
-        return types.SimpleNamespace(
-            geometry_is_traced=False,
-            integral_backend=kwargs["integral_backend"],
-            grid_ao_backend=kwargs["grid_ao_backend"],
-            as_rks_kwargs=lambda: {},
-        )
-
-    def fake_runner(**kwargs):
-        return types.SimpleNamespace(
-            total_energy=-1.23,
-            mo_energy="jax_mo_energy",
-            mo_coeff="jax_mo_coeff",
-            mo_occ="jax_mo_occ",
-            converged=True,
-        )
-
-    monkeypatch.setattr("td_graddft.scf.facade.build_rks_integral_inputs", fake_inputs)
-    monkeypatch.setattr("td_graddft.scf.facade.run_rks_from_integrals", fake_runner)
-
-    mf = scf.RKS(gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g"))
-    mf.cuda_direct_scf(execution_device="cpu")
-    energy = mf.kernel()
-
-    assert energy == -1.23
-    assert mf.mo_energy == "jax_mo_energy"
-    assert captured["integral_backend"] == "libcint"
-    assert captured["grid_ao_backend"] == "jax"
-    assert captured["config"].jk_backend == "full"
-    assert captured["config"].direct_jk_engine == "jax"
-    assert captured["config"].iteration_backend == "runtime"
-    assert captured["include_dipole_integrals"] is False
-
-
-def test_rks_cpu_nuclear_gradient_is_disabled():
-    mf = scf.RKS(gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g"))
-    mf.cuda_direct_scf(execution_device="cpu")
-    with pytest.raises(NotImplementedError, match="implicit-differential"):
-        mf.nuc_grad_method().kernel()
-
-
-def test_rks_gpu_nuclear_gradient_is_disabled(monkeypatch):
-    monkeypatch.setattr("td_graddft.scf.facade.cuda_ffi_available", lambda: True)
-    mf = scf.RKS(gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g"))
-    mf.cuda_direct_scf(execution_device="gpu")
-    with pytest.raises(NotImplementedError, match="implicit-differential"):
-        mf.nuc_grad_method().kernel()
 
 
 def test_nuc_grad_method_reports_explicit_scf_gradient_is_disabled():

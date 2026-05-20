@@ -19,7 +19,7 @@ from pyscf import dft, gto
 
 from td_graddft import tdscf
 from td_graddft.features import restricted_grid_features_with_gradients
-from td_graddft.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
+from td_graddft.xc_backend.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
 from td_graddft.reference_legacy import restricted_reference_from_pyscf
 from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
 from td_graddft.tddft.response import build_restricted_response_matrices

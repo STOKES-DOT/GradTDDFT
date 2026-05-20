@@ -56,16 +56,6 @@ def test_pyscf_bridge_module_is_removed_from_public_api():
     raise AssertionError(f"{REMOVED_PYSCF_BRIDGE_MODULE} should no longer import successfully")
 
 
-def test_user_scripts_use_neural_xc_long_range_facade():
-    offenders = []
-    for path in TOOLS + EXAMPLES:
-        text = path.read_text()
-        if "LongRangeCorrectedFunctional" in text or "LongRangeXCNet" in text:
-            offenders.append(str(path))
-
-    assert offenders == []
-
-
 def test_user_scripts_avoid_old_neural_xc_names():
     offenders = []
     legacy_class = "DM21" "Like"

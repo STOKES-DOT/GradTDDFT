@@ -49,6 +49,8 @@ LEBEDEV_ORDER_TO_POINTS = {
     23: 194,
     29: 302,
 }
+BUNDLED_LEBEDEV_POINTS = (50, 74, 86)
+SUPPORTED_GRID_LEVELS = range(min(RAD_GRIDS.shape[0], ANG_ORDER.shape[0]))
 BRAGG_RADII = {
     1: 0.6614041435977716,
     6: 1.322808287195543,
@@ -88,16 +90,34 @@ def _load_lebedev_table_np(npoints: int) -> np.ndarray:
 
 
 def _default_rad(nuc: int, level: int) -> int:
+    level = _validate_grid_level(level)
     period = int(np.sum(int(nuc) > PERIOD_TAB))
     return int(RAD_GRIDS[int(level), period])
 
 
 def _default_ang(nuc: int, level: int) -> int:
+    level = _validate_grid_level(level)
     period = int(np.sum(int(nuc) > PERIOD_TAB))
     order = int(ANG_ORDER[int(level), period])
     if order not in LEBEDEV_ORDER_TO_POINTS:
         raise NotImplementedError(f"Lebedev order {order} is not bundled.")
-    return int(LEBEDEV_ORDER_TO_POINTS[order])
+    target_points = int(LEBEDEV_ORDER_TO_POINTS[order])
+    available = [npoints for npoints in BUNDLED_LEBEDEV_POINTS if npoints <= target_points]
+    if not available:
+        raise NotImplementedError(
+            f"Lebedev grid with up to {target_points} points is not bundled."
+        )
+    return int(max(available))
+
+
+def _validate_grid_level(level: int) -> int:
+    level = int(level)
+    if level not in SUPPORTED_GRID_LEVELS:
+        supported = f"0..{max(SUPPORTED_GRID_LEVELS)}"
+        raise NotImplementedError(
+            f"Bundled strict-JAX molecular grid supports levels {supported}."
+        )
+    return level
 
 
 def _treutler_radial_grid(n: int, charge: int) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -375,9 +395,7 @@ def build_molecular_grid(
     spin: int = 0,
     level: int = 0,
 ) -> tuple[jnp.ndarray, jnp.ndarray, MoleculeSpec]:
-    if int(level) != 0:
-        raise NotImplementedError("Bundled strict-JAX molecular grid currently supports level=0 only.")
-
+    level = _validate_grid_level(level)
     spec = parse_molecule_spec(atom, unit=unit, charge=charge, spin=spin)
     coords, weights = build_molecular_grid_from_spec(spec, level=level)
     return coords, weights, spec
@@ -390,8 +408,7 @@ def build_molecular_grid_from_spec(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Build a molecular integration grid from explicit MoleculeSpec."""
 
-    if int(level) != 0:
-        raise NotImplementedError("Bundled strict-JAX molecular grid currently supports level=0 only.")
+    level = _validate_grid_level(level)
     if _spec_has_jax_tracer(spec):
         return _build_molecular_grid_from_spec_jax(spec, level=level)
     return _build_molecular_grid_from_spec_numpy(spec, level=level)

@@ -1,517 +1,425 @@
-<p align="center">
-  <img src="docs/assets/graddft-logo.svg" alt="GradTDDFT logo" width="760">
-</p>
+# TD-GradDFT
 
-# GradTDDFT / TD-GradDFT
+TD-GradDFT is a JAX research codebase for differentiable ground-state DFT,
+TDDFT/TDA response calculations, and Neural XC/RSH training. The Python package
+name is `td-graddft`; the import namespace is `td_graddft`.
 
-`TD-GradDFT` is a research codebase for time-dependent differentiable density
-functional theory in JAX. It provides a PySCF-style molecular API, strict-JAX
-SCF and TDDFT/TDA building blocks, Neural XC and neural range-separated hybrid
-training utilities, and benchmark workflows for spectra, fractional charge, and
-geometry-response experiments.
-
-The package name is `td-graddft`; the import namespace is `td_graddft`.
-
-## Repository Description
-
-GitHub description:
-
-> JAX research toolkit for differentiable TDDFT: strict-JAX SCF, TDA/Casida TDDFT, Neural XC/RSH training, spectra, integrals, and CUDA J/K experiments.
-
-## Project Status
-
-This repository is an active research prototype. The stable public entry points
-are the compact namespaces below:
+This repository is an active research prototype. APIs are kept practical for
+experiments, but the most stable entry points are:
 
 ```python
 from td_graddft import gto, scf, dft, tdscf, neural_xc, nn_rsh, training, workflows
 ```
 
-Lower-level modules such as `td_graddft.tddft`, `td_graddft.data.integrals`,
-`td_graddft.reference`, and `td_graddft.scf.run_*_from_integrals` are available
-for experiments and regression tests, but new scripts should prefer the public
-facades unless they need direct solver internals.
+## What The Project Does
 
-## Features
+- PySCF-style molecule and solver facades: `gto.M`, `scf.RKS`, `scf.UKS`,
+  `dft.RKS`, `dft.UKS`, `mf.TDA()`, and `mf.TDDFT()`.
+- Restricted and unrestricted SCF paths with differentiable JAX components.
+- Restricted and unrestricted TDA and Casida TDDFT response solvers.
+- Neural XC functionals with semilocal, HF, and optional PT2 local channels.
+- Strict and approximate response-kernel paths for HF/PT2 Neural XC channels.
+- Neural range-separated hybrid functionals with trainable RSH parameters.
+- GPU4PySCF-backed reference and training workflows for GPU SCF work.
+- Research scripts for H2 dissociation, S1 training, QH9-style benchmarks, and
+  closed-shell excited-state training.
 
-- PySCF-style molecule and solver facades:
-  `gto.M`, `scf.RKS`, `scf.UKS`, `dft.RKS`, `dft.UKS`, `mf.TDA()`, and
-  `mf.TDDFT()`.
-- Strict-JAX ground-state paths for restricted and unrestricted Kohn-Sham
-  calculations, with differentiable SCF machinery for geometry and training
-  experiments.
-- Restricted and unrestricted excited-state solvers for TDA and Casida TDDFT,
-  including excitation energies, transition dipoles, oscillator strengths, and
-  broadened spectra.
-- Neural XC functionals in the GradDFT/DM21 style, implemented with
-  JAX/Flax/Optax and exposed through `neural_xc.Functional(...)`.
-- Neural range-separated hybrid functionals through `nn_rsh.RSH(...)`, including
-  trainable `omega`, `alpha`, and `beta` parameters plus atom-centered and GNN
-  heads.
-- Multiple integral and J/K paths: PySCF/libcint references, pure-JAX Cartesian
-  Gaussian one- and two-electron integrals, density fitting, direct J/K, and
-  optional CUDA FFI acceleration.
-- Training utilities for ground-state energy/density matching, self-consistent
-  losses, excited-state fine tuning, Koopmans/Janak-style RSH objectives, and
-  fractional-charge analysis.
-- Reusable workflows for water, benzene, QH9-style benchmarks, TDDFT spectrum
-  comparisons, geometry optimization, frequency analysis, and plotting.
+## Current Backend Model
+
+TD-GradDFT separates three concerns:
+
+1. Molecule, grid, integral, SCF, and TDDFT data structures live in
+   `td_graddft.gto`, `td_graddft.scf`, `td_graddft.dft`, and
+   `td_graddft.tddft`.
+2. Traditional XC energy-density components are routed through
+   `td_graddft.xc_backend`.
+3. Trainable Neural XC functionals are constructed through
+   `td_graddft.neural_xc`.
+
+Traditional XC evaluation now expects the active Python environment to provide
+`jax_xc`. TD-GradDFT no longer relies on a vendored generated `jax_xc` fallback.
+Install the `upstreams` extra for the standard development environment:
+
+```bash
+python -m pip install -e ".[dev,upstreams]"
+```
+
+The `upstreams` extra installs `jax-xc` and `pyscf`.
 
 ## Repository Layout
 
 ```text
 src/td_graddft/
   gto/                 PySCF-style molecule input
-  scf/                 RHF/RKS/UKS solvers, facades, J/K backends, CUDA FFI
-  dft/                 XC parsing, RSH presets, trainable RSH helpers
+  scf/                 RHF/RKS/UKS solvers, facades, GPU4PySCF bridges
+  dft/                 XC/RSH helpers exposed through DFT-style facades
   tdscf/               PySCF-style TDA and TDDFT facades
-  tddft/               Response matrices, TDA/Casida solvers, eigensolvers
-  neural_xc/           Neural XC public API and DM21-like functionals
-  nn_rsh/              Neural range-separated hybrid package
-  training/            Ground-state, excited-state, and RSH training utilities
-  workflows/           Config-driven training and spectrum pipelines
-  data/                Molecules, basis data, grids, integral engines
-  df/                  Density-fitting J/K helpers
-  traditional_xc/      Classic XC functional wrappers
-  realtime.py          Density-matrix propagation utilities
-  spectra.py           Spectra, oscillator strengths, transition dipoles
+  tddft/               Response matrices, TDA/Casida solvers, response kernels
+  xc_backend/          jax_xc adapter, XC parser, RSH preset metadata
+  neural_xc/           Neural XC construction, channels, response logic
+  nn_rsh/              Neural range-separated hybrid models
+  training/            Ground-state and excited-state training utilities
+  workflows/           Config-driven workflow helpers
+  data/                Basis data, grids, integral helpers, references
 
-src/td_graddft_tools/
-  fractional_charge/   Piecewise-linearity and fractional-charge workflows
-  geomopt_freq/        Geometry optimization and harmonic frequency tools
-
-examples/              End-to-end scripts and small benchmark drivers
-tools/                 Research and benchmark utilities
-docs/                  Architecture notes and implementation plans
+examples/              End-to-end examples and small comparisons
+tools/                 Research, benchmark, and training drivers
+scripts/               Shell/Python workflow entry points
 tests/                 Unit and regression tests
 ```
 
-Local run products such as `outputs/`, `tmp/`, `artifacts/`, `build/`, caches,
-and `.tmp_*` files are not part of the source release.
+Generated outputs, checkpoints, plots, remote run logs, and temporary artifacts
+should stay outside source control unless a script explicitly needs them as a
+small test fixture.
 
 ## Installation
 
-### Requirements
-
-- Python 3.10 or newer.
-- A working C/C++ build toolchain for packages that compile native extensions.
-- JAX and `jaxlib`; use a CPU or CUDA build that matches your hardware.
-- Optional: PySCF for reference calculations and PySCF/libcint-backed chemistry
-  workflows.
-- Optional: CUDA, `nvcc`, and a GPU-enabled JAX install for CUDA FFI direct J/K.
-
-### CPU Development Install
+### CPU Development
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
-```
-
-This installs the core JAX/Flax/Optax stack and test tooling.
-
-### Install With Optional Upstream Chemistry Dependencies
-
-```bash
 python -m pip install -e ".[dev,upstreams]"
 ```
 
-The `upstreams` extra installs:
+### GPU Workflows
 
-- `pyscf`, used for reference calculations and optional comparison tests.
-- `jax-xc`, used for JAX-native libxc-style XC functionals where available.
+Install a CUDA-enabled JAX build and a GPU4PySCF environment that matches the
+target machine. TD-GradDFT GPU SCF training workflows use GPU4PySCF rather than
+project-owned CUDA kernels.
 
-### GPU And CUDA FFI Notes
-
-Install the CUDA-enabled `jaxlib` build that matches your CUDA runtime first.
-Then install this package as usual:
+Useful runtime checks:
 
 ```bash
-python -m pip install -e ".[dev,upstreams]"
+python - <<'PY'
+import jax
+import td_graddft
+from td_graddft.xc_backend import jax_xc_backend_info
+
+print(jax.devices())
+print(jax_xc_backend_info())
+print(td_graddft.__name__)
+PY
 ```
 
-Optional CUDA FFI kernels can be built during packaging:
+## Traditional XC Support
 
-```bash
-TD_GRADDFT_BUILD_CUDA_FFI=1 \
-TD_GRADDFT_CUDA_ARCH=native \
-python -m pip install -e .
+Traditional XC names are parsed by `td_graddft.xc_backend.jax_libxc`. The parser
+accepts PySCF-like composite strings, canonical `jax_xc` names, and a small set
+of user-friendly component aliases.
+
+### Strict Default Components
+
+These components are allowed by default when `jax_xc` is installed:
+
+```text
+lda_x
+lda_c_pw
+lda_c_vwn
+lda_c_vwn_rpa
+gga_x_b88
+gga_x_pbe
+gga_x_wpbeh
+gga_c_lyp
+gga_c_pbe
 ```
 
-Useful environment variables:
+`hf` is parsed as an exact-exchange term, but it is not a semilocal
+`jax_xc` energy-density component.
 
-```bash
-export TD_GRADDFT_NVCC=/usr/local/cuda/bin/nvcc
-export TD_GRADDFT_CUDA_ARCH=sm_90
-export TD_GRADDFT_JAX_CACHE_DIR=.jax_cache
-export TD_GRADDFT_CUDA_JK_LIBRARY=/path/to/libtd_graddft_cuda_direct_jk.so
-export TD_GRADDFT_DISABLE_CUDA_RUNTIME_SCF=1  # opt out of cuda_runtime SCF iteration
+### Composite Aliases
+
+Common aliases expand into explicit components:
+
+```text
+lda
+svwn
+svwn_rpa
+pbe
+pbe0 / pbeh / hyb_gga_xc_pbeh
+b3lyp / hyb_gga_xc_b3lyp
+bhandhlyp / hyb_gga_xc_bhandhlyp
+lc_wpbe_local / lc-wpbe-local / lcwpbe_local / lc_wpbe_semilocal
 ```
 
-If `TD_GRADDFT_CUDA_JK_LIBRARY` points to a prebuilt library, runtime compilation
-is skipped.
+Safe wrapped composites include PBE0/PBEH, B3LYP, BHandHLYP, HSE03, and HSE06.
+They are resolved into explicit local child channels where possible.
 
-## Supported Methods
+### Friendly Component Names
 
-| Area | Current support |
-| --- | --- |
-| Molecules | Cartesian AO molecular input via `gto.M`; charge, spin, Angstrom/Bohr style specs. |
-| Ground state | RHF kernels, RKS and UKS facades, differentiable SCF, PySCF/libcint reference bridges. |
-| SCF backends | Full J/K, density fitting for RKS, direct J/K, optional CUDA direct J/K for supported Cartesian basis sets. |
-| XC models | Local JAX parser for core LDA/GGA/hybrid channels, optional `jax_xc` bridge for libxc-translated functionals, classic helpers for LDA/PBE/PBE0/B3LYP-style workflows, and RSH presets such as LC-wPBE and wB97X-D. |
-| TDDFT | Restricted and unrestricted TDA, restricted and unrestricted Casida TDDFT, dense and Davidson-style eigensolver paths. |
-| Observables | Excitation energies, eV conversion, transition dipoles, oscillator strengths, Lorentzian spectra. |
-| Neural XC | Residual and MLP Neural XC functionals, DM21-like feature modes, HF/PT2 channels, long-range correction heads. |
-| Neural RSH | Trainable `omega`, `alpha`, `beta`; minimal parameter heads, atom-centered density descriptors, GNN parameter heads. |
-| Training | Ground-state energy/density/orbital losses, fixed-density and self-consistent modes, excited-state constraints, RSH Koopmans/Janak objectives. |
-| Analysis tools | Fractional-charge scans, geometry optimization, harmonic frequencies, benchmark and plotting scripts. |
+Neural XC component lists can use canonical `jax_xc` names or friendlier names:
 
-Integral-engine notes:
+```text
+lyp_c      -> gga_c_lyp
+b88_x      -> gga_x_b88
+pbe_x      -> gga_x_pbe
+pbe_c      -> gga_c_pbe
+scan_x     -> mgga_x_scan
+scan_c     -> mgga_c_scan
+r2scan_x   -> mgga_x_r2scan
+tpss_c     -> mgga_c_tpss
+```
 
-- Pure-JAX Cartesian Gaussian integral validation supports angular momentum up
-  to `l <= 3`.
-- Auto-JIT paths are optimized for common `s`/`p` workloads; higher angular
-  momentum or large contractions can fall back to safer non-JIT paths.
-- CUDA direct J/K is optional and depends on GPU-enabled JAX, `nvcc` or a
-  prebuilt shared library, and the supported CUDA basis/kernel configuration.
+Family-qualified names are also accepted:
 
-## Supported Basis Sets
+```text
+gga:lyp_c
+mgga:scan_x
+hyb_gga:some_xc_name
+```
 
-Basis names follow PySCF-style spelling and are normalized internally, so common
-forms such as `sto-3g`, `6-31g*`, `def2-svp`, and `cc-pvdz` are accepted. The
-strict-JAX basis loader reads the bundled `.dat` snapshot in
-`src/td_graddft/data/pyscf_basis_snapshot`; PySCF-backed reference paths can also
-use basis names that an installed PySCF environment can resolve.
+Ambiguous names such as `scan`, `pbe`, or `pw91` are rejected as individual
+components. Use `scan_x`/`scan_c`, `pbe_x`/`pbe_c`, or a full composite XC spec
+instead.
 
-Representative bundled orbital basis families:
+`jax_xc` kinetic-energy functionals such as `gga_k_*` are rejected for XC
+component lists by default.
 
-- Minimal and compact bases: `sto-3g`, `sto-6g`, `dz`, `dzp`, `dzvp`, `dzvp2`,
-  `tzv`, `tzp`, `qzp`, `ano`, `roos-dz`, `roos-tz`, `adzp`, `atzp`, `aqzp`.
-- Pople bases: `3-21g`, `3-21g*`, `3-21++g`, `3-21++g*`, `4-31g`, `6-31g`,
-  `6-31g*`, `6-31g**`, `6-31+g`, `6-31+g*`, `6-31+g**`, `6-31++g`,
-  `6-31++g*`, `6-31++g**`, `6-311g`, `6-311g*`, `6-311g**`, `6-311+g`,
-  `6-311+g*`, `6-311+g**`, `6-311++g`, `6-311++g*`, and `6-311++g**`.
-- Dunning correlation-consistent bases: `cc-pvdz`, `cc-pvtz`, `cc-pvqz`,
-  `cc-pv5z`, `aug-cc-pvdz`, `aug-cc-pvtz`, `aug-cc-pvqz`, `aug-cc-pv5z`,
-  `cc-pcvdz`, `cc-pcvtz`, `cc-pcvqz`, `cc-pcv5z`, `cc-pcv6z`, `cc-pwcvdz`,
-  `cc-pwcvtz`, `cc-pwcvqz`, `cc-pwcv5z`, plus DK, DK3, PP, and PP-NR variants.
-- F12 and auxiliary Dunning variants: `cc-pvdz-f12`, `cc-pvtz-f12`,
-  `cc-pvqz-f12`, `cc-pv5z-f12`, `cc-pvdz-f12rev2`, `cc-pvtz-f12rev2`,
-  `cc-pvqz-f12rev2`, `cc-pv5z-f12rev2`, and OptRI companion bases.
-- Karlsruhe/def2 bases: `def2-svp`, `def2-svpd`, `def2-tzvp`, `def2-tzvpd`,
-  `def2-tzvpp`, `def2-tzvppd`, `def2-qzvp`, `def2-qzvpd`, `def2-qzvpp`,
-  `def2-qzvppd`, `def2-mtzvp`, `def2-mtzvpp`, `ma-def2-svp`, `ma-def2-svpp`,
-  `ma-def2-tzvp`, `ma-def2-tzvpp`, `ma-def2-qzvp`, and `ma-def2-qzvpp`.
-- Jensen polarization-consistent bases: `pc-0` through `pc-4`, `aug-pc-0`
-  through `aug-pc-4`, `pcseg-0` through `pcseg-4`, and `aug-pcseg-0` through
-  `aug-pcseg-4`.
-- Relativistic, ECP, and heavy-element families: `lanl2dz`, `lanl2tz`,
-  `lanl08`, `stuttgart_dz`, `stuttgart_rsc`, `bfd_vdz`, `bfd_vtz`, `bfd_vqz`,
-  `bfd_v5z`, `bfd_pp`, `Burkatzi-Filippi-Dolg-PP`, `crenbl`, `crenbs`,
-  `sbkjc`, `sarc-dkh2`, `ccECP`, `ccECP_cc-pVDZ` through `ccECP_cc-pV6Z`,
-  `ccECP_aug-cc-pVDZ` through `ccECP_aug-cc-pV6Z`, and spin-orbit ECP data.
-- Fitting and auxiliary bases: `def2-*-ri`, `def2-universal-jfit`,
-  `def2-universal-jkfit`, `cc-pv*z-ri`, `cc-pv*z-jkfit`, `cc-pV*Z_MP2FIT`,
-  `weigend_cfit`, `ahlrichs_cfit`, `demon_cfit`, `DgaussA1_dft_cfit`,
-  `DgaussA2_dft_cfit`, `DgaussA1_dft_xfit`, and `DgaussA2_dft_xfit`.
+### Experimental jax_xc Components
 
-Backend caveats:
+Installed `jax_xc` LDA/GGA/MGGA/hybrid names that are not in the strict default
+set are discovered dynamically. They are marked experimental and require:
 
-- Strict-JAX molecule construction currently accepts named basis strings from
-  the bundled `.dat` snapshot and converts them to Cartesian AOs.
-- The pure-JAX integral implementation validates angular momentum up to `l <= 3`.
-  Higher angular momentum basis functions should use a PySCF/libcint-backed path
-  unless the target JAX integral path explicitly supports them.
-- Auxiliary RI/JFIT/JKFIT/MP2FIT files are included for density-fitting and
-  reference workflows; they are not always appropriate as primary orbital bases.
+```python
+allow_experimental_jax_xc=True
+```
 
-## Supported Exchange-Correlation Functionals
+This is intentional. MGGA components need a tau/mo_fn bridge, and some generated
+hybrid or B97-family forms have not been validated against the training paths.
 
-TD-GradDFT has three XC layers: a guaranteed local JAX compatibility layer, an
-optional `jax_xc` backend, and neural/trainable functional wrappers.
+Inspect support status programmatically:
 
-Guaranteed local JAX parser support:
+```python
+from td_graddft import neural_xc
 
-- Primitive channels: `lda_x`, `lda_c_pw`, `lda_c_vwn`, `lda_c_vwn_rpa`,
-  `gga_x_b88`, `gga_x_pbe`, `gga_x_wpbeh`, `gga_c_lyp`, `gga_c_pbe`, and `hf`.
-- Aliases and composites: `lda`, `svwn`, `svwn_rpa`, `pbe`, `pbe0`, `pbeh`,
-  `hyb_gga_xc_pbeh`, `b3lyp`, `hyb_gga_xc_b3lyp`, `bhandhlyp`,
-  `hyb_gga_xc_bhandhlyp`, `lc_wpbe_local`, `lc-wpbe-local`,
-  `lcwpbe_local`, and `lc_wpbe_semilocal`.
-- Classic helper constructors: `make_lda_functional()`, `make_pbe_functional()`,
-  `make_pbe0_functional()`, and `make_b3lyp_functional()`.
+for info in neural_xc.available_semilocal_component_infos(include_experimental=True):
+    print(info.name, info.status, info.family, info.reason)
+```
 
-`jax_xc` backend support:
+## Neural XC Construction
 
-- `td_graddft.jax_xc_adapter.load_jax_xc()` resolves backends in this order:
-  external `jax_xc`, vendored generated `third_party/jax_xc/generated`, then the
-  TD-GradDFT fallback subset.
-- `jax_libxc.eval_xc_energy_density(...)` uses the local strict JAX
-  implementations first, then safe wrapped `jax_xc` composites, then explicitly
-  enabled experimental `jax_xc` functionals.
-- Safe wrapped composites include PBE0/PBEH, B3LYP, B3PW91, BHandHLYP, HSE03,
-  HSE06, and CAM-B3LYP.
-- Active `jax_xc` MGGA names beginning with `mgga_` or `hyb_mgga_` are routed
-  through an experimental tau/mo_fn bridge and keep the MGGA response variables
-  `[rho, grad_x, grad_y, grad_z, tau]` for `f_xc`.
-- B97-family, MGGA, and other unvalidated generated functionals require
-  `allow_experimental_jax_xc=True`; Neural XC training rejects them by default.
+The main user entry point is:
 
-Range-separated and neural XC support:
+```python
+from td_graddft import neural_xc
 
-- RSH presets: `lc-wpbe` and `wb97x-d`, with aliases such as `LC_WPBE`,
-  `lc_wpbe`, `wb97xd`, `omega-b97x-d`, and `omega_b97x_d`.
-- `lc-wpbe` uses SR-PBE semilocal exchange plus LR-HF exchange and PBE
-  correlation. Defaults: `omega=0.4`, SR-HF fraction `0.0`, LR-HF fraction `1.0`.
-- `wb97x-d` uses a B97-family range-separated hybrid form with dispersion
-  metadata. Defaults: `omega=0.2`, SR-HF fraction `0.222036`, LR-HF fraction
-  `1.0`.
-- Neural XC supports residual and MLP architectures, DM21-style feature modes,
-  HF/PT2 channels, semilocal channel bases from the supported XC specs, and
-  trainable long-range correction heads.
-- Neural XC training data that uses HF or PT2 channels should be built with
-  `compute_local_hfx_features=True`, `compute_local_hfx_aux=True`, and
-  `compute_local_pt2_features=True` when `include_pt2_channel=True`.
-- Neural RSH supports trainable `omega`, `alpha`, and `beta` parameters, plus
-  atom-centered and GNN parameter heads.
+functional = neural_xc.Functional(
+    architecture="residual",
+    semilocal_xc=("lda_x", "gga_x_b88", "lyp_c"),
+    hidden_dims=(256, 256, 256),
+    input_feature_mode="canonical",
+    include_pt2_channel=True,
+    pt2_channel_mode="scaled_projected",
+    response_hf_mode="strict",
+    response_pt2_mode="strict",
+)
+```
 
-## Quick Start
+The local Neural XC form is:
 
-### 1. Closed-Shell RKS Ground State
+```text
+e_xc^NN(r) =
+    sum_k c_k^theta(r) e_k^semilocal(r)
+  + c_pt2^theta(r) e_pt2(r)       # optional
+  + c_hf^theta(r) e_hf(r)
+```
+
+The basis-channel order is fixed:
+
+```text
+[semilocal_1, ..., semilocal_n, pt2?, hf]
+```
+
+Important construction fields:
+
+- `semilocal_xc`: semilocal basis components or composite specs. Examples:
+  `("lda_x", "gga_x_b88", "gga_c_lyp")`, `"pbe"`, or `"b3lyp"`.
+- `include_pt2_channel`: adds a PT2 local channel before the HF channel.
+- `pt2_channel_mode`: currently `scaled_projected` or `local_exact`.
+- `response_hf_mode`: `approx` or `strict`.
+- `response_pt2_mode`: `approx` or `strict`.
+- `input_feature_mode`: `canonical` or `enhanced`.
+- `architecture`: `residual`/`graddft_residual` or `simple_mlp`.
+- `allow_experimental_jax_xc`: opt in to unvalidated installed `jax_xc`
+  components.
+
+The default Neural XC semilocal basis is the B3LYP local decomposition:
+
+```text
+("lda_x", "gga_x_b88", "lda_c_vwn_rpa", "gga_c_lyp")
+```
+
+with default coefficient priors:
+
+```text
+(0.08, 0.72, 0.19, 0.81, 0.20)
+```
+
+The final value is the HF coefficient prior.
+
+### Config-Style Construction
+
+The same functional can be specified through dataclasses:
+
+```python
+from td_graddft import neural_xc
+
+config = neural_xc.Config(
+    components=neural_xc.ComponentSpec(
+        semilocal=("pbe_x", "pbe_c"),
+        allow_experimental_jax_xc=False,
+    ),
+    channels=neural_xc.ChannelSpec(
+        hf="spin_resolved",
+        pt2="scaled_projected",
+        response_hf="strict",
+        response_pt2="strict",
+    ),
+    network=neural_xc.NetworkSpec(
+        architecture="residual",
+        hidden_dims=(256, 256, 256),
+    ),
+)
+
+functional = neural_xc.Functional(config=config)
+```
+
+### Custom Non-HF Channels
+
+Advanced users can provide a `SemilocalEnergyDensityModule` or a custom
+`energy_density_channels_fn`. This is useful when the semilocal part is not a
+plain `jax_xc` component list.
+
+```python
+module = neural_xc.make_libxc_semilocal_module(("gga_x_pbe", "gga_c_pbe"))
+
+functional = neural_xc.Functional(
+    non_hf_module=module,
+    include_pt2_channel=False,
+)
+```
+
+## Ground-State And Excited-State Examples
+
+### RKS Ground State
 
 ```python
 from td_graddft import gto, scf
 
 mol = gto.M(
-    atom="O 0 0 0; H 0 0.757 0.587; H 0 -0.757 0.587",
+    atom="H 0 0 0; H 0 0 0.74",
     basis="sto-3g",
     unit="Angstrom",
-    charge=0,
-    spin=0,
 )
 
 mf = scf.RKS(mol, xc="pbe")
 mf.grids_level = 0
-mf.max_cycle = 80
 energy = mf.kernel()
 
-print("E_tot =", energy)
-print("MO energies =", mf.mo_energy)
+print(energy)
+print(mf.mo_energy)
 ```
 
-`td_graddft.dft.RKS` is an alias for the same facade:
+### TDA And Casida TDDFT
 
 ```python
-from td_graddft import dft
-
-mf = dft.RKS(mol, xc="b3lyp").run()
-```
-
-### 2. TDA And Full TDDFT Excited States
-
-```python
-from td_graddft import tdscf
-
-td = tdscf.TDA(mf)
-td.nstates = 5
+td = mf.TDA()
+td.nstates = 3
 td.kernel()
-
-print("TDA energies / Ha:", td.e)
-print("TDA energies / eV:", td.e_ev)
-print("Oscillator strengths:", td.oscillator_strength())
+print(td.e_ev)
 
 td_full = mf.TDDFT()
-td_full.nstates = 5
+td_full.nstates = 3
 td_full.kernel()
-print("Casida TDDFT energies / eV:", td_full.e_ev)
+print(td_full.e_ev)
 ```
 
-### 3. Open-Shell UKS And Unrestricted TDA
+### H2 Neural XC Training Scripts
 
-```python
-from td_graddft import gto, scf
-
-oh = gto.M(
-    atom="O 0 0 0; H 0 0 0.9697",
-    basis="6-31g",
-    unit="Angstrom",
-    charge=0,
-    spin=1,
-)
-
-mf = scf.UKS(oh, xc="b3lyp")
-mf.max_cycle = 120
-mf.kernel()
-
-tda = mf.TDA()
-tda.kernel(nstates=6)
-
-print(tda.e_ev)
-print(tda.oscillator_strength())
-```
-
-### 4. Select SCF And J/K Backends
-
-```python
-from td_graddft import scf
-
-# Dense/full J/K, the default RKS path.
-mf_full = scf.RKS(mol, xc="pbe0")
-mf_full.kernel()
-
-# Density-fitting RKS.
-mf_df = scf.RKS(mol, xc="pbe0").density_fit()
-mf_df.kernel()
-
-# Direct J/K RKS on the JAX/libcint path.
-mf_direct = scf.RKS(mol, xc="pbe0").direct_scf()
-mf_direct.kernel()
-
-# CUDA direct J/K when CUDA FFI is available.
-mf_cuda = scf.RKS(mol, xc="pbe0")
-mf_cuda.cuda_direct_scf(execution_device="gpu")
-mf_cuda.kernel()
-```
-
-If `execution_device="gpu"` is requested and CUDA FFI is unavailable, the CUDA
-path raises an explicit error. With `execution_device="auto"`, it falls back to
-the non-CUDA path.
-When CUDA FFI is available, `cuda_direct_scf()` defaults to
-`iteration_backend="cuda_runtime"`; pass `iteration_backend="python"` or set
-`TD_GRADDFT_DISABLE_CUDA_RUNTIME_SCF=1` to use the eager Python loop, and pass
-`iteration_backend="lax"` or `precompile=True` for the explicit XLA path.
-
-### 5. Neural XC Ground-State Training
-
-```python
-from td_graddft import neural_xc, training
-
-# Use a converged reference from an SCF run.
-datum = training.GroundStateDatum.from_reference(mf.reference)
-
-functional = neural_xc.Functional(
-    architecture="residual",
-    hidden_dims=(64, 64),
-    input_feature_mode="dm21_original",
-)
-
-trainer = training.NeuralXCTrainer(
-    functional=functional,
-    molecules=[datum],
-)
-
-result = trainer.kernel(
-    steps=50,
-    learning_rate=1e-4,
-    loss="ground_state",
-)
-
-print(result.history["loss"][-1])
-print(result.params)
-```
-
-### 6. Neural RSH Parameter Optimization
-
-```python
-from td_graddft import nn_rsh, training
-
-rsh_functional = nn_rsh.RSH("lc-wpbe").trainable(
-    params=("omega", "alpha", "beta"),
-    hidden_dims=(32,),
-)
-
-optimizer = training.RSHOptimizer(
-    functional=rsh_functional,
-    molecules=[datum],
-)
-
-rsh_result = optimizer.kernel(
-    steps=50,
-    learning_rate=1e-3,
-    loss="koopmans_ip_ea",
-)
-
-print("omega history:", rsh_result.history["omega"])
-print("alpha history:", rsh_result.history["alpha"])
-print("beta history:", rsh_result.history["beta"])
-```
-
-### 7. Config-Driven Spectrum Workflow
-
-```python
-from dataclasses import replace
-
-from td_graddft.workflows import (
-    run_experiment,
-    water_experiment_config,
-)
-
-config = water_experiment_config(
-    basis="sto-3g",
-    xc="b3lyp",
-    steps=200,
-)
-
-config = replace(
-    config,
-    simulation=replace(config.simulation, nstates=8, execution_device="auto"),
-)
-
-run = run_experiment(config)
-print(run.runs[0].outputs.spectrum_csv)
-print(run.runs[0].outputs.spectrum_png)
-```
-
-For command-line use, see:
+Representative command-line entry points:
 
 ```bash
-python examples/run_workflow_experiment.py --system water --basis sto-3g --steps 200 --states 8
-python examples/compare_pyscf_vs_jax_tddft_no_neural.py --xc-mode hf --basis sto-3g
-python examples/run_oh_open_shell_tda.py --xc b3lyp --basis 6-31g --nstates 6
+python tools/h2_self_consistent_ground_train5_dense100_vs_fci.py \
+  --basis sto-3g \
+  --semilocal-xc lda_x gga_x_b88 lyp_c \
+  --include-pt2-channel \
+  --steps 100
+
+python tools/h2_s1_tda_train5_dense100_vs_fci.py \
+  --basis sto-3g \
+  --semilocal-xc lda_x gga_x_b88 lyp_c \
+  --include-pt2-channel \
+  --response-pt2-mode strict \
+  --steps 100
 ```
 
-## Tests
+For production H2 S1 dissociation experiments we usually test with `sto-3g` and
+then train with `6-31+g*`, using GPU4PySCF for ground-state SCF work.
 
-Install development dependencies, then run:
+## Basis Sets
 
-```bash
-pytest -q
+Basis names use PySCF-style spelling and are normalized internally. Common
+examples include:
+
+```text
+sto-3g
+6-31g
+6-31g*
+6-31+g*
+6-31++g**
+def2-svp
+def2-tzvp
+cc-pvdz
+aug-cc-pvdz
 ```
 
-Useful focused checks:
+Strict-JAX basis loading reads the bundled PySCF basis snapshot. PySCF-backed
+reference paths can use any basis available in the active PySCF installation.
+
+## Testing
+
+Install development dependencies:
 
 ```bash
-pytest -q tests/test_pyscf_style_ground_state_api.py
-pytest -q tests/test_pyscf_style_excited_state_api.py
+python -m pip install -e ".[dev,upstreams]"
+```
+
+Run focused checks:
+
+```bash
+pytest -q tests/test_jax_xc_adapter.py
+pytest -q tests/test_jax_libxc.py
 pytest -q tests/test_neural_xc_public_api.py
-pytest -q tests/test_integrals_jax.py
+pytest -q tests/test_neural_xc_runtime.py
+pytest -q tests/test_tddft.py
 ```
 
-Some tests require optional dependencies such as PySCF, CUDA, or a visible GPU;
-those tests skip or fail explicitly when the required backend is unavailable.
+Some tests require PySCF, GPU4PySCF, CUDA-visible devices, or generated
+reference data. Those tests should either skip cleanly or fail with an explicit
+backend availability error.
 
 ## Development Notes
 
-- Prefer the public namespaces for scripts:
-  `gto`, `scf`, `dft`, `tdscf`, `neural_xc`, `nn_rsh`, `training`, `workflows`.
-- Keep generated results in `outputs/`, `tmp/`, or `artifacts/`; these paths are
-  ignored for source publishing.
-- Use `src/td_graddft_tools/` for reusable analysis helpers and `tools/` for
-  one-off benchmark drivers.
-- Keep PySCF-dependent paths optional where possible; strict-JAX workflows should
-  continue to run without importing PySCF at runtime.
-- CUDA FFI code should always have a CPU/JAX fallback or a clear availability
-  error.
+- Prefer public namespaces in scripts: `gto`, `scf`, `dft`, `tdscf`,
+  `neural_xc`, `nn_rsh`, `training`, and `workflows`.
+- Keep XC component parsing centralized in `td_graddft.xc_backend.jax_libxc`.
+- Keep installed `jax_xc` discovery centralized in
+  `td_graddft.xc_backend.jax_xc_adapter`.
+- Do not add a second top-level `td_graddft.jax_libxc` or
+  `td_graddft.jax_xc_adapter` module.
+- Keep GPU SCF paths routed through GPU4PySCF unless a new backend has a clear
+  CPU/JAX fallback and tests.
+- Keep run outputs in ignored directories such as `outputs/`, `tmp/`, or
+  `artifacts/`.
 
-## Related Upstreams
+## Upstreams
 
-This project is designed to interoperate with:
+TD-GradDFT interoperates with:
 
-- GradDFT-style differentiable ground-state abstractions.
-- PySCF for reference chemistry calculations and basis/integral validation.
+- JAX, Flax, and Optax for differentiable numerical work.
 - `jax_xc` for JAX-native XC components translated from libxc.
+- PySCF for reference calculations, basis validation, and GPU4PySCF workflows.
 
-The repository does not vendor GradDFT or PySCF. If third-party code is copied
-into the tree in the future, preserve the original license notices next to the
-copied files.
+Third-party source snapshots should keep their original license notices next to
+the copied files.

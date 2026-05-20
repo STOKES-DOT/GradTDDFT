@@ -25,11 +25,7 @@ import numpy as np
 import optax
 
 from td_graddft import neural_xc
-from td_graddft.data.basis import basis_from_pyscf_mol_cart
-from td_graddft.reference import restricted_reference_from_spec_with_jax_rks
 from td_graddft.reference_legacy import restricted_reference_from_pyscf
-from td_graddft.scf import RKSConfig
-from td_graddft.scf.cuda_direct_jk import CudaDirectJKBuilder, cuda_ffi_available
 from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,
@@ -103,26 +99,21 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--response-hf-mode",
-        choices=("nonlocal_exchange_only", "local_projected"),
-        default="nonlocal_exchange_only",
+        choices=("approx", "strict"),
+        default="strict",
     )
     parser.add_argument(
         "--response-pt2-mode",
-        choices=("nonlocal_correlation_only", "local_projected"),
-        default="local_projected",
+        choices=("approx", "strict"),
+        default="approx",
     )
     parser.add_argument("--dm21-hfx-channels", type=int, default=2)
     parser.add_argument("--grid-level", type=int, default=0)
     parser.add_argument(
         "--reference-backend",
-        choices=("pyscf", "jax_direct_cuda", "pyscf_direct_cuda"),
+        choices=("pyscf",),
         default="pyscf",
-        help=(
-            "Reference SCF path. 'jax_direct_cuda' uses strict JAX RKS with "
-            "RKSConfig(jk_backend='direct', direct_jk_engine='cuda'). "
-            "'pyscf_direct_cuda' uses PySCF for HF/PT2 feature construction "
-            "and attaches the same direct-CUDA J/K builder for training SCF."
-        ),
+        help="Reference SCF path.",
     )
     parser.add_argument("--pyscf-conv-tol", type=float, default=1e-9)
     parser.add_argument("--pyscf-max-cycle", type=int, default=80)
@@ -311,49 +302,16 @@ def build_reference(
         (Z_TO_SYMBOL[int(z)], tuple(float(x) for x in xyz))
         for z, xyz in zip(sample.atomic_numbers, sample.coordinates_angstrom, strict=True)
     ]
-    if str(reference_backend) == "jax_direct_cuda":
-        rks_config = RKSConfig(
-            xc_spec=str(xc),
-            max_cycle=int(pyscf_max_cycle),
-            conv_tol=float(pyscf_conv_tol),
-            conv_tol_density=float(jax_rks_conv_tol_density),
-            damping=float(jax_rks_damping),
-            iteration_backend="lax",
-            jk_backend="direct",
-            direct_jk_engine="cuda",
-            direct_scf_tol=float(jax_rks_direct_scf_tol),
-        )
-        ref = restricted_reference_from_spec_with_jax_rks(
-            atom=atom,
-            basis=basis,
-            xc_spec=str(xc),
-            unit="Angstrom",
-            charge=0,
-            spin=0,
-            cart=True,
-            grids_level=int(grid_level),
-            rks_config=rks_config,
-            grid_ao_backend="jax",
-            integral_backend="libcint",
-            compute_local_hfx_features=True,
-            compute_local_hfx_aux=True,
-            compute_local_pt2_features=True,
-            hfx_omega_values=omega_grid,
-            hfx_chunk_size=int(hfx_chunk_size),
-        )
-        return ref, bool(getattr(ref, "scf_converged", True)), float(ref.mf_energy)
-
     from pyscf import dft, gto
 
     reference_backend = str(reference_backend)
-    use_pyscf_direct_cuda = reference_backend == "pyscf_direct_cuda"
     mol = gto.M(
         atom=atom,
         unit="Angstrom",
         basis=basis,
         charge=0,
         spin=0,
-        cart=bool(use_pyscf_direct_cuda),
+        cart=False,
         verbose=0,
     )
     mf = dft.RKS(mol)
@@ -372,54 +330,7 @@ def build_reference(
         hfx_omega_values=omega_grid,
         hfx_chunk_size=int(hfx_chunk_size),
     )
-    if use_pyscf_direct_cuda:
-        if not cuda_ffi_available():
-            raise RuntimeError(
-                "reference_backend='pyscf_direct_cuda' requires CUDA FFI. "
-                "Set TD_GRADDFT_NVCC or TD_GRADDFT_CUDA_JK_LIBRARY and use a GPU JAX platform."
-            )
-        rks_config = RKSConfig(
-            xc_spec=str(xc),
-            max_cycle=int(pyscf_max_cycle),
-            conv_tol=float(pyscf_conv_tol),
-            conv_tol_density=float(jax_rks_conv_tol_density),
-            damping=float(jax_rks_damping),
-            iteration_backend="lax",
-            jk_backend="direct",
-            direct_jk_engine="cuda",
-            direct_scf_tol=float(jax_rks_direct_scf_tol),
-        )
-        direct_basis = basis_from_pyscf_mol_cart(
-            mf.mol,
-            max_l=3,
-            precompute_eri_groups=True,
-        )
-        include_pair_metadata = float(rks_config.direct_scf_tol) > 0.0
-        direct_builder = CudaDirectJKBuilder(
-            direct_basis,
-            include_pair_metadata=include_pair_metadata,
-            include_joltqc_metadata=include_pair_metadata,
-        )
-        if not bool(getattr(direct_builder, "has_rys_direct_jk", False)) and not include_pair_metadata:
-            direct_builder = CudaDirectJKBuilder(
-                direct_basis,
-                include_pair_metadata=True,
-                include_joltqc_metadata=True,
-            )
-        precompute_screening = getattr(direct_builder, "precompute_screening_metadata", None)
-        if float(rks_config.direct_scf_tol) > 0.0 and callable(precompute_screening):
-            precompute_screening()
-        ref = replace(
-            ref,
-            rep_tensor=jnp.zeros((0, 0, 0, 0), dtype=ref.h1e.dtype),
-            eri_pair_matrix=None,
-            scf_converged=bool(mf.converged),
-            direct_jk_engine="cuda",
-            direct_scf_tol=float(rks_config.direct_scf_tol),
-            direct_basis=direct_basis,
-            direct_cuda_jk_builder=direct_builder,
-        )
-    elif str(training_eri_storage) == "packed":
+    if str(training_eri_storage) == "packed":
         eri_pair_matrix = jnp.asarray(mf.mol.intor("int2e", aosym="s4"), dtype=ref.h1e.dtype)
         ref = replace(
             ref,
@@ -526,11 +437,6 @@ def main() -> None:
                 "nao": int(ref.h1e.shape[0]),
                 "has_hfx_local": getattr(ref, "hfx_local", None) is not None,
                 "has_pt2_local": getattr(ref, "pt2_local", None) is not None,
-                "has_direct_basis": getattr(ref, "direct_basis", None) is not None,
-                "has_direct_cuda_jk_builder": getattr(ref, "direct_cuda_jk_builder", None) is not None,
-                "has_rys_direct_jk": bool(
-                    getattr(getattr(ref, "direct_cuda_jk_builder", None), "has_rys_direct_jk", False)
-                ),
                 "training_eri_storage": str(args.training_eri_storage),
                 "has_eri_pair_matrix": getattr(ref, "eri_pair_matrix", None) is not None,
                 "rep_tensor_size": int(np.asarray(jax.device_get(ref.rep_tensor)).size),

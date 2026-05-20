@@ -21,7 +21,7 @@ from .rks import (
     _orthogonalizer,
     _vxc_matrix_from_grid_potential,
 )
-from ..jax_libxc import RestrictedFeatureBundle, eval_xc_energy_density, hybrid_coeff, parse_xc, xc_type
+from ..xc_backend.jax_libxc import RestrictedFeatureBundle, eval_xc_energy_density, hybrid_coeff, parse_xc, xc_type
 
 
 @dataclass(frozen=True)
@@ -193,10 +193,6 @@ def _raw_fock_and_energy_for_state(
     *,
     density_a: Array,
     density_b: Array,
-    mo_coeff_a: Array,
-    mo_coeff_b: Array,
-    mo_occ_a: Array,
-    mo_occ_b: Array,
     ao: Array,
     ao_deriv1: Array,
     weights: Array,
@@ -256,7 +252,6 @@ def _raw_fock_and_energy_for_state(
         + jnp.einsum("ij,ij->", density_b, k_b, precision=Precision.HIGHEST)
     )
     total = e_one + e_coul + e_x_hf + xc_energy + enuc
-    del mo_coeff_a, mo_coeff_b, mo_occ_a, mo_occ_b
     return total, xc_energy, fock_a, fock_b
 
 
@@ -487,15 +482,18 @@ def run_uks_from_integrals(
         alpha = None
         alpha_scalar = float(jnp.asarray(getattr(bound_xc, "exact_exchange_fraction", 0.0)))
 
-    for cycle in range(1, cfg.max_cycle + 1):
+    def eval_state(
+        density_a_arg: Array,
+        density_b_arg: Array,
+        mo_coeff_a_arg: Array,
+        mo_coeff_b_arg: Array,
+        mo_energy_a_arg: Array,
+        mo_energy_b_arg: Array,
+    ) -> tuple[Array, Array, Array, Array]:
         if bound_xc is None:
-            _, _, raw_fock_a, raw_fock_b = _raw_fock_and_energy_for_state(
-                density_a=density_a,
-                density_b=density_b,
-                mo_coeff_a=mo_coeff_a,
-                mo_coeff_b=mo_coeff_b,
-                mo_occ_a=mo_occ_a,
-                mo_occ_b=mo_occ_b,
+            return _raw_fock_and_energy_for_state(
+                density_a=density_a_arg,
+                density_b=density_b_arg,
                 ao=ao,
                 ao_deriv1=ao_deriv1,
                 weights=weights,
@@ -506,26 +504,35 @@ def run_uks_from_integrals(
                 cfg=cfg,
                 xc_kind=xc_kind,
             )
-        else:
-            _, _, raw_fock_a, raw_fock_b = _raw_fock_and_energy_for_bound_xc_state(
-                density_a=density_a,
-                density_b=density_b,
-                mo_coeff_a=mo_coeff_a,
-                mo_coeff_b=mo_coeff_b,
-                mo_occ_a=mo_occ_a,
-                mo_occ_b=mo_occ_b,
-                mo_energy_a=mo_energy_a,
-                mo_energy_b=mo_energy_b,
-                ao=ao,
-                ao_deriv1=ao_deriv1,
-                weights=weights,
-                h=h,
-                eri=eri,
-                enuc=enuc,
-                overlap=s,
-                bound_xc=bound_xc,
-                molecule_template=molecule_template,
-            )
+        return _raw_fock_and_energy_for_bound_xc_state(
+            density_a=density_a_arg,
+            density_b=density_b_arg,
+            mo_coeff_a=mo_coeff_a_arg,
+            mo_coeff_b=mo_coeff_b_arg,
+            mo_occ_a=mo_occ_a,
+            mo_occ_b=mo_occ_b,
+            mo_energy_a=mo_energy_a_arg,
+            mo_energy_b=mo_energy_b_arg,
+            ao=ao,
+            ao_deriv1=ao_deriv1,
+            weights=weights,
+            h=h,
+            eri=eri,
+            enuc=enuc,
+            overlap=s,
+            bound_xc=bound_xc,
+            molecule_template=molecule_template,
+        )
+
+    for cycle in range(1, cfg.max_cycle + 1):
+        _, _, raw_fock_a, raw_fock_b = eval_state(
+            density_a,
+            density_b,
+            mo_coeff_a,
+            mo_coeff_b,
+            mo_energy_a,
+            mo_energy_b,
+        )
         fock_a_eff = raw_fock_a
         fock_b_eff = raw_fock_b
         if cfg.level_shift != 0.0:
@@ -542,44 +549,14 @@ def run_uks_from_integrals(
             density_a_new = (1.0 - damping) * density_a_new + damping * density_a
             density_b_new = (1.0 - damping) * density_b_new + damping * density_b
 
-        if bound_xc is None:
-            total_new, xc_energy_new, fock_a_new, fock_b_new = _raw_fock_and_energy_for_state(
-                density_a=density_a_new,
-                density_b=density_b_new,
-                mo_coeff_a=mo_coeff_a_new,
-                mo_coeff_b=mo_coeff_b_new,
-                mo_occ_a=mo_occ_a,
-                mo_occ_b=mo_occ_b,
-                ao=ao,
-                ao_deriv1=ao_deriv1,
-                weights=weights,
-                h=h,
-                eri=eri,
-                enuc=enuc,
-                alpha=alpha,
-                cfg=cfg,
-                xc_kind=xc_kind,
-            )
-        else:
-            total_new, xc_energy_new, fock_a_new, fock_b_new = _raw_fock_and_energy_for_bound_xc_state(
-                density_a=density_a_new,
-                density_b=density_b_new,
-                mo_coeff_a=mo_coeff_a_new,
-                mo_coeff_b=mo_coeff_b_new,
-                mo_occ_a=mo_occ_a,
-                mo_occ_b=mo_occ_b,
-                mo_energy_a=mo_energy_a_new,
-                mo_energy_b=mo_energy_b_new,
-                ao=ao,
-                ao_deriv1=ao_deriv1,
-                weights=weights,
-                h=h,
-                eri=eri,
-                enuc=enuc,
-                overlap=s,
-                bound_xc=bound_xc,
-                molecule_template=molecule_template,
-            )
+        total_new, xc_energy_new, fock_a_new, fock_b_new = eval_state(
+            density_a_new,
+            density_b_new,
+            mo_coeff_a_new,
+            mo_coeff_b_new,
+            mo_energy_a_new,
+            mo_energy_b_new,
+        )
 
         delta_e = jnp.abs(total_new - energy)
         rms_d = _density_rms(density_a_new, density_a, density_b_new, density_b)
@@ -607,44 +584,14 @@ def run_uks_from_integrals(
         mo_energy_b_final, mo_coeff_b_final = _diagonalize_fock(fock_b, x)
         density_a_final = _build_density_from_occ(mo_coeff_a_final, mo_occ_a)
         density_b_final = _build_density_from_occ(mo_coeff_b_final, mo_occ_b)
-        if bound_xc is None:
-            total_final, xc_energy_final, fock_a_final, fock_b_final = _raw_fock_and_energy_for_state(
-                density_a=density_a_final,
-                density_b=density_b_final,
-                mo_coeff_a=mo_coeff_a_final,
-                mo_coeff_b=mo_coeff_b_final,
-                mo_occ_a=mo_occ_a,
-                mo_occ_b=mo_occ_b,
-                ao=ao,
-                ao_deriv1=ao_deriv1,
-                weights=weights,
-                h=h,
-                eri=eri,
-                enuc=enuc,
-                alpha=alpha,
-                cfg=cfg,
-                xc_kind=xc_kind,
-            )
-        else:
-            total_final, xc_energy_final, fock_a_final, fock_b_final = _raw_fock_and_energy_for_bound_xc_state(
-                density_a=density_a_final,
-                density_b=density_b_final,
-                mo_coeff_a=mo_coeff_a_final,
-                mo_coeff_b=mo_coeff_b_final,
-                mo_occ_a=mo_occ_a,
-                mo_occ_b=mo_occ_b,
-                mo_energy_a=mo_energy_a_final,
-                mo_energy_b=mo_energy_b_final,
-                ao=ao,
-                ao_deriv1=ao_deriv1,
-                weights=weights,
-                h=h,
-                eri=eri,
-                enuc=enuc,
-                overlap=s,
-                bound_xc=bound_xc,
-                molecule_template=molecule_template,
-            )
+        total_final, xc_energy_final, fock_a_final, fock_b_final = eval_state(
+            density_a_final,
+            density_b_final,
+            mo_coeff_a_final,
+            mo_coeff_b_final,
+            mo_energy_a_final,
+            mo_energy_b_final,
+        )
         tol_e = jnp.asarray(cfg.conv_tol, dtype=h.dtype) * jnp.asarray(10.0, dtype=h.dtype)
         density_tol = jnp.sqrt(jnp.asarray(cfg.conv_tol, dtype=h.dtype)) * jnp.asarray(3.0, dtype=h.dtype)
         delta_e_final = jnp.abs(total_final - energy)

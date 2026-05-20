@@ -1,0 +1,114 @@
+\relax 
+\citation{achemso-control}
+\bibstyle{achemso}
+\providecommand{\mciteSetMaxWidth}[3]{\relax}
+\providecommand{\mciteSetMaxCount}[3]{\relax}
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{Casida1995}
+\citation{Casida1995}
+\citation{DM21}
+\citation{GLOBE}
+\citation{DM21,GLOBE}
+\citation{PySCF}
+\citation{PySCF}
+\citation{QChem}
+\citation{QChem}
+\citation{Gaussian}
+\citation{Gaussian}
+\citation{JAX}
+\citation{JAX}
+\citation{GradDFT}
+\citation{GradDFT}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{2}{section.1}\protected@file@percent }
+\citation{DIIS}
+\citation{DIIS}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Theory and Methods}{4}{section.2}\protected@file@percent }
+\newlabel{sec:theory}{{2}{4}{Theory and Methods}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Differentiable Kohn--Sham SCF}{4}{subsection.2.1}\protected@file@percent }
+\newlabel{sec:scf}{{2.1}{4}{Differentiable Kohn--Sham SCF}{subsection.2.1}{}}
+\newlabel{eq:ks}{{1}{4}{Differentiable Kohn--Sham SCF}{equation.2.1}{}}
+\newlabel{eq:fock}{{2}{4}{Differentiable Kohn--Sham SCF}{equation.2.2}{}}
+\newlabel{eq:scf-cycle}{{3}{4}{Differentiable Kohn--Sham SCF}{equation.2.3}{}}
+\citation{Casida1995}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Linear-Response TDDFT}{5}{subsection.2.2}\protected@file@percent }
+\newlabel{sec:tddft}{{2.2}{5}{Linear-Response TDDFT}{subsection.2.2}{}}
+\newlabel{eq:casida}{{4}{5}{Linear-Response TDDFT}{equation.2.4}{}}
+\newlabel{eq:ab-matrix}{{5}{5}{Linear-Response TDDFT}{equation.2.5}{}}
+\newlabel{eq:transdip}{{6}{5}{Linear-Response TDDFT}{equation.2.6}{}}
+\newlabel{eq:oscstr}{{7}{5}{Linear-Response TDDFT}{equation.2.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Strict $f_{\rm  xc}$ Kernel via JAX Automatic Differentiation}{6}{subsection.2.3}\protected@file@percent }
+\newlabel{sec:fxc}{{2.3}{6}{Strict $f_{\rm xc}$ Kernel via JAX Automatic Differentiation}{subsection.2.3}{}}
+\newlabel{eq:fxcfd}{{8}{6}{Strict $f_{\rm xc}$ Kernel via JAX Automatic Differentiation}{equation.2.8}{}}
+\newlabel{eq:eloc}{{9}{6}{Strict $f_{\rm xc}$ Kernel via JAX Automatic Differentiation}{equation.2.9}{}}
+\newlabel{eq:fxccontraction}{{10}{6}{Strict $f_{\rm xc}$ Kernel via JAX Automatic Differentiation}{equation.2.10}{}}
+\newlabel{eq:localhessian}{{11}{7}{Strict $f_{\rm xc}$ Kernel via JAX Automatic Differentiation}{equation.2.11}{}}
+\newlabel{eq:transresponse}{{12}{7}{Strict $f_{\rm xc}$ Kernel via JAX Automatic Differentiation}{equation.2.12}{}}
+\newlabel{eq:hfkernel}{{13}{7}{Strict $f_{\rm xc}$ Kernel via JAX Automatic Differentiation}{equation.2.13}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Neural XC Functional Architecture}{7}{subsection.2.4}\protected@file@percent }
+\newlabel{sec:neuralxc}{{2.4}{7}{Neural XC Functional Architecture}{subsection.2.4}{}}
+\citation{DM21}
+\citation{Flax}
+\citation{Flax}
+\newlabel{eq:neural-eloc}{{14}{8}{Neural XC Functional Architecture}{equation.2.14}{}}
+\newlabel{eq:totalexc}{{15}{8}{Neural XC Functional Architecture}{equation.2.15}{}}
+\newlabel{eq:alpha-eff}{{16}{9}{Neural XC Functional Architecture}{equation.2.16}{}}
+\newlabel{eq:vxc}{{17}{9}{Neural XC Functional Architecture}{equation.2.17}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Training Paradigm}{9}{subsection.2.5}\protected@file@percent }
+\newlabel{sec:training}{{2.5}{9}{Training Paradigm}{subsection.2.5}{}}
+\newlabel{eq:gsloss}{{18}{9}{Training Paradigm}{equation.2.18}{}}
+\newlabel{eq:esloss}{{19}{10}{Training Paradigm}{equation.2.19}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Implementation}{10}{section.3}\protected@file@percent }
+\newlabel{sec:implementation}{{3}{10}{Implementation}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Software Architecture}{10}{subsection.3.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces Software architecture of GradTDDFT. Arrows indicate the dependency direction: outer layers depend on inner layers. Solid lines represent JAX-differentiable computation paths; dashed lines indicate PySCF reference backends.}}{11}{figure.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:architecture}{{1}{11}{Software architecture of GradTDDFT. Arrows indicate the dependency direction: outer layers depend on inner layers. Solid lines represent JAX-differentiable computation paths; dashed lines indicate PySCF reference backends}{figure.caption.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Integration with PySCF}{11}{subsection.3.2}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Computational task allocation between PySCF and JAX.}}{12}{table.1}\protected@file@percent }
+\newlabel{tab:backend}{{1}{12}{Computational task allocation between PySCF and JAX}{table.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Module Organization}{12}{subsection.3.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Numerical Verification}{13}{subsection.3.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}Availability}{13}{subsection.3.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}Results}{14}{section.4}\protected@file@percent }
+\newlabel{sec:results}{{4}{14}{Results}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}SCF and TDDFT Numerical Alignment with PySCF}{14}{subsection.4.1}\protected@file@percent }
+\newlabel{sec:res-alignment}{{4.1}{14}{SCF and TDDFT Numerical Alignment with PySCF}{subsection.4.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces SCF total energy and TDDFT excitation energy comparison between GradTDDFT and PySCF for selected molecules. $\Delta E_{\rm  tot}$ is the SCF total energy difference; MAE$_\Omega $ is the mean absolute error in TDA excitation energies over the lowest 5 states.}}{14}{table.2}\protected@file@percent }
+\newlabel{tab:alignment}{{2}{14}{SCF total energy and TDDFT excitation energy comparison between GradTDDFT and PySCF for selected molecules. $\Delta E_{\rm tot}$ is the SCF total energy difference; MAE$_\Omega $ is the mean absolute error in TDA excitation energies over the lowest 5 states}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}H$_2$ Dissociation with Neural XC}{14}{subsection.4.2}\protected@file@percent }
+\newlabel{sec:res-h2}{{4.2}{14}{H$_2$ Dissociation with Neural XC}{subsection.4.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces H$_2$ dissociation curves computed with various methods. The full configuration interaction (FCI) curve serves as the exact reference. GradTDDFT RKS (B3LYP) shows the typical overbinding of conventional functionals. Training a neural XC functional on the ground-state PES improves agreement with FCI. The lower panel shows the training loss convergence.}}{14}{figure.caption.2}\protected@file@percent }
+\newlabel{fig:h2}{{2}{14}{H$_2$ dissociation curves computed with various methods. The full configuration interaction (FCI) curve serves as the exact reference. GradTDDFT RKS (B3LYP) shows the typical overbinding of conventional functionals. Training a neural XC functional on the ground-state PES improves agreement with FCI. The lower panel shows the training loss convergence}{figure.caption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Excited-State Training on H$_2$}{15}{subsection.4.3}\protected@file@percent }
+\newlabel{sec:res-h2excited}{{4.3}{15}{Excited-State Training on H$_2$}{subsection.4.3}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces First excited state ($\Sigma _u^+$) of H$_2$ computed after ground-state pre-training and excited-state fine-tuning of the neural XC functional. Left: excitation energy curves. Right: training loss convergence for the excited-state fine-tuning stage.}}{15}{figure.caption.3}\protected@file@percent }
+\newlabel{fig:h2-excited}{{3}{15}{First excited state ($\Sigma _u^+$) of H$_2$ computed after ground-state pre-training and excited-state fine-tuning of the neural XC functional. Left: excitation energy curves. Right: training loss convergence for the excited-state fine-tuning stage}{figure.caption.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}QM9 Excited-State Prediction}{15}{subsection.4.4}\protected@file@percent }
+\newlabel{sec:res-qm9}{{4.4}{15}{QM9 Excited-State Prediction}{subsection.4.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5}End-to-End Differentiability Audit}{16}{subsection.4.5}\protected@file@percent }
+\newlabel{sec:res-grad}{{4.5}{16}{End-to-End Differentiability Audit}{subsection.4.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Gradient audit results for the water molecule (PBE/STO-3G). All gradient norms are finite and non-zero, confirming full differentiability of the pipeline.}}{16}{table.3}\protected@file@percent }
+\newlabel{tab:grad-audit}{{3}{16}{Gradient audit results for the water molecule (PBE/STO-3G). All gradient norms are finite and non-zero, confirming full differentiability of the pipeline}{table.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Discussion and Outlook}{16}{section.5}\protected@file@percent }
+\newlabel{sec:discussion}{{5}{16}{Discussion and Outlook}{section.5}{}}
+\bibdata{acs-main,references}
+\bibcite{Casida1995}{{1}{1995}{{Casida}}{{}}}
+\bibcite{DM21}{{2}{2021}{{Kirkpatrick et~al.}}{{Kirkpatrick, McMorrow, Turban, Gaunt, Spencer, Matthews, Obika, Thiry, Fortunato, Pfaff, Rom\'an, Laming, Gaya, An, and Liu}}}
+\bibcite{GLOBE}{{3}{2025}{{Su et~al.}}{{Su, Shi, Zhang, Wang, Duan, Zhang, Li, Dai, He, Zhan, Liu, Zhang, Wu, Li, Chen, Huo, Zhang, Huang, Tang, He, Zhang, Liao, Xu, Zhai, Wang, Lyu, Li, Wang, E, Wang, and Li}}}
+\@writefile{toc}{\contentsline {section}{Acknowledgement}{18}{section*.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{Supporting Information Available}{18}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{References}{18}{section*.6}\protected@file@percent }
+\bibcite{PySCF}{{4}{2018}{{Sun et~al.}}{{Sun, Berkelbach, Blunt, Booth, Guo, Li, Liu, McClain, Sayfutyarova, Sharma, Wouters, and Chan}}}
+\bibcite{QChem}{{5}{2021}{{Epifanovsky et~al.}}{{Epifanovsky, et~al. others}}}
+\bibcite{Gaussian}{{6}{2016}{{Frisch et~al.}}{{Frisch, Trucks, Schlegel, et~al. others}}}
+\bibcite{JAX}{{7}{2018}{{Bradbury et~al.}}{{Bradbury, Frostig, Hawkins, Johnson, Leary, Maclaurin, Necula, Paszke, VanderPlas, Wanderman-Milne, and Zhang}}}
+\bibcite{GradDFT}{{8}{2021}{{Kasim and Vinko}}{{Kasim, and Vinko}}}
+\bibcite{DIIS}{{9}{1980}{{Pulay}}{{}}}
+\bibcite{Flax}{{10}{2023}{{Heek et~al.}}{{Heek, Levskaya, Oliver, Ritter, Rondepierre, Steiner, and van Zee}}}
+\mciteSetMaxCount{main}{bibitem}{10}
+\mciteSetMaxCount{main}{subitem}{1}
+\mciteSetMaxWidth{main}{bibitem}{769860}
+\mciteSetMaxWidth{main}{subitem}{0}
+\gdef \@abspage@last{20}

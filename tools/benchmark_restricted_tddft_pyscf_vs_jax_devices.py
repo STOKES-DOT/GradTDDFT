@@ -28,8 +28,8 @@ from td_graddft.jax_runtime import (
     DEFAULT_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES,
     configure_jax_persistent_cache,
 )
-from td_graddft.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
-from td_graddft.reference import GridReference, RestrictedMoleculeReference
+from td_graddft.xc_backend.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
+from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule
 from td_graddft.scf import RKSConfig, run_rks_from_integrals_traceable
 from td_graddft import tdscf
 
@@ -472,7 +472,7 @@ def _build_jax_reference(
     df_tol: float,
     df_max_rank: int,
     device,
-) -> tuple[RestrictedMoleculeReference, float, float, float]:
+) -> tuple[RestrictedMolecule, float, float, float]:
     mol = _build_mol(molecule, basis)
     t0 = time.perf_counter()
     coords_cpu, weights_cpu, ao_cpu, ao_deriv1_cpu = _build_grid_data(
@@ -552,9 +552,9 @@ def _build_jax_reference(
             mo_coeff,
             nocc,
         )
-        reference = RestrictedMoleculeReference(
+        reference = RestrictedMolecule(
             ao=ao,
-            grid=GridReference(
+            grid=QuadratureGrid(
                 weights=weights,
                 coords=coords,
             ),

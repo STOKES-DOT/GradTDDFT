@@ -38,11 +38,6 @@ def _guess_key(init_guess: Any) -> str | None:
     return key
 
 
-def _should_fallback_to_hcore(init_guess: Any) -> bool:
-    key = _guess_key(init_guess)
-    return key is None or key in _HCORE_GUESS_KEYS
-
-
 def _normalize_density_matrix(dm: Any) -> np.ndarray:
     dm_np = np.asarray(jax.device_get(dm), dtype=np.float64)
     if dm_np.ndim != 2 or dm_np.shape[0] != dm_np.shape[1]:

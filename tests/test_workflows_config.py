@@ -4,15 +4,11 @@ from td_graddft.workflows import (
     ExperimentConfig,
     ExperimentPipeline,
     NeuralXCTrainingConfig,
-    ReferenceSpecConfig,
+    MoleculeSpecConfig,
     SystemConfig,
     benzene_experiment_config,
-    benzene_legacy_experiment_config,
     benzene_strict_jax_experiment_config,
-    legacy_benzene_experiment_config,
-    legacy_water_experiment_config,
     water_experiment_config,
-    water_legacy_experiment_config,
     water_strict_jax_experiment_config,
 )
 from td_graddft.neural_xc import (
@@ -51,7 +47,7 @@ def test_experiment_output_config_uses_system_overrides():
 def test_system_config_accepts_reference_spec_without_mf_builder():
     system = SystemConfig(
         name="Water strict JAX",
-        reference_spec=ReferenceSpecConfig(
+        reference_spec=MoleculeSpecConfig(
             atom="O 0 0 0\nH 0 0 1\nH 0 1 0",
             basis="sto-3g",
             xc="pbe",
@@ -73,7 +69,7 @@ def test_system_config_marks_mf_builder_as_legacy_source():
 
 def test_system_config_rejects_ambiguous_or_empty_sources():
     with pytest.raises(ValueError, match="exactly one"):
-        SystemConfig(name="bad", mf_builder=_dummy_builder, reference_spec=ReferenceSpecConfig(
+        SystemConfig(name="bad", mf_builder=_dummy_builder, reference_spec=MoleculeSpecConfig(
             atom="H 0 0 0\nH 0 0 0.74",
             basis="sto-3g",
             xc="pbe",
@@ -109,7 +105,7 @@ def test_experiment_pipeline_routes_reference_spec_systems(monkeypatch):
         systems=[
             SystemConfig(
                 name="Water strict JAX",
-                reference_spec=ReferenceSpecConfig(
+                reference_spec=MoleculeSpecConfig(
                     atom="O 0 0 0\nH 0 0 1\nH 0 1 0",
                     basis="sto-3g",
                     xc="pbe",
@@ -135,20 +131,6 @@ def test_workflow_presets_return_non_empty_systems():
     assert benzene.systems[0].mf_builder is None
     assert water.simulation.scf_backend == "jax_rks"
     assert benzene.simulation.scf_backend == "jax_rks"
-
-
-def test_legacy_workflow_presets_preserve_mf_builder_entrypoints():
-    water = legacy_water_experiment_config()
-    benzene = legacy_benzene_experiment_config()
-    water_alias = water_legacy_experiment_config()
-    benzene_alias = benzene_legacy_experiment_config()
-
-    assert len(water.systems) == 1
-    assert len(benzene.systems) == 1
-    assert callable(water.systems[0].mf_builder)
-    assert callable(benzene.systems[0].mf_builder)
-    assert water_alias.systems[0].mf_builder is not None
-    assert benzene_alias.systems[0].mf_builder is not None
 
 
 def test_strict_jax_workflow_presets_return_reference_specs():

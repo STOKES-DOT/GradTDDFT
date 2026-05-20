@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import os
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
+
 import argparse
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +16,14 @@ import optax
 
 from td_graddft.nn_rsh import (
     AtomCenteredDensityDescriptorConfig,
+    get_rsh_functional_preset,
     make_atom_centered_density_rsh_functional,
     make_gnn_rsh_functional,
+    make_rsh_template,
     make_self_supervised_rsh_loss,
+    rsh_preset_default_params,
 )
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
 from td_graddft.training import save_params_checkpoint
 from td_graddft.training import (
     GroundStateDatum,
@@ -31,7 +39,7 @@ from td_graddft.training.targets import (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Self-supervised single-water neural RSH overfit driven by Janak/fractional constraints.",
     )
@@ -51,11 +59,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--basis", default="sto-3g")
     parser.add_argument("--grid-level", type=int, default=0)
     parser.add_argument("--xc", default="pbe")
+    parser.add_argument("--rsh-preset", default="lc-wpbe")
+    parser.add_argument(
+        "--free-alpha",
+        action="store_true",
+        default=False,
+        help="Free sr_hf_fraction (alpha) to be trainable in [0, --free-alpha-max].",
+    )
+    parser.add_argument(
+        "--free-alpha-max",
+        type=float,
+        default=0.20,
+        help="Upper bound for sr_hf_fraction when --free-alpha is set.",
+    )
     parser.add_argument("--scf-max-cycle", type=int, default=4)
     parser.add_argument(
         "--scf-gradient-mode",
-        choices=("unrolled", "implicit_commutator"),
-        default="implicit_commutator",
+        choices=("unrolled", "implicit_commutator", "impl", "expl"),
+        default="impl",
     )
     parser.add_argument(
         "--janak-mode",
@@ -138,7 +159,7 @@ def parse_args() -> argparse.Namespace:
         default=True,
     )
     parser.add_argument("--outdir", default="outputs/water_nn_rsh_overfit")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _parse_float_tuple(raw: str) -> tuple[float, ...]:
@@ -148,6 +169,20 @@ def _parse_float_tuple(raw: str) -> tuple[float, ...]:
 def _parse_int_tuple(raw: str) -> tuple[int, ...]:
     cleaned = [part.strip() for part in raw.split(",") if part.strip()]
     return tuple(int(part) for part in cleaned)
+
+
+def _rsh_template_from_args(args: argparse.Namespace):
+    template = make_rsh_template(str(args.rsh_preset))
+    if bool(args.free_alpha):
+        free_alpha_max = float(args.free_alpha_max)
+        if not 0.0 < free_alpha_max <= 1.0:
+            raise ValueError("--free-alpha-max must be in (0, 1].")
+        template = replace(
+            template,
+            sr_hf_bounds=(0.0, free_alpha_max),
+            supports_trainable_sr_hf=True,
+        )
+    return template
 
 
 def _build_water_reference(
@@ -340,8 +375,12 @@ def _write_fractional_profile_plot(
     return plot_path
 
 
+_GRAD_MODE_MAP = {"implicit_commutator": "impl", "unrolled": "expl", "impl": "impl", "expl": "expl"}
+
+
 def main() -> None:
     args = parse_args()
+    args.scf_gradient_mode = _GRAD_MODE_MAP[str(args.scf_gradient_mode)]
     omega_grid = _parse_float_tuple(args.omega_grid)
     descriptor_config = AtomCenteredDensityDescriptorConfig(
         radial_centers=_parse_float_tuple(args.radial_centers),
@@ -359,9 +398,14 @@ def main() -> None:
         grid_level=args.grid_level,
         omega_grid=omega_grid,
     )
+    preset = get_rsh_functional_preset(str(args.rsh_preset))
+    template = _rsh_template_from_args(args)
+    local_xc_spec = preset.jax_local_xc_spec or str(args.xc)
+    local_term_specs = tuple(preset.local_term_specs)
     if args.head == "gnn":
         functional = make_gnn_rsh_functional(
-            local_xc_spec=args.xc,
+            local_xc_spec=local_xc_spec,
+            local_term_specs=local_term_specs,
             descriptor_config=descriptor_config,
             node_hidden_dims=gnn_node_hidden_dims,
             global_hidden_dims=gnn_global_hidden_dims,
@@ -370,15 +414,18 @@ def main() -> None:
             qkv_features=args.gnn_qkv_features,
             ffn_dim=args.gnn_ffn_dim,
             lambda_init=float(args.gnn_lambda_init),
+            template=template,
             fallback_omega_values=omega_grid,
         )
     else:
         functional = make_atom_centered_density_rsh_functional(
-            local_xc_spec=args.xc,
+            local_xc_spec=local_xc_spec,
+            local_term_specs=local_term_specs,
             descriptor_config=descriptor_config,
             atom_hidden_dims=atom_hidden_dims,
             pooled_hidden_dims=pooled_hidden_dims,
             embedding_dim=int(args.embedding_dim),
+            template=template,
             fallback_omega_values=omega_grid,
         )
     loss_fn = make_self_supervised_rsh_loss(
@@ -531,6 +578,8 @@ def main() -> None:
         "steps": int(args.steps),
         "learning_rate": float(args.learning_rate),
         "head": str(args.head),
+        "free_alpha": bool(args.free_alpha),
+        "free_alpha_max": float(args.free_alpha_max),
         "lr_schedule": str(args.lr_schedule),
         "final_learning_rate_scale": float(args.final_learning_rate_scale),
         "scf_gradient_mode": str(args.scf_gradient_mode),

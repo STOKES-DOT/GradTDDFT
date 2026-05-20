@@ -23,7 +23,7 @@ import numpy as np
 import optax
 
 from td_graddft import neural_xc, tdscf
-from td_graddft.jax_libxc import b3lyp_component_basis
+from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
 from td_graddft.reference_legacy import restricted_reference_from_pyscf
 from td_graddft.spectra import HARTREE_TO_EV
 from td_graddft.training import (

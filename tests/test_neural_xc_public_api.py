@@ -60,6 +60,7 @@ def test_neural_xc_lists_wrapped_jax_xc_components_and_exposes_status():
     hse06 = neural_xc.semilocal_component_info("hyb_gga_xc_hse06")
 
     assert "lda_x" in names
+    assert "lyp_c" in names
     assert "hyb_gga_xc_hse06" in names
     assert any(info.name == "hyb_gga_xc_hse06" and info.status == "wrapped" for info in infos)
     assert hse06.status == "wrapped"
@@ -362,7 +363,7 @@ def test_neural_xc_trainer_accepts_explicit_training_config(monkeypatch):
     assert result.history["scf_converged"] == [1.0]
 
 
-def test_ground_state_datum_from_molecule_requires_hfx_fields():
+def test_ground_state_datum_from_molecule_requires_cached_hfx_features():
     molecule = _ToyMolecule()
 
     with pytest.raises(ValueError, match="hfx_local"):
@@ -373,7 +374,6 @@ def test_ground_state_datum_from_molecule_requires_hfx_fields():
         )
 
     molecule.hfx_local = jnp.zeros((2, 2, 1))
-    molecule.hfx_nu = jnp.zeros((1, 2, 2, 2))
     datum = training.GroundStateDatum.from_molecule(
         molecule,
         target_total_energy=jnp.asarray(0.0),
@@ -381,13 +381,14 @@ def test_ground_state_datum_from_molecule_requires_hfx_fields():
     )
 
     assert datum.molecule is molecule
+    assert getattr(datum.molecule, "hfx_nu", None) is None
 
 
 def test_ground_state_datum_from_molecule_requires_pt2_fields_when_pt2_enabled():
-    from td_graddft.scf.molecules import GridReference, RestrictedMoleculeReference
+    from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule
 
-    grid = GridReference(coords=jnp.zeros((2, 3)), weights=jnp.ones((2,)))
-    molecule = RestrictedMoleculeReference(
+    grid = QuadratureGrid(coords=jnp.zeros((2, 3)), weights=jnp.ones((2,)))
+    molecule = RestrictedMolecule(
         ao=jnp.ones((2, 2)),
         ao_deriv1=jnp.ones((4, 2, 2)),
         grid=grid,

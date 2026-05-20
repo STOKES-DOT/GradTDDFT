@@ -29,7 +29,12 @@ from .functional import (
     make_gnn_rsh_functional,
     make_minimal_trainable_rsh_functional,
 )
-from .losses import make_self_supervised_rsh_loss
+from .losses import (
+    FixedDensityRSHDatum,
+    make_fixed_density_rsh_loss,
+    make_self_supervised_rsh_loss,
+    with_fixed_density_koopmans_states,
+)
 from .api import RSH
 
 __all__ = [
@@ -57,5 +62,8 @@ __all__ = [
     "make_atom_centered_density_rsh_functional",
     "make_gnn_rsh_functional",
     "make_minimal_trainable_rsh_functional",
+    "FixedDensityRSHDatum",
+    "make_fixed_density_rsh_loss",
     "make_self_supervised_rsh_loss",
+    "with_fixed_density_koopmans_states",
 ]

@@ -19,10 +19,10 @@ from pyscf.dft import numint
 
 from td_graddft.data.basis import basis_from_pyscf_mol_cart
 from td_graddft.data.integrals import build_hcore, eri_tensor, overlap_matrix
-from td_graddft.device import put_restricted_reference_on_device
+from td_graddft.device import put_restricted_molecule_on_device
 from td_graddft.features import restricted_grid_features_with_gradients
-from td_graddft.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
-from td_graddft.reference import GridReference, RestrictedMoleculeReference
+from td_graddft.xc_backend.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
+from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule
 from td_graddft.scf import RKSConfig, run_rks_from_integrals
 from td_graddft import tdscf
 from td_graddft.spectra import HARTREE_TO_EV
@@ -395,9 +395,9 @@ def _gpu_pipeline_full_jax(
         mo_occ_active[: occ_idx.size] = 2.0
 
         dm_total = np.asarray(rks.density_matrix, dtype=float)
-        ref = RestrictedMoleculeReference(
+        ref = RestrictedMolecule(
             ao=jnp.asarray(ao),
-            grid=GridReference(weights=jnp.asarray(weights), coords=jnp.asarray(coords)),
+            grid=QuadratureGrid(weights=jnp.asarray(weights), coords=jnp.asarray(coords)),
             dipole_integrals=jnp.asarray(dipole),
             rep_tensor=jnp.asarray(eri_cpu),
             mo_coeff=jnp.stack([jnp.asarray(mo_coeff_active), jnp.asarray(mo_coeff_active)], axis=0),
@@ -412,7 +412,7 @@ def _gpu_pipeline_full_jax(
             exact_exchange_fraction=float(rks.exact_exchange_fraction),
         )
 
-        ref = put_restricted_reference_on_device(ref, device=gpu_device)
+        ref = put_restricted_molecule_on_device(ref, device=gpu_device)
 
         t_td0 = time.perf_counter()
         solver = tdscf.TDDFT(ref, xc_functional=xc_spec)

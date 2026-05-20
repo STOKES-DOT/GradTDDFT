@@ -64,6 +64,8 @@ def test_rsh_gnn_head_returns_three_raw_parameters():
 
     assert raw.shape == (1, 3)
     assert jnp.all(jnp.isfinite(raw))
+    assert jnp.all(raw >= 0.0)
+    assert jnp.all(raw <= 2.0)
 
 
 def test_rsh_gnn_head_is_permutation_invariant_for_molecular_output():

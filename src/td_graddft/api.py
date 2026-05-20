@@ -29,9 +29,6 @@ def build_molecule(
     return run_molecule_from_spec(molecule, simulation=simulation)
 
 
-build_reference = build_molecule
-
-
 def run_pipeline(
     molecule: MoleculeConfig,
     *,

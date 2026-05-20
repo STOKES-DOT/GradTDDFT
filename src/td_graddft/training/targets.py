@@ -10,12 +10,17 @@ import numpy as np
 from jaxtyping import Array, PyTree
 
 from ..features import restricted_grid_features
+from ..data.molecule import MoleculeSpec
 from ..scf import (
     DifferentiableSCF,
     DifferentiableSCFConfig,
+    GPU4PYSCF_RKS_RUNTIME_BACKEND,
+    GPU4PYSCF_UKS_RUNTIME_BACKEND,
     UKSConfig,
+    run_gpu4pyscf_uks_forward,
     run_uks_from_integrals,
 )
+from ..scf.core import _contains_jax_tracer
 from ..data.integrals import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix
 from ..scf.rks import _vxc_matrix_from_grid_potential
 from ..spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
@@ -397,33 +402,11 @@ def _coulomb_energy(density_matrix: Array, rep_tensor: Array) -> Array:
     return 0.5 * jnp.einsum("ij,ij->", density_matrix, potential)
 
 
-def _direct_cuda_jk_from_molecule(
-    molecule: Any,
-    density_matrix: Array,
-) -> tuple[Array, Array] | None:
-    direct_cuda_jk_builder = getattr(molecule, "direct_cuda_jk_builder", None)
-    if direct_cuda_jk_builder is None:
-        return None
-    if str(getattr(molecule, "direct_jk_engine", "") or "") != "cuda":
-        return None
-    threshold = max(float(getattr(molecule, "direct_scf_tol", 0.0) or 0.0), 0.0)
-    return direct_cuda_jk_builder.build_jk(
-        density_matrix,
-        density_cutoff=threshold,
-    )
-
-
 def _coulomb_potential_from_molecule(molecule: Any, density_matrix: Array) -> Array:
-    direct_jk = _direct_cuda_jk_from_molecule(molecule, density_matrix)
-    if direct_jk is not None:
-        return direct_jk[0]
     return _coulomb_potential(density_matrix, _repulsion_integrals_from_molecule(molecule))
 
 
 def _exchange_potential_from_molecule(molecule: Any, density_matrix: Array) -> Array:
-    direct_jk = _direct_cuda_jk_from_molecule(molecule, density_matrix)
-    if direct_jk is not None:
-        return direct_jk[1]
     return _exchange_potential(density_matrix, _repulsion_integrals_from_molecule(molecule))
 
 
@@ -1083,10 +1066,21 @@ def charged_state_uks_from_molecule(
         sign_hint=neutral_spin if neutral_spin != 0 else 1,
     )
     charged_cfg = _default_charged_state_uks_config(bound_xc, config)
+    gpu4pyscf_result = _charged_state_gpu4pyscf_uks_from_molecule(
+        molecule,
+        bound_xc,
+        charge_delta=int(charge_delta),
+        nalpha=nalpha,
+        nbeta=nbeta,
+        config=charged_cfg,
+        occupation_tolerance=occupation_tolerance,
+    )
+    if gpu4pyscf_result is not None:
+        return gpu4pyscf_result
     return run_uks_from_integrals(
         overlap=jnp.asarray(molecule.overlap_matrix),
         hcore=jnp.asarray(molecule.h1e),
-        eri=jnp.asarray(molecule.rep_tensor),
+        eri=_repulsion_integrals_from_molecule(molecule),
         nalpha=nalpha,
         nbeta=nbeta,
         nuclear_repulsion=jnp.asarray(molecule.nuclear_repulsion),
@@ -1103,6 +1097,77 @@ def charged_state_uks_from_molecule(
         bound_xc=bound_xc,
         molecule_template=molecule,
     )
+
+
+def _charged_state_gpu4pyscf_uks_from_molecule(
+    molecule: Any,
+    bound_xc: Any,
+    *,
+    charge_delta: int,
+    nalpha: int,
+    nbeta: int,
+    config: UKSConfig,
+    occupation_tolerance: float = 1e-8,
+) -> Any | None:
+    backend = getattr(molecule, "runtime_scf_backend", None)
+    if backend not in {GPU4PYSCF_RKS_RUNTIME_BACKEND, GPU4PYSCF_UKS_RUNTIME_BACKEND}:
+        return None
+    if _contains_jax_tracer(bound_xc):
+        return None
+    runtime_options = getattr(molecule, "runtime_scf_options", None)
+    as_kwargs = getattr(runtime_options, "as_kwargs", None)
+    if runtime_options is None or not callable(as_kwargs):
+        return None
+
+    kwargs = dict(as_kwargs())
+    base_charge = int(kwargs.get("charge", 0))
+    charged_charge = base_charge + int(charge_delta)
+    charged_spin = int(nalpha) - int(nbeta)
+    atom = kwargs.get("atom", None)
+    if isinstance(atom, MoleculeSpec):
+        kwargs["atom"] = replace(atom, charge=charged_charge, spin=charged_spin)
+    kwargs.update(
+        charge=charged_charge,
+        spin=charged_spin,
+        xc_spec=str(config.xc_spec),
+        conv_tol=float(config.conv_tol),
+        max_cycle=int(config.max_cycle),
+        molecule_template=_charged_spin_molecule_from_molecule(
+            molecule,
+            charge_delta=charge_delta,
+            occupation_tolerance=occupation_tolerance,
+        ),
+        xc_functional=_FrozenFunctionalAdapter(bound_xc),
+        xc_params=None,
+        neural_vxc_clip=(
+            None if config.potential_clip is None else float(config.potential_clip)
+        ),
+        neural_xc_compute_exc=True,
+        neural_xc_jit_payload=True,
+        collect_fock=False,
+    )
+    forward = run_gpu4pyscf_uks_forward(**kwargs)
+    template = kwargs["molecule_template"]
+    dtype = jnp.asarray(template.h1e).dtype
+    solution_molecule = _replace_molecule_copy(
+        template,
+        mo_coeff=jnp.asarray(forward.mo_coeff, dtype=dtype),
+        mo_occ=jnp.asarray(forward.mo_occ, dtype=dtype),
+        mo_energy=jnp.asarray(forward.mo_energy, dtype=dtype),
+        rdm1=jnp.asarray(forward.density_matrix, dtype=dtype),
+        mf_energy=jnp.asarray(forward.total_energy, dtype=dtype),
+        scf_converged=bool(forward.converged),
+    )
+    corrected_energy = _predict_ground_state_total_energy_from_molecule(
+        None,
+        _FrozenFunctionalAdapter(bound_xc),
+        solution_molecule,
+    )
+    if is_dataclass(forward):
+        return replace(forward, total_energy=corrected_energy)
+    out = copy.copy(forward)
+    setattr(out, "total_energy", corrected_energy)
+    return out
 
 
 def _charged_spin_molecule_from_molecule(
@@ -2792,6 +2857,7 @@ def _make_differentiable_scf(
             iterate_selection=cfg.scf_iterate_selection,
             require_converged_iterates=cfg.scf_require_convergence,
             implicit_forward_mode=cfg.scf_implicit_forward_mode,
+            implicit_response_backend=cfg.implicit_response_backend,
             implicit_diff_max_iter=cfg.scf_implicit_diff_max_iter,
             implicit_diff_step_size=cfg.scf_implicit_diff_step_size,
             implicit_diff_clip=cfg.scf_implicit_diff_clip,
@@ -2864,14 +2930,6 @@ def _pytree_shape_signature(tree: Any) -> tuple[tuple[tuple[int, ...], str], ...
         arr = jnp.asarray(leaf)
         signature.append((tuple(int(dim) for dim in arr.shape), str(arr.dtype)))
     return tuple(signature)
-
-
-def _has_direct_cuda_jk_static_source(molecule: Any) -> bool:
-    return (
-        getattr(molecule, "direct_cuda_jk_builder", None) is not None
-        or getattr(molecule, "direct_basis", None) is not None
-        or str(getattr(molecule, "direct_jk_engine", "") or "") == "cuda"
-    )
 
 
 def _can_use_batched_self_consistent_ground_state_path(

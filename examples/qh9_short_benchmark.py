@@ -20,7 +20,7 @@ import numpy as np
 import optax
 
 from td_graddft import neural_xc, tdscf
-from td_graddft.device import put_restricted_reference_on_device
+from td_graddft.device import put_restricted_molecule_on_device
 from td_graddft.neural_xc_presets import (
     DM21_B3LYP_NEURAL_XC_PRESET,
     resolve_coefficient_prior_values,
@@ -409,7 +409,7 @@ def _build_entry(
     td.nstates = nstates_eff
     td.kernel()
 
-    reference = put_restricted_reference_on_device(restricted_reference_from_pyscf(mf))
+    reference = put_restricted_molecule_on_device(restricted_reference_from_pyscf(mf))
     return MoleculeEntry(
         db_id=db_id,
         z=z,

@@ -75,47 +75,7 @@ def Functional(
     return make_functional(config=config, architecture=architecture, **kwargs)
 
 
-def make_long_range_correction(
-    *,
-    base_functional: Any | None = None,
-    hidden_dims: tuple[int, ...] = (64, 64, 32),
-    alpha_scale: float = 1.0,
-    gamma_floor: float = 1e-3,
-    **kwargs: Any,
-):
-    from ..tddft.long_range_correction import LongRangeCorrectedFunctional, LongRangeXCNet
-
-    return LongRangeCorrectedFunctional(
-        base_functional=base_functional,
-        model=LongRangeXCNet(
-            hidden_dims=tuple(int(value) for value in hidden_dims),
-            alpha_scale=float(alpha_scale),
-            gamma_floor=float(gamma_floor),
-        ),
-        **kwargs,
-    )
-
-
-def LongRangeCorrection(
-    *,
-    base_functional: Any | None = None,
-    hidden_dims: tuple[int, ...] = (64, 64, 32),
-    alpha_scale: float = 1.0,
-    gamma_floor: float = 1e-3,
-    **kwargs: Any,
-):
-    return make_long_range_correction(
-        base_functional=base_functional,
-        hidden_dims=hidden_dims,
-        alpha_scale=alpha_scale,
-        gamma_floor=gamma_floor,
-        **kwargs,
-    )
-
-
 __all__ = [
     "Functional",
-    "LongRangeCorrection",
     "make_functional",
-    "make_long_range_correction",
 ]

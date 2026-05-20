@@ -11,14 +11,17 @@ from jax.lax import Precision
 from jaxtyping import Array
 
 from ..df import df_factors_to_mo_eri_slices
-from ..features import restricted_transition_response_features
+from ..features import (
+    infer_response_feature_kind,
+    normalize_response_feature_kind,
+    restricted_transition_response_features,
+)
 from ..data.integrals import eri_pair_matrix_to_mo_eri_slices
 from ..xc import AdiabaticDensityFunctional
 from ._utils import (
     _density_on_grid,
     _resolve_xc_functional,
     _restricted_orbital_data,
-    _transition_densities_on_grid,
 )
 from .types import TDDFTMatrices
 
@@ -38,6 +41,9 @@ class _RestrictedResponseOperatorData:
     hybrid_fraction: Array | float = 0.0
     nonlocal_xc_action_fn: Callable[[Array], Array] | None = None
     nonlocal_xc_diagonal: Array | None = None
+    nonlocal_xc_a_action_fn: Callable[[Array], Array] | None = None
+    nonlocal_xc_b_action_fn: Callable[[Array], Array] | None = None
+    nonlocal_xc_a_diagonal: Array | None = None
 
 
 @jax.jit
@@ -134,22 +140,6 @@ def _as_grid_values(values: Any, reference: Array, *, label: str) -> Array:
     return arr
 
 
-def _infer_response_feature_kind(values: Array) -> str:
-    ndim = int(values.shape[0])
-    if ndim == 1:
-        return "LDA"
-    if ndim == 4:
-        return "GGA"
-    if ndim == 5:
-        return "MGGA"
-    if ndim == 6:
-        return "MGGA_LAPL"
-    raise ValueError(
-        "Strict response tensor must have feature dimension 1, 4, 5, or 6 "
-        f"(got {values.shape})."
-    )
-
-
 def _as_grid_response_tensor(values: Any, *, ngrids: int) -> Array:
     arr = jnp.asarray(values)
     if arr.ndim == 1:
@@ -171,18 +161,6 @@ def _as_grid_response_tensor(values: Any, *, ngrids: int) -> Array:
         )
     _assert_finite(arr, label="Strict response tensor")
     return arr
-
-
-def _normalize_response_feature_kind(value: Any, *, default: str = "LDA") -> str:
-    if value is None:
-        kind = default
-    else:
-        kind = str(value).upper()
-    if kind not in {"LDA", "GGA", "MGGA", "MGGA_LAPL"}:
-        raise ValueError(
-            f"Unsupported response_feature_kind={value!r}. Expected one of LDA/GGA/MGGA/MGGA_LAPL."
-        )
-    return kind
 
 
 def _strict_hybrid_fraction(
@@ -318,6 +296,8 @@ def _resolve_nonlocal_response_terms(
 ) -> tuple[Array | None, Callable[[Array], Array] | None, Array | None]:
     if resolved_xc is None:
         return None, None, None
+    if getattr(resolved_xc, "nonlocal_response_matrices_fn", None) is not None:
+        return None, None, None
 
     nocc, nvir = delta_eps.shape
     matrix_fn = getattr(resolved_xc, "nonlocal_response_matrix", None)
@@ -326,11 +306,21 @@ def _resolve_nonlocal_response_terms(
 
     matrix = None
     if callable(matrix_fn):
-        matrix = _as_nonlocal_response_matrix(
-            matrix_fn(molecule, occupation_tolerance=occupation_tolerance),
-            nocc=nocc,
-            nvir=nvir,
-        )
+        try:
+            matrix_values = matrix_fn(
+                molecule,
+                occupation_tolerance=occupation_tolerance,
+            )
+        except AttributeError as exc:
+            if "does not expose" not in str(exc):
+                raise
+            matrix_values = None
+        if matrix_values is not None:
+            matrix = _as_nonlocal_response_matrix(
+                matrix_values,
+                nocc=nocc,
+                nvir=nvir,
+            )
 
     action = None
     if callable(action_fn_raw):
@@ -364,6 +354,53 @@ def _resolve_nonlocal_response_terms(
     return matrix, action, diagonal
 
 
+def _resolve_nonlocal_response_matrix_pair(
+    resolved_xc: Any,
+    molecule: Any,
+    *,
+    delta_eps: Array,
+    occupation_tolerance: float,
+) -> tuple[Array | None, Array | None]:
+    if resolved_xc is None:
+        return None, None
+
+    if getattr(resolved_xc, "nonlocal_response_matrices_fn", None) is None:
+        return None, None
+
+    matrix_pair_fn = getattr(resolved_xc, "nonlocal_response_matrices", None)
+    if not callable(matrix_pair_fn):
+        return None, None
+
+    try:
+        values = matrix_pair_fn(
+            molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+    except AttributeError as exc:
+        if "does not expose" not in str(exc):
+            raise
+        return None, None
+    if values is None:
+        return None, None
+
+    matrix_a, matrix_b = values
+    nocc, nvir = delta_eps.shape
+    return (
+        _as_nonlocal_response_matrix(
+            matrix_a,
+            nocc=nocc,
+            nvir=nvir,
+            label="Nonlocal A response matrix",
+        ),
+        _as_nonlocal_response_matrix(
+            matrix_b,
+            nocc=nocc,
+            nvir=nvir,
+            label="Nonlocal B response matrix",
+        ),
+    )
+
+
 def build_restricted_response_matrices(
     molecule: Any,
     xc_functional: AdiabaticDensityFunctional | None = None,
@@ -375,7 +412,6 @@ def build_restricted_response_matrices(
 
     resolved_xc = _resolve_xc_functional(molecule, xc_functional, xc_params)
 
-    ao = jnp.asarray(molecule.ao)
     weights = jnp.asarray(molecule.grid.weights)
     orbo, orbv, delta_eps, _ = _restricted_orbital_data(
         molecule,
@@ -430,8 +466,11 @@ def build_restricted_response_matrices(
             )
             feature_kind = getattr(resolved_xc, "response_feature_kind", None)
             if feature_kind is None:
-                feature_kind = _infer_response_feature_kind(strict_tensor)
-            feature_kind = _normalize_response_feature_kind(feature_kind)
+                feature_kind = infer_response_feature_kind(strict_tensor)
+            feature_kind = normalize_response_feature_kind(
+                feature_kind,
+                label="response_feature_kind",
+            )
             response_features = restricted_transition_response_features(
                 molecule,
                 feature_kind=str(feature_kind),
@@ -450,9 +489,10 @@ def build_restricted_response_matrices(
                 response_features,
             )
         else:
-            feature_kind = _normalize_response_feature_kind(
+            feature_kind = normalize_response_feature_kind(
                 getattr(resolved_xc, "response_feature_kind", None),
                 default="LDA",
+                label="response_feature_kind",
             )
             if feature_kind != "LDA":
                 raise ValueError(
@@ -466,7 +506,11 @@ def build_restricted_response_matrices(
             else:
                 local_fxc = resolved_xc.local_kernel(total_density)
             local_fxc = _as_grid_values(local_fxc, total_density, label="XC kernel")
-            rho_ov_density = _transition_densities_on_grid(ao, orbo, orbv)
+            rho_ov_density = restricted_transition_response_features(
+                molecule,
+                feature_kind="LDA",
+                occupation_tolerance=occupation_tolerance,
+            )[0]
             xc_contribution = 2.0 * jnp.einsum(
                 "ria,rjb,r->iajb",
                 rho_ov_density,
@@ -480,6 +524,12 @@ def build_restricted_response_matrices(
             exchange_a = hybrid_fraction * exchange_a_raw
             exchange_b = hybrid_fraction * exchange_b_raw
 
+        nonlocal_a_matrix, nonlocal_b_matrix = _resolve_nonlocal_response_matrix_pair(
+            resolved_xc,
+            molecule,
+            delta_eps=delta_eps,
+            occupation_tolerance=occupation_tolerance,
+        )
         nonlocal_matrix, nonlocal_action, _ = _resolve_nonlocal_response_terms(
             resolved_xc,
             molecule,
@@ -495,6 +545,10 @@ def build_restricted_response_matrices(
             )
         if nonlocal_matrix is not None:
             xc_contribution = xc_contribution + nonlocal_matrix.reshape(nocc, nvir, nocc, nvir)
+        if nonlocal_a_matrix is not None:
+            exchange_a = exchange_a + nonlocal_a_matrix.reshape(nocc, nvir, nocc, nvir)
+        if nonlocal_b_matrix is not None:
+            exchange_b = exchange_b + nonlocal_b_matrix.reshape(nocc, nvir, nocc, nvir)
 
     a_matrix = diagonal + hartree_a + exchange_a + xc_contribution
     b_matrix = hartree_b + exchange_b + xc_contribution
@@ -654,7 +708,6 @@ def build_restricted_tda_matrix(
 
     resolved_xc = _resolve_xc_functional(molecule, xc_functional, xc_params)
 
-    ao = jnp.asarray(molecule.ao)
     weights = jnp.asarray(molecule.grid.weights)
     orbo, orbv, delta_eps, _ = _restricted_orbital_data(
         molecule,
@@ -718,8 +771,11 @@ def build_restricted_tda_matrix(
             )
             feature_kind = getattr(resolved_xc, "response_feature_kind", None)
             if feature_kind is None:
-                feature_kind = _infer_response_feature_kind(strict_tensor)
-            feature_kind = _normalize_response_feature_kind(feature_kind)
+                feature_kind = infer_response_feature_kind(strict_tensor)
+            feature_kind = normalize_response_feature_kind(
+                feature_kind,
+                label="response_feature_kind",
+            )
             response_features = restricted_transition_response_features(
                 molecule,
                 feature_kind=str(feature_kind),
@@ -736,9 +792,10 @@ def build_restricted_tda_matrix(
                 response_features.reshape(response_features.shape[0], weights.shape[0], dim),
             )
         else:
-            feature_kind = _normalize_response_feature_kind(
+            feature_kind = normalize_response_feature_kind(
                 getattr(resolved_xc, "response_feature_kind", None),
                 default="LDA",
+                label="response_feature_kind",
             )
             if feature_kind != "LDA":
                 raise ValueError(
@@ -752,11 +809,21 @@ def build_restricted_tda_matrix(
             else:
                 local_fxc = resolved_xc.local_kernel(total_density)
             local_fxc = _as_grid_values(local_fxc, total_density, label="XC kernel")
-            rho_ov_density = _transition_densities_on_grid(ao, orbo, orbv)
+            rho_ov_density = restricted_transition_response_features(
+                molecule,
+                feature_kind="LDA",
+                occupation_tolerance=occupation_tolerance,
+            )[0]
             flat_a = flat_a + _tda_lda_xc_flat(
                 weights * local_fxc,
                 rho_ov_density.reshape(weights.shape[0], dim),
             )
+        nonlocal_a_matrix, _ = _resolve_nonlocal_response_matrix_pair(
+            resolved_xc,
+            molecule,
+            delta_eps=delta_eps,
+            occupation_tolerance=occupation_tolerance,
+        )
         nonlocal_matrix, nonlocal_action, _ = _resolve_nonlocal_response_terms(
             resolved_xc,
             molecule,
@@ -772,6 +839,8 @@ def build_restricted_tda_matrix(
             )
         if nonlocal_matrix is not None:
             flat_a = flat_a + nonlocal_matrix
+        if nonlocal_a_matrix is not None:
+            flat_a = flat_a + nonlocal_a_matrix
     a_matrix = flat_a.reshape(nocc, nvir, nocc, nvir)
     return delta_eps, a_matrix
 
@@ -784,7 +853,6 @@ def _build_restricted_response_operator_data(
     occupation_tolerance: float = 1e-8,
 ) -> _RestrictedResponseOperatorData:
     resolved_xc = _resolve_xc_functional(molecule, xc_functional, xc_params)
-    ao = jnp.asarray(molecule.ao)
     weights = jnp.asarray(molecule.grid.weights)
     rep_tensor_obj = getattr(molecule, "rep_tensor", None)
     rep_tensor = None
@@ -803,6 +871,9 @@ def _build_restricted_response_operator_data(
     hybrid_fraction = 0.0
     nonlocal_xc_action_fn = None
     nonlocal_xc_diagonal = None
+    nonlocal_xc_a_action_fn = None
+    nonlocal_xc_b_action_fn = None
+    nonlocal_xc_a_diagonal = None
 
     if resolved_xc is not None:
         total_density = _density_on_grid(molecule)
@@ -819,8 +890,11 @@ def _build_restricted_response_operator_data(
             )
             feature_kind = getattr(resolved_xc, "response_feature_kind", None)
             if feature_kind is None:
-                feature_kind = _infer_response_feature_kind(strict_tensor)
-            feature_kind = _normalize_response_feature_kind(feature_kind)
+                feature_kind = infer_response_feature_kind(strict_tensor)
+            feature_kind = normalize_response_feature_kind(
+                feature_kind,
+                label="response_feature_kind",
+            )
             response_features = restricted_transition_response_features(
                 molecule,
                 feature_kind=str(feature_kind),
@@ -834,9 +908,10 @@ def _build_restricted_response_operator_data(
                 )
             weighted_strict_tensor = strict_tensor * weights[None, None, :]
         else:
-            feature_kind = _normalize_response_feature_kind(
+            feature_kind = normalize_response_feature_kind(
                 getattr(resolved_xc, "response_feature_kind", None),
                 default="LDA",
+                label="response_feature_kind",
             )
             if feature_kind != "LDA":
                 raise ValueError(
@@ -849,10 +924,20 @@ def _build_restricted_response_operator_data(
                 local_fxc = grid_kernel(molecule)
             else:
                 local_fxc = resolved_xc.local_kernel(total_density)
-            rho_ov_density = _transition_densities_on_grid(ao, orbo, orbv)
+            rho_ov_density = restricted_transition_response_features(
+                molecule,
+                feature_kind="LDA",
+                occupation_tolerance=occupation_tolerance,
+            )[0]
             local_fxc = _as_grid_values(local_fxc, total_density, label="XC kernel")
             weighted_local_kernel = weights * local_fxc
 
+        nonlocal_a_matrix, nonlocal_b_matrix = _resolve_nonlocal_response_matrix_pair(
+            resolved_xc,
+            molecule,
+            delta_eps=delta_eps,
+            occupation_tolerance=occupation_tolerance,
+        )
         nonlocal_matrix, nonlocal_action, nonlocal_diagonal = _resolve_nonlocal_response_terms(
             resolved_xc,
             molecule,
@@ -860,6 +945,23 @@ def _build_restricted_response_operator_data(
             occupation_tolerance=occupation_tolerance,
         )
         dim = int(nocc * nvir)
+        if nonlocal_a_matrix is not None:
+            flat_a = nonlocal_a_matrix
+
+            def nonlocal_xc_a_action_fn(values: Array) -> Array:
+                reshaped = jnp.asarray(values, dtype=delta_eps.dtype).reshape(-1, dim)
+                out = reshaped @ flat_a.T
+                return out.reshape(-1, nocc, nvir)
+
+            nonlocal_xc_a_diagonal = jnp.diag(flat_a).reshape(nocc, nvir)
+        if nonlocal_b_matrix is not None:
+            flat_b = nonlocal_b_matrix
+
+            def nonlocal_xc_b_action_fn(values: Array) -> Array:
+                reshaped = jnp.asarray(values, dtype=delta_eps.dtype).reshape(-1, dim)
+                out = reshaped @ flat_b.T
+                return out.reshape(-1, nocc, nvir)
+
         if nonlocal_matrix is not None:
             flat = nonlocal_matrix
 
@@ -919,6 +1021,9 @@ def _build_restricted_response_operator_data(
         hybrid_fraction=hybrid_fraction,
         nonlocal_xc_action_fn=nonlocal_xc_action_fn,
         nonlocal_xc_diagonal=nonlocal_xc_diagonal,
+        nonlocal_xc_a_action_fn=nonlocal_xc_a_action_fn,
+        nonlocal_xc_b_action_fn=nonlocal_xc_b_action_fn,
+        nonlocal_xc_a_diagonal=nonlocal_xc_a_diagonal,
     )
 
 
@@ -976,6 +1081,8 @@ def _restricted_xc_diagonal(data: _RestrictedResponseOperatorData) -> Array:
         )
     if data.nonlocal_xc_diagonal is not None:
         out = out + jnp.asarray(data.nonlocal_xc_diagonal, dtype=out.dtype)
+    if data.nonlocal_xc_a_diagonal is not None:
+        out = out + jnp.asarray(data.nonlocal_xc_a_diagonal, dtype=out.dtype)
     return out
 
 
@@ -1003,7 +1110,10 @@ def _restricted_a_action(data: _RestrictedResponseOperatorData, x: Array) -> Arr
                 x,
                 precision=Precision.HIGHEST,
             )
-    return out + _restricted_xc_action(data, x)
+    out = out + _restricted_xc_action(data, x)
+    if data.nonlocal_xc_a_action_fn is not None:
+        out = out + data.nonlocal_xc_a_action_fn(x)
+    return out
 
 
 def _restricted_b_action(data: _RestrictedResponseOperatorData, x: Array) -> Array:
@@ -1028,7 +1138,10 @@ def _restricted_b_action(data: _RestrictedResponseOperatorData, x: Array) -> Arr
             x,
             precision=Precision.HIGHEST,
         )
-    return out + _restricted_xc_action(data, x)
+    out = out + _restricted_xc_action(data, x)
+    if data.nonlocal_xc_b_action_fn is not None:
+        out = out + data.nonlocal_xc_b_action_fn(x)
+    return out
 
 
 def _restricted_tda_diagonal(data: _RestrictedResponseOperatorData) -> Array:

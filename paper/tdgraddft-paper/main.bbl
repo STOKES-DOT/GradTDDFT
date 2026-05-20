@@ -1,0 +1,125 @@
+\providecommand{\latin}[1]{#1}
+\makeatletter
+\providecommand{\doi}
+  {\begingroup\let\do\@makeother\dospecials
+  \catcode`\{=1 \catcode`\}=2 \doi@aux}
+\providecommand{\doi@aux}[1]{\endgroup\texttt{#1}}
+\makeatother
+\providecommand*\mcitethebibliography{\thebibliography}
+\csname @ifundefined\endcsname{endmcitethebibliography}
+  {\let\endmcitethebibliography\endthebibliography}{}
+\begin{mcitethebibliography}{11}
+\providecommand*\natexlab[1]{#1}
+\providecommand*\mciteSetBstSublistMode[1]{}
+\providecommand*\mciteSetBstMaxWidthForm[2]{}
+\providecommand*\mciteBstWouldAddEndPuncttrue
+  {\def\EndOfBibitem{\unskip.}}
+\providecommand*\mciteBstWouldAddEndPunctfalse
+  {\let\EndOfBibitem\relax}
+\providecommand*\mciteSetBstMidEndSepPunct[3]{}
+\providecommand*\mciteSetBstSublistLabelBeginEnd[3]{}
+\providecommand*\EndOfBibitem{}
+\mciteSetBstSublistMode{f}
+\mciteSetBstMaxWidthForm{subitem}{(\alph{mcitesubitemcount})}
+\mciteSetBstSublistLabelBeginEnd
+  {\mcitemaxwidthsubitemform\space}
+  {\relax}
+  {\relax}
+
+\bibitem[Casida(1995)]{Casida1995}
+Casida,~M.~E. Time-Dependent Density Functional Response Theory for Molecules.
+  \emph{Recent Advances in Density Functional Methods} \textbf{1995}, \emph{1},
+  155--192\relax
+\mciteBstWouldAddEndPuncttrue
+\mciteSetBstMidEndSepPunct{\mcitedefaultmidpunct}
+{\mcitedefaultendpunct}{\mcitedefaultseppunct}\relax
+\EndOfBibitem
+\bibitem[Kirkpatrick \latin{et~al.}(2021)Kirkpatrick, McMorrow, Turban, Gaunt,
+  Spencer, Matthews, Obika, Thiry, Fortunato, Pfaff, Rom\'an, Laming, Gaya, An,
+  and Liu]{DM21}
+Kirkpatrick,~J.; McMorrow,~B.; Turban,~D. H.~P.; Gaunt,~A.~L.; Spencer,~J.~S.;
+  Matthews,~A. G. D.~G.; Obika,~A.; Thiry,~L.; Fortunato,~M.; Pfaff,~D.;
+  Rom\'an,~L.; Laming,~S.; Gaya,~K.; An,~L.; Liu,~W. Pushing the frontiers of
+  density functionals by solving the fractional electron problem.
+  \emph{Science} \textbf{2021}, \emph{374}, 1385--1389\relax
+\mciteBstWouldAddEndPuncttrue
+\mciteSetBstMidEndSepPunct{\mcitedefaultmidpunct}
+{\mcitedefaultendpunct}{\mcitedefaultseppunct}\relax
+\EndOfBibitem
+\bibitem[Su \latin{et~al.}(2025)Su, Shi, Zhang, Wang, Duan, Zhang, Li, Dai, He,
+  Zhan, Liu, Zhang, Wu, Li, Chen, Huo, Zhang, Huang, Tang, He, Zhang, Liao, Xu,
+  Zhai, Wang, Lyu, Li, Wang, E, Wang, and Li]{GLOBE}
+Su,~N.; Shi,~Y.; Zhang,~J.; Wang,~Z.; Duan,~W.; Zhang,~Y.; Li,~X.; Dai,~Z.;
+  He,~H.; Zhan,~S.; Liu,~Y.; Zhang,~Y.; Wu,~J.; Li,~X.; Chen,~Q.; Huo,~H.;
+  Zhang,~C.; Huang,~B.; Tang,~Z.; He,~W.; Zhang,~Y.; Liao,~S.; Xu,~D.;
+  Zhai,~G.; Wang,~C.; Lyu,~R.; Li,~Q.; Wang,~Y.; E,~W.; Wang,~D.; Li,~Y. GLOBE:
+  A Global and Local Optimal Basis for Exchange-correlation energies.
+  \emph{arXiv} \textbf{2025}, arXiv:2501.15078\relax
+\mciteBstWouldAddEndPuncttrue
+\mciteSetBstMidEndSepPunct{\mcitedefaultmidpunct}
+{\mcitedefaultendpunct}{\mcitedefaultseppunct}\relax
+\EndOfBibitem
+\bibitem[Sun \latin{et~al.}(2018)Sun, Berkelbach, Blunt, Booth, Guo, Li, Liu,
+  McClain, Sayfutyarova, Sharma, Wouters, and Chan]{PySCF}
+Sun,~Q.; Berkelbach,~T.~C.; Blunt,~N.~S.; Booth,~G.~H.; Guo,~Y.; Li,~Z.;
+  Liu,~J.; McClain,~J.~D.; Sayfutyarova,~E.~R.; Sharma,~S.; Wouters,~S.;
+  Chan,~G. K.-L. PySCF: the Python-based simulations of chemistry framework.
+  \emph{Wiley Interdisciplinary Reviews: Computational Molecular Science}
+  \textbf{2018}, \emph{8}, e1340\relax
+\mciteBstWouldAddEndPuncttrue
+\mciteSetBstMidEndSepPunct{\mcitedefaultmidpunct}
+{\mcitedefaultendpunct}{\mcitedefaultseppunct}\relax
+\EndOfBibitem
+\bibitem[Epifanovsky \latin{et~al.}(2021)Epifanovsky, \latin{et~al.}
+  others]{QChem}
+Epifanovsky,~E.; others Software for the frontiers of quantum chemistry: An
+  overview of developments in the Q-Chem 5 package. \emph{J. Chem. Phys.}
+  \textbf{2021}, \emph{155}, 084801\relax
+\mciteBstWouldAddEndPuncttrue
+\mciteSetBstMidEndSepPunct{\mcitedefaultmidpunct}
+{\mcitedefaultendpunct}{\mcitedefaultseppunct}\relax
+\EndOfBibitem
+\bibitem[Frisch \latin{et~al.}(2016)Frisch, Trucks, Schlegel, \latin{et~al.}
+  others]{Gaussian}
+Frisch,~M.~J.; Trucks,~G.~W.; Schlegel,~H.~B.; others Gaussian 16, Revision
+  C.01. \textbf{2016}, \relax
+\mciteBstWouldAddEndPunctfalse
+\mciteSetBstMidEndSepPunct{\mcitedefaultmidpunct}
+{}{\mcitedefaultseppunct}\relax
+\EndOfBibitem
+\bibitem[Bradbury \latin{et~al.}(2018)Bradbury, Frostig, Hawkins, Johnson,
+  Leary, Maclaurin, Necula, Paszke, VanderPlas, Wanderman-Milne, and
+  Zhang]{JAX}
+Bradbury,~J.; Frostig,~R.; Hawkins,~P.; Johnson,~M.~J.; Leary,~C.;
+  Maclaurin,~D.; Necula,~G.; Paszke,~A.; VanderPlas,~J.; Wanderman-Milne,~S.;
+  Zhang,~Q. JAX: composable transformations of Python+NumPy programs.
+  \textbf{2018}, http://github.com/google/jax\relax
+\mciteBstWouldAddEndPuncttrue
+\mciteSetBstMidEndSepPunct{\mcitedefaultmidpunct}
+{\mcitedefaultendpunct}{\mcitedefaultseppunct}\relax
+\EndOfBibitem
+\bibitem[Kasim and Vinko(2021)Kasim, and Vinko]{GradDFT}
+Kasim,~M.~K.; Vinko,~S.~M. Learning the exchange-correlation energy from data
+  with gradient descent. \emph{Phys. Rev. Lett.} \textbf{2021}, \emph{127},
+  126401\relax
+\mciteBstWouldAddEndPuncttrue
+\mciteSetBstMidEndSepPunct{\mcitedefaultmidpunct}
+{\mcitedefaultendpunct}{\mcitedefaultseppunct}\relax
+\EndOfBibitem
+\bibitem[Pulay(1980)]{DIIS}
+Pulay,~P. Convergence acceleration of iterative sequences. The case of SCF
+  iteration. \emph{Chem. Phys. Lett.} \textbf{1980}, \emph{73}, 393--398\relax
+\mciteBstWouldAddEndPuncttrue
+\mciteSetBstMidEndSepPunct{\mcitedefaultmidpunct}
+{\mcitedefaultendpunct}{\mcitedefaultseppunct}\relax
+\EndOfBibitem
+\bibitem[Heek \latin{et~al.}(2023)Heek, Levskaya, Oliver, Ritter, Rondepierre,
+  Steiner, and van Zee]{Flax}
+Heek,~J.; Levskaya,~A.; Oliver,~A.; Ritter,~M.; Rondepierre,~B.; Steiner,~A.;
+  van Zee,~M. Flax: A neural network library and ecosystem for JAX.
+  \textbf{2023}, http://github.com/google/flax\relax
+\mciteBstWouldAddEndPuncttrue
+\mciteSetBstMidEndSepPunct{\mcitedefaultmidpunct}
+{\mcitedefaultendpunct}{\mcitedefaultseppunct}\relax
+\EndOfBibitem
+\end{mcitethebibliography}

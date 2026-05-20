@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-import os
 import warnings
 from typing import Any, Literal
 
@@ -16,7 +15,6 @@ from ..data.grid import build_molecular_grid_from_spec
 from ..data.grid_ao import evaluate_cartesian_ao, evaluate_cartesian_ao_with_derivatives
 from ..data.integrals.jax import (
     build_hcore,
-    cuda_ffi_available,
     dipole_matrix,
     eri_pair_matrix_packed,
     eri_tensor,
@@ -39,13 +37,12 @@ from ..df import (
     eri_to_df_factors_from_basis,
     true_df_factors_from_libcint_mol,
 )
-from ..jax_libxc import parse_xc, xc_type
+from ..xc_backend.jax_libxc import parse_xc, xc_type
 from .core import _contains_jax_tracer
 from .init_guess import restricted_init_guess_from_pyscf, unrestricted_init_guess_from_pyscf
-from .rks import RKSConfig, _prewarm_runtime_rks_primitives
+from .rks import RKSConfig
 from .uks import UKSConfig
 
-_DEFAULT_CUDA_PAIR_ERI_MAX_MIB = 2048.0
 _GRID_AO_INPUT_CACHE_MAXSIZE = 32
 _GRID_AO_INPUT_CACHE: dict[tuple[Any, ...], Any] = {}
 _LIBCINT_HOST_INTEGRAL_CACHE_MAXSIZE = 64
@@ -193,25 +190,6 @@ def _resolve_config(config: RKSConfig | None, xc_spec: str | None) -> tuple[RKSC
     if cfg.xc_spec != xc_spec_resolved:
         cfg = replace(cfg, xc_spec=xc_spec_resolved)
     return cfg, xc_spec_resolved
-
-
-def _precompute_eri_groups_for_rks(config: RKSConfig) -> bool:
-    return not (
-        config.jk_backend == "direct"
-        and config.direct_jk_engine == "cuda"
-        and cuda_ffi_available()
-    )
-
-
-def _cuda_pair_eri_max_bytes_for_inputs() -> int:
-    raw = os.environ.get("TD_GRADDFT_CUDA_PAIR_ERI_MAX_MIB")
-    if raw is None or str(raw).strip() == "":
-        return int(_DEFAULT_CUDA_PAIR_ERI_MAX_MIB * 1024.0 * 1024.0)
-    try:
-        mib = float(raw)
-    except ValueError:
-        return int(_DEFAULT_CUDA_PAIR_ERI_MAX_MIB * 1024.0 * 1024.0)
-    return max(0, int(mib * 1024.0 * 1024.0))
 
 
 def _active_device_cache_key() -> tuple[str, int]:
@@ -446,33 +424,6 @@ def _grid_ao_payload(
     return bundle.ao, bundle.ao_deriv1, bundle.ao_laplacian
 
 
-def _libcint_pair_eri_for_direct_cuda(
-    config: RKSConfig,
-    basis: CartesianBasis,
-    *,
-    geometry_is_traced: bool,
-) -> bool:
-    del config, basis, geometry_is_traced
-    return False
-
-
-def _overlap_hcore_for_rks_input(
-    basis: CartesianBasis,
-    config: RKSConfig,
-    *,
-    geometry_is_traced: bool,
-) -> tuple[Array, Array]:
-    backend = "jax"
-    if (
-        config.jk_backend == "direct"
-        and config.direct_jk_engine == "cuda"
-        and cuda_ffi_available()
-        and not bool(geometry_is_traced)
-    ):
-        backend = "cuda"
-    return overlap_hcore_matrices(basis, backend=backend)
-
-
 def _libcint_one_electron_with_coords(
     *,
     coords_bohr: Array,
@@ -569,45 +520,6 @@ def _libcint_one_electron_from_mol(
     return overlap, hcore, dipole_integrals
 
 
-def _dummy_pair_eri_matrix_for_basis(basis: CartesianBasis, dtype: Any) -> np.ndarray:
-    np_dtype = np.dtype(dtype)
-    pair_count = int(basis.nao * (basis.nao + 1) // 2)
-    return np.zeros((pair_count, pair_count), dtype=np_dtype)
-
-
-def _submit_runtime_rks_prewarm(
-    executor: ThreadPoolExecutor | None,
-    *,
-    overlap: Array,
-    hcore: Array,
-    eri: Array | None,
-    eri_pair_matrix: Array | None,
-    nelectron: int,
-    ao: Array,
-    ao_deriv1: Array,
-    grid_weights: Array,
-    df_factors: Array | None,
-    direct_basis: CartesianBasis | None,
-    config: RKSConfig,
-) -> Future[None] | None:
-    if executor is None or config.iteration_backend != "runtime":
-        return None
-    return executor.submit(
-        _prewarm_runtime_rks_primitives,
-        overlap=overlap,
-        hcore=hcore,
-        eri=eri,
-        eri_pair_matrix=eri_pair_matrix,
-        nelectron=nelectron,
-        ao=ao,
-        ao_deriv1=ao_deriv1,
-        grid_weights=grid_weights,
-        df_factors=df_factors,
-        direct_basis=direct_basis,
-        config=config,
-    )
-
-
 def _resolve_uks_config(config: UKSConfig | None, xc_spec: str | None) -> tuple[UKSConfig, str]:
     xc_spec_resolved = str(xc_spec if xc_spec is not None else (config.xc_spec if config is not None else "pbe"))
     parse_xc(xc_spec_resolved)
@@ -668,11 +580,8 @@ def _build_rks_inputs_from_libcint_backbone(
     mol_kwargs: dict[str, Any],
 ) -> RKSIntegralInputs:
     needs_ao_laplacian = xc_type(xc_spec_resolved) == "MGGA"
-    precompute_eri_groups = bool(
-        cfg.jk_backend == "direct" and cfg.direct_jk_engine == "jax"
-    )
+    precompute_eri_groups = cfg.jk_backend == "direct"
     executor: ThreadPoolExecutor | None = None
-    prewarm_future: Future[None] | None = None
 
     try:
         if isinstance(atom, MoleculeSpec) and _contains_jax_tracer(atom.coords_bohr):
@@ -728,11 +637,7 @@ def _build_rks_inputs_from_libcint_backbone(
                     tol=cfg.df_tol,
                     max_rank=cfg.df_max_rank,
                 )
-            elif cfg.jk_backend != "direct" or _libcint_pair_eri_for_direct_cuda(
-                cfg,
-                basis_cart,
-                geometry_is_traced=geometry_is_traced,
-            ):
+            elif cfg.jk_backend != "direct":
                 eri_pair_matrix = libcint_int2e_s4_with_coords(
                     coords_bohr,
                     tuple(spec.symbols),
@@ -824,24 +729,7 @@ def _build_rks_inputs_from_libcint_backbone(
                 geometry_grad_policy=libcint_grad_policy_mode,
                 loader=lambda: true_df_factors_from_libcint_mol(mol),
             )
-        elif not geometry_is_traced and (
-            cfg.jk_backend != "direct"
-            or _libcint_pair_eri_for_direct_cuda(cfg, basis_cart, geometry_is_traced=False)
-        ):
-            prewarm_future = _submit_runtime_rks_prewarm(
-                executor,
-                overlap=overlap,
-                hcore=hcore,
-                eri=None,
-                eri_pair_matrix=_dummy_pair_eri_matrix_for_basis(basis_cart, hcore.dtype),
-                nelectron=nelectron,
-                ao=ao,
-                ao_deriv1=ao_deriv1,
-                grid_weights=weights,
-                df_factors=None,
-                direct_basis=direct_basis,
-                config=cfg,
-            )
+        elif not geometry_is_traced and cfg.jk_backend != "direct":
             eri_pair_matrix = _cached_libcint_host_integral(
                 mol=mol,
                 integral_name=f"{eri_name}_s4",
@@ -875,22 +763,6 @@ def _build_rks_inputs_from_libcint_backbone(
             integral_backend=integral_backend_mode,
             grid_ao_backend=grid_ao_backend_mode,
         )
-        if prewarm_future is not None:
-            prewarm_future.result()
-        elif not geometry_is_traced:
-            _prewarm_runtime_rks_primitives(
-                overlap=inputs.overlap,
-                hcore=inputs.hcore,
-                eri=inputs.eri,
-                eri_pair_matrix=inputs.eri_pair_matrix,
-                nelectron=inputs.nelectron,
-                ao=inputs.ao,
-                ao_deriv1=inputs.ao_deriv1,
-                grid_weights=inputs.grid_weights,
-                df_factors=inputs.df_factors,
-                direct_basis=inputs.direct_basis,
-                config=cfg,
-            )
         return inputs
     finally:
         if executor is not None:
@@ -928,16 +800,12 @@ def _build_rks_inputs_from_jax_backbone(
         basis=basis,
         max_l=max_l,
         grids_level=grids_level,
-        precompute_eri_groups=_precompute_eri_groups_for_rks(cfg),
+        precompute_eri_groups=True,
         needs_ao_laplacian=needs_ao_laplacian,
     )
     geometry_is_traced = basis_grid.geometry_is_traced
     basis_cart = basis_grid.basis
-    overlap, hcore = _overlap_hcore_for_rks_input(
-        basis_cart,
-        cfg,
-        geometry_is_traced=geometry_is_traced,
-    )
+    overlap, hcore = overlap_hcore_matrices(basis_cart, backend="jax")
     if precompile_eri:
         _precompile_eri_kernels(
             basis_cart,
@@ -1003,20 +871,6 @@ def _build_rks_inputs_from_jax_backbone(
         integral_backend=integral_backend_mode,
         grid_ao_backend=grid_ao_backend_mode,
     )
-    if not geometry_is_traced:
-        _prewarm_runtime_rks_primitives(
-            overlap=inputs.overlap,
-            hcore=inputs.hcore,
-            eri=inputs.eri,
-            eri_pair_matrix=inputs.eri_pair_matrix,
-            nelectron=inputs.nelectron,
-            ao=inputs.ao,
-            ao_deriv1=inputs.ao_deriv1,
-            grid_weights=inputs.grid_weights,
-            df_factors=inputs.df_factors,
-            direct_basis=inputs.direct_basis,
-            config=cfg,
-        )
     return inputs
 
 

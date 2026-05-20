@@ -1,32 +1,38 @@
 import jax
 import jax.numpy as jnp
-import numpy as np
-import pytest
-from pyscf.dft import libxc as pyscf_libxc
 
-from td_graddft.jax_libxc import (
+import td_graddft.xc_backend.jax_xc_adapter as jax_xc_adapter
+from td_graddft.xc_backend.jax_libxc import (
+    LocalXCTermSpec,
     RestrictedFeatureBundle,
     b3lyp_component_basis,
     canonical_rsh_preset_name,
     eval_xc_energy_density,
     eval_xc_response_tensor,
+    eval_xc_term_specs_energy_density,
     get_rsh_functional_preset,
     hybrid_coeff,
+    jax_xc_backend_info,
     list_rsh_functional_presets,
     parse_xc,
+    resolve_xc_component_name,
+    resolve_semilocal_xc_specs,
     xc_type,
 )
 
 
 def _features():
+    rho = jnp.asarray([0.5, 0.6])
+    sigma = jnp.asarray([0.01, 0.02])
+    tau = jnp.asarray([0.1, 0.2])
     return RestrictedFeatureBundle(
-        rho_a=jnp.array([0.5, 0.6]),
-        rho_b=jnp.array([0.5, 0.6]),
-        sigma_aa=jnp.array([0.01, 0.02]),
-        sigma_ab=jnp.array([0.01, 0.02]),
-        sigma_bb=jnp.array([0.01, 0.02]),
-        tau_a=jnp.array([0.1, 0.2]),
-        tau_b=jnp.array([0.1, 0.2]),
+        rho_a=0.5 * rho,
+        rho_b=0.5 * rho,
+        sigma_aa=0.25 * sigma,
+        sigma_ab=0.25 * sigma,
+        sigma_bb=0.25 * sigma,
+        tau_a=0.5 * tau,
+        tau_b=0.5 * tau,
     )
 
 
@@ -39,6 +45,57 @@ def test_parse_xc_supports_pyscf_like_aliases():
     assert [term.name for term in terms] == ["hf", "gga_x_pbe", "gga_c_pbe"]
     assert xc_type("b3lyp") == "GGA"
     assert [term.name for term in svwn_terms] == ["lda_x", "lda_c_vwn"]
+
+
+def test_resolve_semilocal_xc_specs_expands_aliases():
+    assert resolve_semilocal_xc_specs("pbe") == ("gga_x_pbe", "gga_c_pbe")
+    assert resolve_semilocal_xc_specs("hyb_gga_xc_pbeh") == (
+        "gga_x_pbe",
+        "gga_c_pbe",
+    )
+    assert resolve_semilocal_xc_specs("hyb_gga_xc_b3lyp") == (
+        "lda_x",
+        "gga_x_b88",
+        "lda_c_vwn_rpa",
+        "gga_c_lyp",
+    )
+    assert resolve_semilocal_xc_specs(("lda_x", "gga_c_pbe")) == ("lda_x", "gga_c_pbe")
+
+
+def test_resolve_xc_component_name_accepts_friendly_aliases():
+    assert resolve_xc_component_name("lyp_c") == "gga_c_lyp"
+    assert resolve_xc_component_name("C_LYP") == "gga_c_lyp"
+    assert resolve_xc_component_name("pbe_x") == "gga_x_pbe"
+    assert resolve_xc_component_name("x_b88") == "gga_x_b88"
+    assert resolve_xc_component_name("mgga:scan_c") == "mgga_c_scan"
+    assert resolve_semilocal_xc_specs(("lyp_c", "b88_x", "vwn_rpa_c")) == (
+        "gga_c_lyp",
+        "gga_x_b88",
+        "lda_c_vwn_rpa",
+    )
+
+
+def test_resolve_xc_component_name_rejects_ambiguous_or_kinetic_names():
+    try:
+        resolve_xc_component_name("scan")
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("scan should be ambiguous")
+
+    assert "ambiguous" in message
+    assert "scan_x" in message
+    assert "scan_c" in message
+
+    try:
+        resolve_xc_component_name("gga_k_tfvw")
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("kinetic component should be rejected")
+
+    assert "kinetic" in message
+    assert "not an XC" in message
 
 
 def test_b3lyp_component_basis_returns_explicit_channels():
@@ -68,121 +125,104 @@ def test_jax_libxc_exposes_rsh_functional_presets_directly():
     assert wb.default_omega == 0.2
 
 
-def test_lc_wpbe_generated_formula_records_jax_xc_source():
-    from td_graddft import _jax_xc_wpbeh
+def test_eval_xc_energy_density_routes_alias_terms_through_adapter(monkeypatch):
+    features = _features()
+    calls = []
 
-    assert (
-        _jax_xc_wpbeh.JAX_XC_WPBEH_SOURCE_PATH
-        == "gen_repo/impl/prebuilt/unpol/gga_x_wpbeh.py"
+    def fake_eval(name, bundle, *, omega=None, allow_experimental_jax_xc=False):
+        calls.append((name, omega, allow_experimental_jax_xc))
+        assert bundle is features
+        factors = {
+            "lda_x": 0.5,
+            "gga_x_b88": 1.0,
+            "lda_c_vwn_rpa": 1.5,
+            "gga_c_lyp": 2.0,
+        }
+        return jnp.full_like(bundle.rho, factors[name])
+
+    monkeypatch.setattr(jax_xc_adapter, "eval_jax_xc_from_restricted_features", fake_eval)
+
+    got = eval_xc_energy_density("b3lyp", features)
+
+    assert calls == [
+        ("lda_x", None, False),
+        ("gga_x_b88", None, False),
+        ("lda_c_vwn_rpa", None, False),
+        ("gga_c_lyp", None, False),
+    ]
+    expected_eps = 0.08 * 0.5 + 0.72 * 1.0 + 0.19 * 1.5 + 0.81 * 2.0
+    assert jnp.allclose(got, features.rho * expected_eps)
+
+
+def test_eval_xc_energy_density_accepts_dynamic_installed_component_with_opt_in(monkeypatch):
+    class FakeModule:
+        __version__ = "fake"
+
+        @staticmethod
+        def gga_c_demo(*, polarized=False):
+            del polarized
+            return lambda rho_fn, r, mo_fn=None: 2.0 * rho_fn(r)
+
+    monkeypatch.setattr(
+        jax_xc_adapter,
+        "load_jax_xc",
+        lambda: (jax_xc_adapter._SafeJAXXCModule(FakeModule()), "upstream"),
     )
-    assert _jax_xc_wpbeh.JAX_XC_WPBEH_SOURCE_COMMIT
+    features = _features()
 
+    try:
+        eval_xc_energy_density("gga_c_demo", features)
+    except ValueError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("dynamic component should require experimental opt-in")
 
-def test_lc_wpbe_local_energy_density_matches_pyscf_libxc_restricted():
-    pytest.importorskip("pyscf")
+    assert "allow_experimental_jax_xc=True" in message
 
-    rho = np.array([0.2, 0.4, 0.8])
-    dx = np.array([0.03, 0.06, 0.10])
-    zeros = np.zeros_like(rho)
-    omega = 0.4
-    features = RestrictedFeatureBundle(
-        rho_a=jnp.asarray(0.5 * rho),
-        rho_b=jnp.asarray(0.5 * rho),
-        sigma_aa=jnp.asarray(0.25 * dx**2),
-        sigma_ab=jnp.asarray(0.25 * dx**2),
-        sigma_bb=jnp.asarray(0.25 * dx**2),
-        tau_a=jnp.zeros_like(jnp.asarray(rho)),
-        tau_b=jnp.zeros_like(jnp.asarray(rho)),
+    got = eval_xc_energy_density(
+        "gga_c_demo",
+        features,
+        allow_experimental_jax_xc=True,
     )
-    expected_exchange = rho * pyscf_libxc.eval_xc(
-        "GGA_X_WPBEH",
-        np.array([rho, dx, zeros, zeros]),
-        spin=0,
-        deriv=0,
-        omega=omega,
-    )[0]
-    expected_correlation = rho * pyscf_libxc.eval_xc(
-        "GGA_C_PBE",
-        np.array([rho, dx, zeros, zeros]),
-        spin=0,
-        deriv=0,
-    )[0]
-    got = np.asarray(eval_xc_energy_density("lc_wpbe_local", features, omega=omega))
 
-    assert np.allclose(got, expected_exchange + expected_correlation, atol=5e-6, rtol=5e-6)
+    assert jnp.allclose(got, 2.0 * features.rho * features.rho)
 
 
-def test_gga_x_wpbeh_matches_pyscf_libxc_for_large_reduced_gradient_point():
-    pytest.importorskip("pyscf")
+def test_eval_xc_term_specs_energy_density_passes_omega(monkeypatch):
+    features = _features()
+    calls = []
 
-    rho_a = np.array([6.765271973563358e-05])
-    rho_b = np.array([6.765271973563358e-05])
-    grad_a = np.array(
-        [[0.00014442681276705116, -0.0001162723929155618, -0.00017158087575808167]]
-    )
-    grad_b = grad_a.copy()
-    omega = 0.8105142116546631
-    features = RestrictedFeatureBundle(
-        rho_a=jnp.asarray(rho_a),
-        rho_b=jnp.asarray(rho_b),
-        sigma_aa=jnp.asarray(np.sum(grad_a * grad_a, axis=1)),
-        sigma_ab=jnp.asarray(np.sum(grad_a * grad_b, axis=1)),
-        sigma_bb=jnp.asarray(np.sum(grad_b * grad_b, axis=1)),
-        tau_a=jnp.zeros_like(jnp.asarray(rho_a)),
-        tau_b=jnp.zeros_like(jnp.asarray(rho_b)),
-    )
-    expected = (rho_a + rho_b) * pyscf_libxc.eval_xc(
-        "GGA_X_WPBEH",
-        np.array(
-            [
-                [rho_a, grad_a[:, 0], grad_a[:, 1], grad_a[:, 2]],
-                [rho_b, grad_b[:, 0], grad_b[:, 1], grad_b[:, 2]],
-            ]
+    def fake_eval(name, bundle, *, omega=None, allow_experimental_jax_xc=False):
+        calls.append((name, omega, allow_experimental_jax_xc))
+        assert bundle is features
+        return jnp.full_like(bundle.rho, 1.0 if name == "gga_x_wpbeh" else 2.0)
+
+    monkeypatch.setattr(jax_xc_adapter, "eval_jax_xc_from_restricted_features", fake_eval)
+
+    got = eval_xc_term_specs_energy_density(
+        (
+            LocalXCTermSpec("gga_x_wpbeh", 1.0, "runtime"),
+            LocalXCTermSpec("gga_c_pbe", 1.0, "none"),
         ),
-        spin=1,
-        deriv=0,
-        omega=omega,
-    )[0]
-    got = np.asarray(eval_xc_energy_density("gga_x_wpbeh", features, omega=omega))
-
-    assert np.allclose(got, expected, atol=1e-8, rtol=1e-5)
-
-
-def test_lc_wpbe_local_exchange_is_omega_dependent_and_differentiable():
-    features = _features()
-    low_omega = eval_xc_energy_density("gga_x_wpbeh", features, omega=0.2)
-    high_omega = eval_xc_energy_density("gga_x_wpbeh", features, omega=0.6)
-    grad = jax.grad(
-        lambda omega: jnp.sum(eval_xc_energy_density("gga_x_wpbeh", features, omega=omega))
-    )(jnp.asarray(0.4))
-
-    assert not jnp.allclose(low_omega, high_omega)
-    assert jnp.all(jnp.isfinite(low_omega))
-    assert jnp.all(jnp.isfinite(high_omega))
-    assert jnp.isfinite(grad)
-
-
-def test_lc_wpbe_local_potential_kernel_is_differentiable_with_respect_to_omega():
-    from td_graddft.nn_rsh.functional import _point_xc_value_and_grad_kernel
-
-    variables = jnp.asarray(
-        [
-            [1.0, 0.1, 0.2, 0.3],
-            [0.8, 0.2, 0.1, 0.0],
-        ]
+        features,
+        omega=0.4,
     )
-    kernel = _point_xc_value_and_grad_kernel("lc_wpbe_local", "GGA", 1e-12)
-    grad = jax.grad(
-        lambda omega: jnp.sum(kernel(variables, omega)[0])
-        + 0.01 * jnp.sum(kernel(variables, omega)[1])
-    )(jnp.asarray(0.4))
 
-    assert jnp.isfinite(grad)
+    assert calls == [
+        ("gga_x_wpbeh", 0.4, False),
+        ("gga_c_pbe", None, False),
+    ]
+    assert jnp.allclose(got, 3.0 * features.rho)
 
 
-def test_pbe_energy_density_is_finite_and_differentiable():
+def test_energy_density_remains_differentiable_through_adapter(monkeypatch):
     features = _features()
-    energy_density = eval_xc_energy_density("pbe", features)
+
+    def fake_eval(name, bundle, *, omega=None, allow_experimental_jax_xc=False):
+        del name, omega, allow_experimental_jax_xc
+        return bundle.rho + 0.5 * jnp.sqrt(bundle.sigma + 1e-12)
+
+    monkeypatch.setattr(jax_xc_adapter, "eval_jax_xc_from_restricted_features", fake_eval)
 
     grad = jax.grad(
         lambda rho_a: jnp.sum(
@@ -201,167 +241,34 @@ def test_pbe_energy_density_is_finite_and_differentiable():
         )
     )(features.rho_a)
 
-    assert energy_density.shape == (2,)
-    assert jnp.all(jnp.isfinite(energy_density))
     assert jnp.all(jnp.isfinite(grad))
 
 
-def test_dynamic_mgga_jax_xc_energy_and_response_tensor_require_opt_in(monkeypatch):
-    from td_graddft import jax_xc_adapter
+def test_eval_xc_response_tensor_uses_adapter_energy(monkeypatch):
+    def fake_eval(name, bundle, *, omega=None, allow_experimental_jax_xc=False):
+        del name, allow_experimental_jax_xc
+        omega_value = 0.0 if omega is None else omega
+        return bundle.rho + 0.25 * bundle.sigma + 0.1 * omega_value
 
-    class FakeModule:
-        __version__ = "fake"
+    monkeypatch.setattr(jax_xc_adapter, "eval_jax_xc_from_restricted_features", fake_eval)
+    rho = jnp.asarray([0.4, 0.8])
+    grad = jnp.asarray([[0.1, 0.0, 0.0], [0.0, 0.2, 0.0]])
 
-        @staticmethod
-        def mgga_x_demo(*, polarized=False):
-            del polarized
+    kind, tensor = eval_xc_response_tensor("gga_x_pbe", rho, grad=grad, omega=0.3)
 
-            def functional(rho_fn, r, mo_fn=None):
-                if mo_fn is None:
-                    raise ValueError("mo_fn is required for MGGA")
-                mo_jac = jax.jacfwd(mo_fn)(r)
-                tau = 0.5 * jnp.sum(mo_jac * mo_jac)
-                return rho_fn(r) + 0.25 * tau
-
-            return functional
-
-    monkeypatch.setattr(
-        jax_xc_adapter,
-        "load_jax_xc",
-        lambda: (jax_xc_adapter._SafeJAXXCModule(FakeModule()), "upstream"),
-    )
-    features = _features()
-    total_tau = features.tau_a + features.tau_b
-    grad = jnp.stack(
-        [
-            jnp.sqrt(jnp.maximum(features.sigma, 0.0)),
-            jnp.zeros_like(features.rho),
-            jnp.zeros_like(features.rho),
-        ],
-        axis=-1,
-    )
-
-    with pytest.raises(ValueError, match="allow_experimental_jax_xc=True"):
-        eval_xc_energy_density("mgga_x_demo", features)
-
-    got = eval_xc_energy_density(
-        "mgga_x_demo",
-        features,
-        allow_experimental_jax_xc=True,
-    )
-    kind, tensor = eval_xc_response_tensor(
-        "mgga_x_demo",
-        features.rho,
-        grad=grad,
-        tau=total_tau,
-        allow_experimental_jax_xc=True,
-    )
-
-    assert jnp.allclose(got, features.rho * (features.rho + 0.25 * total_tau))
-    assert kind == "MGGA"
-    assert tensor.shape == (5, 5, features.rho.shape[0])
+    assert kind == "GGA"
+    assert tensor.shape == (4, 4, rho.shape[0])
     assert jnp.all(jnp.isfinite(tensor))
 
 
-def test_b3lyp_energy_density_is_finite():
-    features = _features()
-    energy_density = eval_xc_energy_density("b3lyp", features)
-
-    assert energy_density.shape == (2,)
-    assert jnp.all(jnp.isfinite(energy_density))
-
-
-def test_lda_c_vwn_energy_density_matches_pyscf_libxc():
-    rho = np.array([0.2, 0.4, 0.8])
-    features = RestrictedFeatureBundle(
-        rho_a=jnp.asarray(0.5 * rho),
-        rho_b=jnp.asarray(0.5 * rho),
-        sigma_aa=jnp.zeros_like(jnp.asarray(rho)),
-        sigma_ab=jnp.zeros_like(jnp.asarray(rho)),
-        sigma_bb=jnp.zeros_like(jnp.asarray(rho)),
-        tau_a=jnp.zeros_like(jnp.asarray(rho)),
-        tau_b=jnp.zeros_like(jnp.asarray(rho)),
-    )
-    expected = rho * pyscf_libxc.eval_xc("LDA_C_VWN", rho, spin=0, deriv=0)[0]
-    got = np.asarray(eval_xc_energy_density("lda_c_vwn", features))
-
-    assert np.allclose(got, expected, atol=1e-7, rtol=1e-7)
-
-
-def test_lda_c_vwn_rpa_energy_density_matches_pyscf_libxc():
-    rho = np.array([0.2, 0.4, 0.8])
-    features = RestrictedFeatureBundle(
-        rho_a=jnp.asarray(0.5 * rho),
-        rho_b=jnp.asarray(0.5 * rho),
-        sigma_aa=jnp.zeros_like(jnp.asarray(rho)),
-        sigma_ab=jnp.zeros_like(jnp.asarray(rho)),
-        sigma_bb=jnp.zeros_like(jnp.asarray(rho)),
-        tau_a=jnp.zeros_like(jnp.asarray(rho)),
-        tau_b=jnp.zeros_like(jnp.asarray(rho)),
-    )
-    expected = rho * pyscf_libxc.eval_xc("LDA_C_VWN_RPA", rho, spin=0, deriv=0)[0]
-    got = np.asarray(eval_xc_energy_density("lda_c_vwn_rpa", features))
-
-    assert np.allclose(got, expected, atol=1e-7, rtol=1e-7)
-
-
-def test_gga_c_lyp_energy_density_matches_pyscf_libxc_restricted():
-    rho = np.array([0.2, 0.4, 0.8])
-    dx = np.array([0.1, 0.12, 0.15])
-    zeros = np.zeros_like(rho)
-    features = RestrictedFeatureBundle(
-        rho_a=jnp.asarray(0.5 * rho),
-        rho_b=jnp.asarray(0.5 * rho),
-        sigma_aa=jnp.asarray(0.25 * dx**2),
-        sigma_ab=jnp.asarray(0.25 * dx**2),
-        sigma_bb=jnp.asarray(0.25 * dx**2),
-        tau_a=jnp.zeros_like(jnp.asarray(rho)),
-        tau_b=jnp.zeros_like(jnp.asarray(rho)),
-    )
-    expected = rho * pyscf_libxc.eval_xc(
-        "GGA_C_LYP",
-        np.array([rho, dx, zeros, zeros]),
-        spin=0,
-        deriv=0,
-    )[0]
-    got = np.asarray(eval_xc_energy_density("gga_c_lyp", features))
-
-    assert np.allclose(got, expected, atol=1e-7, rtol=1e-7)
-
-
-def test_gga_c_lyp_energy_density_matches_pyscf_libxc_unrestricted():
-    rho_a = np.array([0.10, 0.20, 0.30])
-    rho_b = np.array([0.06, 0.12, 0.18])
-    dxa = np.array([0.02, 0.03, 0.05])
-    dxb = np.array([0.01, 0.025, 0.035])
-    zeros = np.zeros_like(rho_a)
-    features = RestrictedFeatureBundle(
-        rho_a=jnp.asarray(rho_a),
-        rho_b=jnp.asarray(rho_b),
-        sigma_aa=jnp.asarray(dxa**2),
-        sigma_ab=jnp.asarray(dxa * dxb),
-        sigma_bb=jnp.asarray(dxb**2),
-        tau_a=jnp.zeros_like(jnp.asarray(rho_a)),
-        tau_b=jnp.zeros_like(jnp.asarray(rho_b)),
-    )
-    expected = (rho_a + rho_b) * pyscf_libxc.eval_xc(
-        "GGA_C_LYP",
-        np.array([[rho_a, dxa, zeros, zeros], [rho_b, dxb, zeros, zeros]]),
-        spin=1,
-        deriv=0,
-    )[0]
-    got = np.asarray(eval_xc_energy_density("gga_c_lyp", features))
-
-    assert np.allclose(got, expected, atol=1e-7, rtol=1e-7)
-
-
-def test_lda_x_energy_density_matches_spin_resolved_local_contribution():
-    features = _features()
-    energy_density = eval_xc_energy_density("lda_x", features)
-    expected = (
-        -(3.0 / 2.0)
-        * (3.0 / (4.0 * jnp.pi)) ** (1.0 / 3.0)
-        * (jnp.power(features.rho_a, 4.0 / 3.0) + jnp.power(features.rho_b, 4.0 / 3.0))
+def test_jax_xc_backend_info_reports_missing_without_raising(monkeypatch):
+    monkeypatch.setattr(
+        jax_xc_adapter,
+        "load_jax_xc",
+        lambda: (_ for _ in ()).throw(jax_xc_adapter.MissingJAXXCError("missing")),
     )
 
-    assert jnp.allclose(energy_density, expected, atol=1e-12, rtol=1e-12)
+    info = jax_xc_backend_info()
+
+    assert info["available"] is False
+    assert info["backend"] == "missing"

@@ -11,8 +11,8 @@ jax.config.update("jax_enable_x64", True)
 
 from td_graddft.data.molecule import MoleculeSpec, parse_molecule_spec
 from td_graddft.scf.builders import (
-    restricted_reference_from_spec_with_jax_rks,
-    unrestricted_reference_from_spec_with_jax_uks,
+    restricted_molecule_from_spec_with_jax_rks,
+    unrestricted_molecule_from_spec_with_jax_uks,
 )
 from td_graddft.scf import RKSConfig, UKSConfig
 from td_graddft.spectra import oscillator_strengths
@@ -56,7 +56,7 @@ def test_restricted_jax_reference_energy_is_differentiable_by_geometry():
             spin=0,
             unit="Bohr",
         )
-        ref = restricted_reference_from_spec_with_jax_rks(
+        ref = restricted_molecule_from_spec_with_jax_rks(
             atom=spec,
             basis="sto-3g",
             xc_spec="hf",
@@ -110,7 +110,7 @@ def test_restricted_libcint_reference_energy_gradient_matches_pyscf_rhf(jk_backe
             spin=0,
             unit="Bohr",
         )
-        ref = restricted_reference_from_spec_with_jax_rks(
+        ref = restricted_molecule_from_spec_with_jax_rks(
             atom=spec,
             basis="sto-3g",
             xc_spec="hf",
@@ -176,7 +176,7 @@ def test_restricted_libcint_tda_oscillator_strength_is_differentiable_by_geometr
             spin=0,
             unit="Bohr",
         )
-        ref = restricted_reference_from_spec_with_jax_rks(
+        ref = restricted_molecule_from_spec_with_jax_rks(
             atom=spec,
             basis="sto-3g",
             xc_spec="hf",
@@ -229,7 +229,7 @@ def test_restricted_libcint_df_reference_energy_gradient_matches_finite_differen
             spin=0,
             unit="Bohr",
         )
-        ref = restricted_reference_from_spec_with_jax_rks(
+        ref = restricted_molecule_from_spec_with_jax_rks(
             atom=spec,
             basis="sto-3g",
             xc_spec="hf",
@@ -287,7 +287,7 @@ def test_unrestricted_libcint_reference_energy_is_differentiable_by_geometry():
             spin=1,
             unit="Bohr",
         )
-        ref = unrestricted_reference_from_spec_with_jax_uks(
+        ref = unrestricted_molecule_from_spec_with_jax_uks(
             atom=spec,
             basis="sto-3g",
             xc_spec="hf",

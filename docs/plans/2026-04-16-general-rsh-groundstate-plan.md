@@ -37,8 +37,6 @@ TD-GradDFT 当前已经具备更强的基础条件：
   - `src/td_graddft/training/config.py`
 - 多 `ω` 的 `hfx_local` / `hfx_nu` 参考构造：
   - `src/td_graddft/reference.py`
-- 响应层 long-range wrapper，但它当前是 response-only，不改 ground-state：
-  - `src/td_graddft/tddft/long_range_correction.py`
 
 ### 2.2 当前真正缺失的部分
 

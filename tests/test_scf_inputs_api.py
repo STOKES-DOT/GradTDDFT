@@ -130,59 +130,6 @@ def test_build_rks_integral_inputs_direct_backend_keeps_basis_not_eri():
     assert jnp.asarray(inputs.nuclear_repulsion).shape == ()
 
 
-def test_build_rks_integral_inputs_cuda_direct_skips_eri_group_precompute(monkeypatch):
-    import td_graddft.scf.inputs as inputs_mod
-
-    monkeypatch.setattr(inputs_mod, "cuda_ffi_available", lambda: True)
-    captured = {}
-
-    def fake_overlap_hcore_matrices(basis, *, backend="auto", **kwargs):
-        captured["basis"] = basis
-        captured["backend"] = backend
-        shape = (basis.nao, basis.nao)
-        return jnp.eye(shape[0]), 2.0 * jnp.eye(shape[0])
-
-    monkeypatch.setattr(inputs_mod, "overlap_hcore_matrices", fake_overlap_hcore_matrices)
-
-    inputs = build_rks_integral_inputs(
-        atom=_h2_spec(),
-        basis="sto-3g",
-        config=RKSConfig(jk_backend="direct", direct_jk_engine="cuda"),
-        integral_backend="jax",
-        grid_ao_backend="jax",
-        grids_level=0,
-        max_l=1,
-    )
-
-    assert inputs.direct_basis is inputs.basis
-    assert captured["basis"] is inputs.basis
-    assert captured["backend"] == "cuda"
-    assert inputs.basis.precompute_eri_groups is False
-    assert inputs.basis.quartet_groups == ()
-    assert inputs.basis.shell_quartet_groups == ()
-
-
-def test_build_rks_integral_inputs_libcint_cuda_direct_uses_direct_digest_inputs(monkeypatch):
-    import td_graddft.scf.inputs as inputs_mod
-
-    pytest.importorskip("pyscf")
-    monkeypatch.setattr(inputs_mod, "cuda_ffi_available", lambda: True)
-
-    inputs = build_rks_integral_inputs(
-        atom=_h2_spec(),
-        basis="sto-3g",
-        config=RKSConfig(jk_backend="direct", direct_jk_engine="cuda"),
-        integral_backend="libcint",
-        grid_ao_backend="jax",
-        grids_level=0,
-        max_l=1,
-    )
-
-    assert inputs.direct_basis is inputs.basis
-    assert inputs.eri is None
-    assert inputs.eri_pair_matrix is None
-
-
 @pytest.mark.parametrize("jk_backend", ["full", "df"])
 def test_build_rks_integral_inputs_libcint_nondirect_skips_eri_group_precompute(jk_backend):
     pytest.importorskip("pyscf")
@@ -201,33 +148,6 @@ def test_build_rks_integral_inputs_libcint_nondirect_skips_eri_group_precompute(
     assert inputs.basis.precompute_eri_groups is False
     assert inputs.basis.quartet_groups == ()
     assert inputs.basis.shell_quartet_groups == ()
-
-
-def test_build_rks_integral_inputs_libcint_nontraced_spec_uses_single_pyscf_mol(monkeypatch):
-    import td_graddft.scf.inputs as inputs_mod
-
-    pytest.importorskip("pyscf")
-
-    monkeypatch.setattr(inputs_mod, "cuda_ffi_available", lambda: True)
-
-    def _fail_traceable_one_electron(*args, **kwargs):
-        raise AssertionError("Non-traced libcint inputs should use the PySCF mol fast path.")
-
-    monkeypatch.setattr(inputs_mod, "libcint_int1e_with_coords", _fail_traceable_one_electron)
-
-    inputs = build_rks_integral_inputs(
-        atom=_h2_spec(),
-        basis="sto-3g",
-        config=RKSConfig(jk_backend="direct", direct_jk_engine="cuda"),
-        integral_backend="libcint",
-        grid_ao_backend="jax",
-        grids_level=0,
-        max_l=1,
-    )
-
-    assert inputs.nelectron == 2
-    assert inputs.eri_pair_matrix is None
-    assert inputs.grid_ao_backend == "jax"
 
 
 def test_build_rks_integral_inputs_libcint_default_uses_minao_initial_density(monkeypatch):
@@ -529,102 +449,6 @@ def test_cached_libcint_host_integral_reuses_s4_eri_binding():
 
     assert calls["n"] == 1
     assert out1 is out2
-
-
-def test_build_rks_integral_inputs_cuda_direct_jax_uses_single_integrals_entrypoint(monkeypatch):
-    import td_graddft.scf.inputs as inputs_mod
-
-    monkeypatch.setattr(inputs_mod, "cuda_ffi_available", lambda: True)
-
-    def _fail_direct_builder(*args, **kwargs):
-        raise AssertionError("SCF inputs should not instantiate CUDA one-electron builders directly.")
-
-    monkeypatch.setattr(inputs_mod, "CudaOneElectronBuilder", _fail_direct_builder, raising=False)
-
-    def fake_overlap_hcore_matrices(basis, *, backend="auto", **kwargs):
-        shape = (basis.nao, basis.nao)
-        return jnp.eye(shape[0]), 2.0 * jnp.eye(shape[0])
-
-    monkeypatch.setattr(inputs_mod, "overlap_hcore_matrices", fake_overlap_hcore_matrices)
-
-    inputs = build_rks_integral_inputs(
-        atom=_h2_spec(),
-        basis="sto-3g",
-        config=RKSConfig(jk_backend="direct", direct_jk_engine="cuda"),
-        integral_backend="jax",
-        grid_ao_backend="jax",
-        grids_level=0,
-        max_l=1,
-    )
-
-    assert inputs.overlap.shape == inputs.hcore.shape
-
-
-def test_build_rks_integral_inputs_cuda_direct_jax_uses_cuda_one_electron(monkeypatch):
-    import td_graddft.scf.inputs as inputs_mod
-
-    monkeypatch.setattr(inputs_mod, "cuda_ffi_available", lambda: True)
-    captured = {}
-
-    def fake_overlap_hcore_matrices(basis, *, backend="auto", **kwargs):
-        captured["basis"] = basis
-        captured["backend"] = backend
-        shape = (captured["basis"].nao, captured["basis"].nao)
-        if backend != "cuda":
-            raise AssertionError("CUDA direct JAX input should request backend='cuda'.")
-        return jnp.eye(shape[0]), 2.0 * jnp.eye(shape[0])
-
-    monkeypatch.setattr(inputs_mod, "overlap_hcore_matrices", fake_overlap_hcore_matrices)
-    monkeypatch.delattr(inputs_mod, "CudaOneElectronBuilder", raising=False)
-
-    inputs = build_rks_integral_inputs(
-        atom=_h2_spec(),
-        basis="sto-3g",
-        config=RKSConfig(jk_backend="direct", direct_jk_engine="cuda"),
-        integral_backend="jax",
-        grid_ao_backend="jax",
-        grids_level=0,
-        max_l=1,
-    )
-
-    assert captured["basis"] is inputs.basis
-    assert captured["backend"] == "cuda"
-    assert jnp.allclose(inputs.overlap, jnp.eye(inputs.basis.nao))
-    assert jnp.allclose(inputs.hcore, 2.0 * jnp.eye(inputs.basis.nao))
-
-
-def test_build_rks_integral_inputs_cuda_direct_jax_falls_back_without_cuda(monkeypatch):
-    import td_graddft.scf.inputs as inputs_mod
-
-    captured = {}
-
-    def fake_core_builder(basis, *, backend="auto", **kwargs):
-        captured["basis"] = basis
-        captured["backend"] = backend
-        shape = (basis.nao, basis.nao)
-        if backend != "jax":
-            raise AssertionError("Non-CUDA fallback must request backend='jax'.")
-        return jnp.eye(shape[0]), 2.0 * jnp.eye(shape[0])
-
-    monkeypatch.setattr(inputs_mod, "cuda_ffi_available", lambda: False)
-    monkeypatch.setattr(inputs_mod, "overlap_hcore_matrices", fake_core_builder)
-    monkeypatch.delattr(inputs_mod, "CudaOneElectronBuilder", raising=False)
-
-    inputs = build_rks_integral_inputs(
-        atom=_h2_spec(),
-        basis="sto-3g",
-        config=RKSConfig(jk_backend="direct", direct_jk_engine="cuda"),
-        integral_backend="jax",
-        grid_ao_backend="jax",
-        grids_level=0,
-        max_l=1,
-    )
-
-    assert captured["basis"] is inputs.basis
-    assert captured["backend"] == "jax"
-    assert inputs.basis.precompute_eri_groups is True
-    assert jnp.allclose(inputs.overlap, jnp.eye(inputs.basis.nao))
-    assert jnp.allclose(inputs.hcore, 2.0 * jnp.eye(inputs.basis.nao))
 
 
 def test_build_rks_integral_inputs_libcint_reuses_cached_grid_ao_bundle(monkeypatch):

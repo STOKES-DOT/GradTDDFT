@@ -54,7 +54,10 @@ def test_runtime_public_api_does_not_expose_pyscf_bridge_symbols():
 def test_pyscf_runtime_imports_are_limited_to_integral_modules():
     root = Path("src/td_graddft")
     allowed = {
+        Path("src/td_graddft/data/reference.py"),
         Path("src/td_graddft/df/jk.py"),
+        Path("src/td_graddft/scf/gpu4pyscf.py"),
+        Path("src/td_graddft/scf/init_guess.py"),
     }
     allowed_prefixes = (
         Path("src/td_graddft/data/integrals"),
@@ -97,6 +100,34 @@ def test_scf_features_do_not_expose_neural_training_only_hf_pt2_helpers():
     for name in hidden:
         assert not hasattr(scf_features, name)
         assert hasattr(inputs, name)
+
+
+def test_restricted_response_lda_fallback_uses_central_transition_features():
+    text = Path("src/td_graddft/tddft/response.py").read_text()
+
+    assert "_transition_densities_on_grid" not in text
+    assert (
+        len(
+            re.findall(
+                r"restricted_transition_response_features\(\s*molecule,\s*feature_kind=\"LDA\",",
+                text,
+            )
+        )
+        == 3
+    )
+
+
+def test_restricted_response_feature_kind_helpers_are_owned_by_features_module():
+    import jax.numpy as jnp
+    from td_graddft import features as features_module
+
+    text = Path("src/td_graddft/tddft/response.py").read_text()
+
+    assert "def _normalize_response_feature_kind" not in text
+    assert "def _infer_response_feature_kind" not in text
+    assert features_module.normalize_response_feature_kind("mgga_lapl") == "MGGA_LAPL"
+    assert features_module.normalize_response_feature_kind(None, default="GGA") == "GGA"
+    assert features_module.infer_response_feature_kind(jnp.ones((5, 5, 2))) == "MGGA"
 
 
 def test_public_api_prefers_molecule_naming_over_reference_naming():

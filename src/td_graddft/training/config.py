@@ -1,12 +1,51 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Any, Literal
 
+import jax
 from jaxtyping import Array
 
 
 SCFRuntimeForwardBackend = Literal["auto", "jax", "gpu4pyscf_rks"]
+ImplicitResponseBackend = Literal["jax", "gpu4pyscf_jk"]
+
+
+def _pytree_dataclass(*, static_fields: tuple[str, ...] = ()):
+    static_field_names = frozenset(static_fields)
+
+    def decorator(cls):
+        all_field_names = tuple(field.name for field in fields(cls))
+        dynamic_field_names = tuple(
+            field_name for field_name in all_field_names if field_name not in static_field_names
+        )
+        static_field_names_ordered = tuple(
+            field_name for field_name in all_field_names if field_name in static_field_names
+        )
+
+        def tree_flatten(self):
+            children = tuple(getattr(self, field_name) for field_name in dynamic_field_names)
+            static_values = tuple(getattr(self, field_name) for field_name in static_field_names_ordered)
+            return children, static_values
+
+        @classmethod
+        def tree_unflatten(cls_, aux_data, children):
+            kwargs = {
+                name: value for name, value in zip(dynamic_field_names, children, strict=True)
+            }
+            kwargs.update(
+                {
+                    name: value
+                    for name, value in zip(static_field_names_ordered, aux_data, strict=True)
+                }
+            )
+            return cls_(**kwargs)
+
+        cls.tree_flatten = tree_flatten
+        cls.tree_unflatten = tree_unflatten
+        return jax.tree_util.register_pytree_node_class(cls)
+
+    return decorator
 
 
 @dataclass(frozen=True)
@@ -50,6 +89,27 @@ class ExcitedStateDatum:
     spectrum_constraint_nstates: int | None = None
 
 
+@_pytree_dataclass(
+    static_fields=(
+        "density_constraint_weight",
+        "xc_potential_constraint_weight",
+        "xc_kernel_constraint_weight",
+        "xc_kernel_normalization_scale",
+        "stationarity_constraint_weight",
+        "dm21_scf_regularization_weight",
+        "orbital_energy_constraint_weight",
+        "orbital_energy_constraint_window",
+        "janak_frontier_constraint_weight",
+        "s1_constraint_weight",
+        "first_excited_total_energy_constraint_weight",
+        "excitation_constraint_weight",
+        "excitation_constraint_nstates",
+        "oscillator_strength_constraint_weight",
+        "oscillator_strength_constraint_nstates",
+        "spectrum_constraint_weight",
+        "spectrum_constraint_nstates",
+    )
+)
 @dataclass(frozen=True)
 class GroundStateDatum:
     """Single training example with a GradDFT core and optional TD extension."""
@@ -101,11 +161,6 @@ class GroundStateDatum:
                 raise ValueError(
                     "GroundStateDatum.from_molecule(require_hfx=True) requires "
                     "molecule.hfx_local."
-                )
-            if getattr(molecule, "hfx_nu", None) is None:
-                raise ValueError(
-                    "GroundStateDatum.from_molecule(require_hfx=True) requires "
-                    "molecule.hfx_nu."
                 )
         if functional is not None and bool(getattr(functional, "include_pt2_channel", False)):
             if getattr(molecule, "pt2_local", None) is None:
@@ -269,12 +324,13 @@ class GroundStateCoreTrainingConfig:
     scf_gradient_mode: Literal["expl", "impl"] = "impl"
     scf_implicit_forward_mode: Literal["expl", "input_state"] = "input_state"
     scf_runtime_forward_backend: SCFRuntimeForwardBackend = "auto"
-    scf_implicit_diff_max_iter: int = 24
+    implicit_response_backend: ImplicitResponseBackend = "jax"
+    scf_implicit_diff_max_iter: int = 6
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
-    scf_implicit_diff_solver: Literal["normal_cg", "gmres", "bicgstab"] = "normal_cg"
+    scf_implicit_diff_solver: Literal["normal_cg", "gmres", "bicgstab"] = "gmres"
     scf_implicit_diff_tolerance: float = 1e-6
-    scf_implicit_diff_regularization: float = 1e-3
+    scf_implicit_diff_regularization: float = 0.0
     scf_implicit_diff_restart: int = 12
 
 
@@ -293,6 +349,7 @@ class ExcitedStateTrainingConfig:
     spectrum_constraint_eta_ev: float = 0.15
     spectrum_mse_weight: float = 0.0
     spectrum_mae_weight: float = 1.0
+    implicit_response_backend: ImplicitResponseBackend = "jax"
 
 
 @dataclass(frozen=True)
@@ -355,12 +412,13 @@ class GroundStateTrainingConfig:
     scf_gradient_mode: Literal["expl", "impl"] = "impl"
     scf_implicit_forward_mode: Literal["expl", "input_state"] = "input_state"
     scf_runtime_forward_backend: SCFRuntimeForwardBackend = "auto"
-    scf_implicit_diff_max_iter: int = 24
+    implicit_response_backend: ImplicitResponseBackend = "jax"
+    scf_implicit_diff_max_iter: int = 6
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
-    scf_implicit_diff_solver: Literal["normal_cg", "gmres", "bicgstab"] = "normal_cg"
+    scf_implicit_diff_solver: Literal["normal_cg", "gmres", "bicgstab"] = "gmres"
     scf_implicit_diff_tolerance: float = 1e-6
-    scf_implicit_diff_regularization: float = 1e-3
+    scf_implicit_diff_regularization: float = 0.0
     scf_implicit_diff_restart: int = 12
 
     @classmethod
@@ -424,6 +482,7 @@ class GroundStateTrainingConfig:
             scf_gradient_mode=core.scf_gradient_mode,
             scf_implicit_forward_mode=core.scf_implicit_forward_mode,
             scf_runtime_forward_backend=core.scf_runtime_forward_backend,
+            implicit_response_backend=core.implicit_response_backend,
             scf_implicit_diff_max_iter=core.scf_implicit_diff_max_iter,
             scf_implicit_diff_step_size=core.scf_implicit_diff_step_size,
             scf_implicit_diff_clip=core.scf_implicit_diff_clip,
@@ -474,6 +533,7 @@ class GroundStateTrainingConfig:
             scf_gradient_mode=self.scf_gradient_mode,
             scf_implicit_forward_mode=self.scf_implicit_forward_mode,
             scf_runtime_forward_backend=self.scf_runtime_forward_backend,
+            implicit_response_backend=self.implicit_response_backend,
             scf_implicit_diff_max_iter=self.scf_implicit_diff_max_iter,
             scf_implicit_diff_step_size=self.scf_implicit_diff_step_size,
             scf_implicit_diff_clip=self.scf_implicit_diff_clip,
@@ -496,4 +556,5 @@ class GroundStateTrainingConfig:
             spectrum_constraint_eta_ev=self.spectrum_constraint_eta_ev,
             spectrum_mse_weight=self.spectrum_mse_weight,
             spectrum_mae_weight=self.spectrum_mae_weight,
+            implicit_response_backend=self.implicit_response_backend,
         )

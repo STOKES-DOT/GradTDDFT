@@ -15,12 +15,13 @@ from .descriptors import (
     make_atom_centered_density_descriptor_fn,
 )
 from .gnn import RSHGNNHead
+from ..data.integrals import build_jk_from_eri_pair_matrix
 from ..features import (
     _spin_density_and_gradient,
     restricted_grid_features,
     restricted_grid_features_with_gradients,
 )
-from ..jax_libxc import (
+from ..xc_backend.jax_libxc import (
     LocalXCTermSpec,
     RestrictedFeatureBundle,
     eval_xc_energy_density,
@@ -41,18 +42,48 @@ def _constant_rsh_descriptor(_molecule: Any | None = None) -> Array:
     return jnp.ones((1,), dtype=jnp.float32)
 
 
-def _logit_from_interval(value: Array, bounds: tuple[float, float]) -> Array:
+def _scaled_sigmoid_output(preactivation: Array, scale: float = 2.0) -> Array:
+    value = jnp.asarray(preactivation)
+    if float(scale) <= 0.0:
+        return value
+    scale_arr = jnp.asarray(scale, dtype=value.dtype)
+    return scale_arr * jax.nn.sigmoid(value)
+
+
+def _inverse_scaled_sigmoid_output(output: Array, scale: float = 2.0) -> Array:
+    value = jnp.asarray(output, dtype=jnp.float32)
+    if float(scale) <= 0.0:
+        return value
+    scale_arr = jnp.asarray(scale, dtype=value.dtype)
+    unit = jnp.clip(value / scale_arr, 1e-6, 1.0 - 1e-6)
+    return jnp.log(unit / (1.0 - unit))
+
+
+def _scaled_output_to_unit_interval(output: Array, scale: float = 2.0) -> Array:
+    value = jnp.asarray(output, dtype=jnp.float32)
+    if float(scale) <= 0.0:
+        return jax.nn.sigmoid(value)
+    return jnp.clip(value / jnp.asarray(scale, dtype=value.dtype), 0.0, 1.0)
+
+
+def _unit_interval_to_scaled_output(fraction: Array, scale: float = 2.0) -> Array:
+    value = jnp.asarray(fraction, dtype=jnp.float32)
+    if float(scale) <= 0.0:
+        clipped = jnp.clip(value, 1e-6, 1.0 - 1e-6)
+        return jnp.log(clipped / (1.0 - clipped))
+    return jnp.asarray(scale, dtype=value.dtype) * jnp.clip(value, 0.0, 1.0)
+
+
+def _unit_interval_to_interval(fraction: Array, bounds: tuple[float, float]) -> Array:
+    lower, upper = bounds
+    value = jnp.asarray(fraction, dtype=jnp.float32)
+    return lower + (upper - lower) * value
+
+
+def _interval_to_unit_interval(value: Array, bounds: tuple[float, float]) -> Array:
     lower, upper = bounds
     value_arr = jnp.asarray(value, dtype=jnp.float32)
-    scaled = (value_arr - lower) / jnp.maximum(upper - lower, 1e-8)
-    clipped = jnp.clip(scaled, 1e-6, 1.0 - 1e-6)
-    return jnp.log(clipped / (1.0 - clipped))
-
-
-def _sigmoid_to_interval(raw: Array, bounds: tuple[float, float]) -> Array:
-    lower, upper = bounds
-    raw_arr = jnp.asarray(raw, dtype=jnp.float32)
-    return lower + (upper - lower) * jax.nn.sigmoid(raw_arr)
+    return jnp.clip((value_arr - lower) / jnp.maximum(upper - lower, 1e-8), 0.0, 1.0)
 
 
 def _restricted_spin_density_blocks(molecule: Any) -> tuple[Array, Array]:
@@ -94,16 +125,32 @@ def _local_terms_use_wpbeh(term_specs: Sequence[LocalXCTermSpec]) -> bool:
 
 
 def _exact_exchange_energy(molecule: Any) -> Array:
-    rep_tensor = jnp.asarray(molecule.rep_tensor)
+    rep_source = getattr(molecule, "rep_tensor", None)
+    if rep_source is not None:
+        rep_tensor = jnp.asarray(rep_source)
+        if int(rep_tensor.size) == 0:
+            rep_source = None
+    if rep_source is None:
+        pair = getattr(molecule, "eri_pair_matrix", None)
+        if pair is None:
+            raise AttributeError("Molecule-like object must define rep_tensor or eri_pair_matrix.")
+        rep_tensor = jnp.asarray(pair)
+        if int(rep_tensor.size) == 0:
+            raise ValueError("Exact exchange requires full AO ERI or packed AO-pair ERI data.")
+    else:
+        rep_tensor = jnp.asarray(rep_source)
     dm_a, dm_b = _restricted_spin_density_blocks(molecule)
 
     def spin_exchange(dm_spin: Array) -> Array:
-        exchange_matrix = jnp.einsum(
-            "prqs,rs->pq",
-            rep_tensor,
-            dm_spin,
-            precision=Precision.HIGHEST,
-        )
+        if rep_tensor.ndim == 2:
+            _, exchange_matrix = build_jk_from_eri_pair_matrix(rep_tensor, dm_spin)
+        else:
+            exchange_matrix = jnp.einsum(
+                "prqs,rs->pq",
+                rep_tensor,
+                dm_spin,
+                precision=Precision.HIGHEST,
+            )
         return -0.5 * jnp.einsum(
             "pq,pq->",
             dm_spin,
@@ -315,14 +362,21 @@ def _evaluate_local_xc_density(
 @lru_cache(maxsize=64)
 def _point_xc_value_and_grad_kernel(
     xc_spec: str | None,
-    local_term_specs: tuple[LocalXCTermSpec, ...],
-    xc_kind: str,
-    density_floor: float,
+    local_term_specs_or_xc_kind: tuple[LocalXCTermSpec, ...] | str,
+    xc_kind_or_density_floor: str | float,
+    density_floor: float | None = None,
 ) -> Callable[[Array], tuple[Array, Array]]:
+    if density_floor is None:
+        local_term_specs = ()
+        xc_kind = str(local_term_specs_or_xc_kind)
+        density_floor_value = float(xc_kind_or_density_floor)
+    else:
+        local_term_specs = tuple(local_term_specs_or_xc_kind)  # type: ignore[arg-type]
+        xc_kind = str(xc_kind_or_density_floor)
+        density_floor_value = float(density_floor)
     xc_spec_norm = None if xc_spec is None else str(xc_spec)
     local_term_specs_norm = tuple(local_term_specs)
     xc_kind_norm = str(xc_kind)
-    density_floor_value = float(density_floor)
 
     def point_energy(variables: Array, omega: Array) -> Array:
         rho_point = jnp.maximum(variables[0], density_floor_value)
@@ -715,6 +769,7 @@ def _local_xc_energy_unrestricted(
 class RSHParameterHead(nn.Module):
     hidden_dims: Sequence[int] = ()
     activation: Callable[[Array], Array] = nn.tanh
+    sigmoid_scale_factor: float = 2.0
 
     @nn.compact
     def __call__(self, descriptor: Array) -> Array:
@@ -724,7 +779,8 @@ class RSHParameterHead(nn.Module):
         for index, width in enumerate(self.hidden_dims):
             x = nn.Dense(width, name=f"hidden_{index}")(x)
             x = self.activation(x)
-        return nn.Dense(3, name="output")(x)
+        x = nn.Dense(3, name="output")(x)
+        return _scaled_sigmoid_output(x, self.sigmoid_scale_factor)
 
 
 class AtomwiseRSHParameterHead(nn.Module):
@@ -733,6 +789,7 @@ class AtomwiseRSHParameterHead(nn.Module):
     activation: Callable[[Array], Array] = nn.tanh
     embedding_dim: int = 8
     max_atomic_number: int = 100
+    sigmoid_scale_factor: float = 2.0
 
     @nn.compact
     def __call__(self, descriptor_inputs: Any) -> Array:
@@ -769,7 +826,8 @@ class AtomwiseRSHParameterHead(nn.Module):
         for index, width in enumerate(self.pooled_hidden_dims):
             pooled = nn.Dense(width, name=f"pooled_hidden_{index}")(pooled)
             pooled = self.activation(pooled)
-        return nn.Dense(3, name="output")(pooled)
+        pooled = nn.Dense(3, name="output")(pooled)
+        return _scaled_sigmoid_output(pooled, self.sigmoid_scale_factor)
 
 
 @dataclass(frozen=True)
@@ -944,6 +1002,7 @@ class TrainableRSHFunctional:
     density_floor: float = 1e-12
     potential_clip: float | None = 20.0
     fallback_omega_values: tuple[float, ...] | None = None
+    parameter_output_scale: float = 2.0
 
     def _model_args(self, molecule: Any | None = None) -> tuple[Any, ...]:
         descriptor = self.descriptor_fn(molecule)
@@ -1002,13 +1061,16 @@ class TrainableRSHFunctional:
         molecule: Any | None = None,
     ) -> ResolvedRSHParameters:
         raw = self._raw_outputs(params, molecule)
-        sr = _sigmoid_to_interval(raw[0], self.template.sr_hf_bounds)
-        omega = _sigmoid_to_interval(raw[2], self.template.omega_bounds)
+        sr_fraction = _scaled_output_to_unit_interval(raw[0], self.parameter_output_scale)
+        omega_fraction = _scaled_output_to_unit_interval(raw[2], self.parameter_output_scale)
+        sr = _unit_interval_to_interval(sr_fraction, self.template.sr_hf_bounds)
+        omega = _unit_interval_to_interval(omega_fraction, self.template.omega_bounds)
         if self.template.monotonic_lr_hf:
-            lr_delta = jax.nn.sigmoid(raw[1])
+            lr_delta = _scaled_output_to_unit_interval(raw[1], self.parameter_output_scale)
             lr = sr + (1.0 - sr) * lr_delta
         else:
-            lr = _sigmoid_to_interval(raw[1], self.template.lr_hf_bounds)
+            lr_fraction = _scaled_output_to_unit_interval(raw[1], self.parameter_output_scale)
+            lr = _unit_interval_to_interval(lr_fraction, self.template.lr_hf_bounds)
         lr = jnp.clip(lr, self.template.lr_hf_bounds[0], self.template.lr_hf_bounds[1])
         return ResolvedRSHParameters(
             sr_hf_fraction=sr,
@@ -1017,16 +1079,24 @@ class TrainableRSHFunctional:
         )
 
     def raw_parameters_from_resolved(self, resolved: ResolvedRSHParameters) -> Array:
-        sr = _logit_from_interval(resolved.sr_hf_fraction, self.template.sr_hf_bounds)
-        omega = _logit_from_interval(resolved.omega, self.template.omega_bounds)
+        sr_fraction = _interval_to_unit_interval(
+            resolved.sr_hf_fraction,
+            self.template.sr_hf_bounds,
+        )
+        omega_fraction = _interval_to_unit_interval(resolved.omega, self.template.omega_bounds)
+        sr = _unit_interval_to_scaled_output(sr_fraction, self.parameter_output_scale)
+        omega = _unit_interval_to_scaled_output(omega_fraction, self.parameter_output_scale)
         if self.template.monotonic_lr_hf:
             sr_value = jnp.asarray(resolved.sr_hf_fraction, dtype=jnp.float32)
             lr_value = jnp.asarray(resolved.lr_hf_fraction, dtype=jnp.float32)
             ratio = (lr_value - sr_value) / jnp.maximum(1.0 - sr_value, 1e-6)
-            ratio = jnp.clip(ratio, 1e-6, 1.0 - 1e-6)
-            lr_raw = jnp.log(ratio / (1.0 - ratio))
+            lr_raw = _unit_interval_to_scaled_output(ratio, self.parameter_output_scale)
         else:
-            lr_raw = _logit_from_interval(resolved.lr_hf_fraction, self.template.lr_hf_bounds)
+            lr_fraction = _interval_to_unit_interval(
+                resolved.lr_hf_fraction,
+                self.template.lr_hf_bounds,
+            )
+            lr_raw = _unit_interval_to_scaled_output(lr_fraction, self.parameter_output_scale)
         return jnp.asarray([sr, lr_raw, omega], dtype=jnp.float32)
 
     def params_with_raw_output(
@@ -1048,14 +1118,26 @@ class TrainableRSHFunctional:
         params_out = jax.tree_util.tree_map(lambda x: x, params_out)
         if preserve_network:
             current_raw = self._raw_outputs(params_out, molecule)
-            bias_delta = target_raw - current_raw
+            target_pre = _inverse_scaled_sigmoid_output(
+                target_raw,
+                self.parameter_output_scale,
+            )
+            current_pre = _inverse_scaled_sigmoid_output(
+                current_raw,
+                self.parameter_output_scale,
+            )
+            bias_delta = target_pre - current_pre
             params_out["params"]["output"]["bias"] = (
                 params_out["params"]["output"]["bias"] + bias_delta.astype(
                     params_out["params"]["output"]["bias"].dtype
                 )
             )
         else:
-            params_out["params"]["output"]["bias"] = target_raw.astype(
+            target_pre = _inverse_scaled_sigmoid_output(
+                target_raw,
+                self.parameter_output_scale,
+            )
+            params_out["params"]["output"]["bias"] = target_pre.astype(
                 params_out["params"]["output"]["bias"].dtype
             )
             params_out["params"]["output"]["kernel"] = jnp.zeros_like(
@@ -1109,6 +1191,7 @@ def make_minimal_trainable_rsh_functional(
     descriptor_fn: Callable[[Any | None], Any] = _constant_rsh_descriptor,
     template: RSHFunctionalTemplate | None = None,
     fallback_omega_values: tuple[float, ...] | None = None,
+    parameter_output_scale: float = 2.0,
     name: str = "minimal_trainable_rsh",
 ) -> TrainableRSHFunctional:
     resolved_template = template or RSHFunctionalTemplate(
@@ -1124,12 +1207,16 @@ def make_minimal_trainable_rsh_functional(
         lr_hf_bounds=(0.0, 1.0),
     )
     return TrainableRSHFunctional(
-        model=RSHParameterHead(hidden_dims=hidden_dims),
+        model=RSHParameterHead(
+            hidden_dims=hidden_dims,
+            sigmoid_scale_factor=float(parameter_output_scale),
+        ),
         template=resolved_template,
         local_xc_spec=local_xc_spec,
         local_term_specs=tuple(local_term_specs),
         descriptor_fn=descriptor_fn,
         fallback_omega_values=fallback_omega_values,
+        parameter_output_scale=float(parameter_output_scale),
     )
 
 
@@ -1144,6 +1231,7 @@ def make_atom_centered_density_rsh_functional(
     max_atomic_number: int = 100,
     template: RSHFunctionalTemplate | None = None,
     fallback_omega_values: tuple[float, ...] | None = None,
+    parameter_output_scale: float = 2.0,
     name: str = "atom_centered_density_rsh",
 ) -> TrainableRSHFunctional:
     resolved_template = template or RSHFunctionalTemplate(
@@ -1164,12 +1252,14 @@ def make_atom_centered_density_rsh_functional(
             pooled_hidden_dims=pooled_hidden_dims,
             embedding_dim=embedding_dim,
             max_atomic_number=max_atomic_number,
+            sigmoid_scale_factor=float(parameter_output_scale),
         ),
         template=resolved_template,
         local_xc_spec=local_xc_spec,
         local_term_specs=tuple(local_term_specs),
         descriptor_fn=make_atom_centered_density_descriptor_fn(descriptor_config),
         fallback_omega_values=fallback_omega_values,
+        parameter_output_scale=float(parameter_output_scale),
     )
 
 
@@ -1192,6 +1282,7 @@ def make_gnn_rsh_functional(
     density_floor: float = 1e-12,
     potential_clip: float | None = 20.0,
     fallback_omega_values: tuple[float, ...] | None = None,
+    parameter_output_scale: float = 2.0,
     name: str = "gnn_atom_centered_density_rsh",
 ) -> TrainableRSHFunctional:
     if num_layers is not None and num_interaction_blocks is not None:
@@ -1225,6 +1316,7 @@ def make_gnn_rsh_functional(
             ffn_expansion=ffn_expansion,
             lambda_init=lambda_init,
             dropout_rate=dropout_rate,
+            sigmoid_scale_factor=float(parameter_output_scale),
         ),
         template=resolved_template,
         local_xc_spec=local_xc_spec,
@@ -1234,6 +1326,7 @@ def make_gnn_rsh_functional(
         density_floor=density_floor,
         potential_clip=potential_clip,
         fallback_omega_values=fallback_omega_values,
+        parameter_output_scale=float(parameter_output_scale),
     )
 
 
