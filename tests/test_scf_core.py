@@ -1,7 +1,6 @@
 from td_graddft.data import integrals
 from td_graddft.data.integrals.jax import screening
 from td_graddft import features
-from td_graddft.nn_rsh import functional as nn_rsh_functional
 from td_graddft.scf import builders, differentiable, facade, inputs, molecules, rhf, rks, uks
 from td_graddft.scf import core
 import jax
@@ -66,7 +65,6 @@ def test_rks_module_exposes_one_shared_integrals_entry():
 
 def test_spin_density_gradient_helper_is_shared():
     assert uks._spin_density_and_gradient is features._spin_density_and_gradient
-    assert nn_rsh_functional._spin_density_and_gradient is features._spin_density_and_gradient
 
 
 def test_rks_and_uks_build_molecule_like_pytree_states():

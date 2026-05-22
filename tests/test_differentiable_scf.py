@@ -11,8 +11,6 @@ import td_graddft.scf.differentiable as scf_differentiable
 import td_graddft.scf.rks as scf_rks
 from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
 from td_graddft.neural_xc import make_neural_xc_functional
-from td_graddft.nn_rsh.functional import BoundTrainableRSHFunctional
-from td_graddft.nn_rsh.schema import RSHFunctionalTemplate, ResolvedRSHParameters
 from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.scf import DifferentiableSCF, DifferentiableSCFConfig
 from td_graddft.scf.molecules import QuadratureGrid, UnrestrictedMolecule
@@ -180,39 +178,6 @@ def _make_toy_unrestricted_reference():
     )
 
 
-def _make_toy_unrestricted_bound_rsh():
-    template = RSHFunctionalTemplate(
-        name="toy_unrestricted_hf",
-        local_backend="jax_libxc",
-        exchange_backend_id="toy",
-        correlation_backend_id="toy",
-        default_sr_hf_fraction=1.0,
-        default_lr_hf_fraction=1.0,
-        default_omega=0.3,
-    )
-    return BoundTrainableRSHFunctional(
-        template=template,
-        local_xc_spec="hf",
-        resolved_params=ResolvedRSHParameters(
-            sr_hf_fraction=1.0,
-            lr_hf_fraction=1.0,
-            omega=0.3,
-        ),
-        fallback_omega_values=(0.0,),
-    )
-
-
-class _BoundFunctionalWrapper:
-    def __init__(self, bound):
-        self.bound = bound
-
-    def bind_to_molecule_for_scf(self, _params, _molecule):
-        return self.bound
-
-    def bind_to_molecule(self, _params, _molecule):
-        return self.bound
-
-
 def test_restricted_hfx_features_from_nu_recomputes_local_exchange_density():
     ao = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     density = np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32)
@@ -371,28 +336,6 @@ def test_self_consistent_solver_preserves_fractional_frontier_occupations():
     assert info.mode == "self_consistent_implicit_input_state"
     assert np.allclose(np.asarray(molecule_sc.mo_occ), np.asarray(mo_occ_frac), atol=1e-8)
     assert np.isfinite(np.asarray(molecule_sc.rdm1)).all()
-
-
-def test_unrestricted_self_consistent_solver_runs_for_bound_rsh():
-    molecule = _make_toy_unrestricted_reference()
-    functional = _BoundFunctionalWrapper(_make_toy_unrestricted_bound_rsh())
-
-    solver = DifferentiableSCF(
-        DifferentiableSCFConfig(
-            mode="self_consistent",
-            gradient_mode="impl",
-            max_cycle=6,
-            damping=0.2,
-            conv_tol_density=1e-8,
-        )
-    )
-    molecule_sc, info = solver.run(molecule, functional, {})
-
-    assert info.mode == "self_consistent_implicit_input_state"
-    assert int(info.cycles) == 0
-    assert np.isfinite(float(info.final_rms_density))
-    assert np.isfinite(np.asarray(molecule_sc.rdm1)).all()
-    assert np.allclose(np.asarray(molecule_sc.mo_occ), np.asarray(molecule.mo_occ), atol=1e-8)
 
 
 def test_unrestricted_self_consistent_solver_is_differentiable_in_implicit_mode():

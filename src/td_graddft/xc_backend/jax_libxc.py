@@ -116,67 +116,6 @@ class RSHFunctionalPreset:
             self.default_sr_hf_fraction,
         )
 
-    @property
-    def default_params(self):
-        from ..nn_rsh.schema import ResolvedRSHParameters
-
-        return ResolvedRSHParameters(
-            sr_hf_fraction=jnp.asarray(self.default_sr_hf_fraction),
-            lr_hf_fraction=jnp.asarray(self.default_lr_hf_fraction),
-            omega=jnp.asarray(self.default_omega),
-        )
-
-    def params_for_omega_source(
-        self,
-        omega_source: Literal["canonical", "optxc"] = "canonical",
-    ):
-        from ..nn_rsh.schema import ResolvedRSHParameters
-
-        default_omega = self._omega_settings(omega_source)[0]
-        return ResolvedRSHParameters(
-            sr_hf_fraction=jnp.asarray(self.default_sr_hf_fraction),
-            lr_hf_fraction=jnp.asarray(self.default_lr_hf_fraction),
-            omega=jnp.asarray(default_omega),
-        )
-
-    def _omega_settings(
-        self,
-        omega_source: Literal["canonical", "optxc"] = "canonical",
-    ) -> tuple[float, tuple[float, float]]:
-        if omega_source == "canonical":
-            return self.default_omega, self.omega_bounds
-        if omega_source == "optxc":
-            if self.optxc_default_omega is None or self.optxc_omega_bounds is None:
-                raise ValueError(f"Preset {self.name!r} does not define OPTXC omega bounds.")
-            return self.optxc_default_omega, self.optxc_omega_bounds
-        raise ValueError(f"Unsupported omega_source={omega_source!r}.")
-
-    def to_template(
-        self,
-        omega_source: Literal["canonical", "optxc"] = "canonical",
-    ):
-        from ..nn_rsh.schema import RSHFunctionalTemplate
-
-        default_omega, omega_bounds = self._omega_settings(omega_source)
-        return RSHFunctionalTemplate(
-            name=self.name,
-            local_backend="libxc_range_separated",
-            exchange_backend_id=self.libxc_id,
-            correlation_backend_id=self.correlation_form,
-            supports_trainable_sr_hf=self.sr_hf_bounds[0] != self.sr_hf_bounds[1],
-            supports_trainable_lr_hf=self.lr_hf_bounds[0] != self.lr_hf_bounds[1],
-            supports_trainable_omega=omega_bounds[0] != omega_bounds[1],
-            has_dispersion=self.has_dispersion,
-            monotonic_lr_hf=self.monotonic_lr_hf,
-            default_sr_hf_fraction=self.default_sr_hf_fraction,
-            default_lr_hf_fraction=self.default_lr_hf_fraction,
-            default_omega=default_omega,
-            omega_bounds=omega_bounds,
-            sr_hf_bounds=self.sr_hf_bounds,
-            lr_hf_bounds=self.lr_hf_bounds,
-        )
-
-
 _RSH_PRESETS: dict[str, RSHFunctionalPreset] = {
     "lc-wpbe": RSHFunctionalPreset(
         name="lc-wpbe",

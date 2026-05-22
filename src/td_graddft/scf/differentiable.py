@@ -12,7 +12,6 @@ from jax.lax import Precision
 from jaxtyping import Array, PyTree
 
 from ..data.integrals import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix
-from ..nn_rsh.schema import SCFXCContributions
 from .core import _build_density_from_occ, _diagonalize_fock, _orthogonalizer
 from .implicit import (
     ImplicitFixedPointConfig,
@@ -273,36 +272,6 @@ def _scf_xc_components(
         )
 
     resolved = _resolved_xc_object(params, functional, molecule)
-    contributions_getter = getattr(resolved, "scf_contributions", None)
-    if callable(contributions_getter):
-        contributions = contributions_getter(molecule)
-        if not isinstance(contributions, SCFXCContributions):
-            raise TypeError(
-                "scf_contributions(...) must return SCFXCContributions, "
-                f"got {type(contributions)!r}."
-            )
-        if contributions.lr_hf_omegas is not None:
-            raise NotImplementedError(
-                "SCFXCContributions exposes long-range HF channels, but direct "
-                "SCF assembly from (omega, coefficient) is not wired yet. "
-                "Use extra_fock_matrix as the interim bridge in this PR."
-            )
-        extra_fock = contributions.extra_fock_matrix
-        if extra_fock is None:
-            extra_fock = jnp.zeros(
-                (molecule.ao.shape[1], molecule.ao.shape[1]),
-                dtype=functional_dtype,
-            )
-        return (
-            jnp.asarray(contributions.v_rho, dtype=functional_dtype),
-            jnp.asarray(contributions.v_grad, dtype=functional_dtype),
-            jnp.zeros_like(jnp.asarray(contributions.v_rho, dtype=functional_dtype)),
-            jnp.zeros_like(jnp.asarray(contributions.v_rho, dtype=functional_dtype)),
-            str(contributions.xc_kind),
-            jnp.asarray(contributions.full_hf_fraction, dtype=functional_dtype),
-            jnp.asarray(extra_fock, dtype=functional_dtype),
-        )
-
     v_rho, v_grad, v_tau, v_lapl, xc_kind = _grid_xc_potential_components_from_resolved(
         resolved,
         functional=functional,
