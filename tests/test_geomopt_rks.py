@@ -36,7 +36,6 @@ def _make_energy_fn():
             conv_tol=1e-10,
             conv_tol_density=1e-8,
             damping=0.2,
-            iteration_backend="lax",
         ),
     )
 

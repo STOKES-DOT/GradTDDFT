@@ -114,8 +114,6 @@ class NeuralXCTrainingConfig:
     scf_stop_gradient_on_unconverged: bool = False
     scf_stop_gradient_rms_threshold: float | None = None
     scf_gradient_mode: Literal["impl"] = "impl"
-    scf_runtime_forward_backend: Literal["auto", "jax", "gpu4pyscf_rks"] = "auto"
-    implicit_response_backend: Literal["jax", "gpu4pyscf_jk"] = "jax"
     scf_implicit_diff_max_iter: int = 24
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
@@ -166,7 +164,7 @@ class SimulationConfig:
     jax_uks_potential_clip: float = 20.0
     execution_device: Literal["auto", "cpu", "gpu"] = "auto"
     move_reference_to_device: bool = True
-    jax_integral_backend: Literal["jax", "libcint"] = "libcint"
+    jax_integral_backend: Literal["jax", "cpu", "gpu", "libcint"] = "cpu"
     jax_libcint_geometry_grad_policy: Literal["analytic", "error", "zero"] = "analytic"
     jit_tddft: bool = True
     jit_spectrum: bool = True

@@ -37,7 +37,34 @@ from td_graddft.training.targets import _electron_count, orbital_energy_matching
 from td_graddft.training.targets import janak_frontier_finite_difference_penalty
 from td_graddft.workflows.core import run_molecule_from_spec
 from td_graddft.workflows.types import MoleculeSpecConfig, SimulationConfig
-from td_graddft.xc import AdiabaticDensityFunctional
+
+
+@dataclass(frozen=True)
+class _ToyAdiabaticFunctional:
+    name: str
+    energy_density_fn: Callable[[jnp.ndarray], jnp.ndarray]
+    exact_exchange_fraction: jnp.ndarray | float = 0.0
+
+    def energy_density(self, density):
+        return self.energy_density_fn(jnp.asarray(density))
+
+    def local_potential(self, density):
+        density = jnp.asarray(density)
+        flat = density.reshape(-1)
+
+        def local_energy(value):
+            return value * self.energy_density_fn(value)
+
+        return jax.vmap(jax.grad(local_energy))(flat).reshape(density.shape)
+
+    def local_kernel(self, density):
+        density = jnp.asarray(density)
+        flat = density.reshape(-1)
+
+        def local_energy(value):
+            return value * self.energy_density_fn(value)
+
+        return jax.vmap(jax.grad(jax.grad(local_energy)))(flat).reshape(density.shape)
 
 
 @dataclass
@@ -316,8 +343,8 @@ class _ToyDensityFunctional:
 
         return jax.vmap(jax.grad(jax.grad(local_energy)))(flat).reshape(density.shape)
 
-    def bind(self, params: Any) -> AdiabaticDensityFunctional:
-        return AdiabaticDensityFunctional(
+    def bind(self, params: Any) -> _ToyAdiabaticFunctional:
+        return _ToyAdiabaticFunctional(
             name=self.name,
             energy_density_fn=lambda density: self.energy_density(params, density),
             exact_exchange_fraction=self.hybrid_fraction(params),

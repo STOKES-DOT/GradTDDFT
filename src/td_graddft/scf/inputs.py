@@ -31,6 +31,7 @@ from ..data.integrals.libcint import (
     libcint_int2e_s4_with_coords,
     libcint_intor_name,
 )
+from ..data.integrals.gpu4pyscf import gpu4pyscf_int2e_full, gpu4pyscf_int2e_s4
 from ..data.molecule import MoleculeSpec, parse_molecule_spec
 from ..df import (
     eri_pair_matrix_to_df_factors_traceable,
@@ -94,7 +95,7 @@ class RKSIntegralInputs:
     init_mo_energy: Array | None = None
     molecule_charge: int = 0
     geometry_is_traced: bool = False
-    integral_backend: str = "libcint"
+    integral_backend: str = "cpu"
     grid_ao_backend: str = "jax"
 
     def as_rks_kwargs(self) -> dict[str, Any]:
@@ -156,7 +157,7 @@ class UKSIntegralInputs:
     total_electrons: int = 0
     molecule_charge: int = 0
     geometry_is_traced: bool = False
-    integral_backend: str = "libcint"
+    integral_backend: str = "cpu"
     grid_ao_backend: str = "jax"
 
     def as_uks_kwargs(self) -> dict[str, Any]:
@@ -265,6 +266,54 @@ def _cached_libcint_host_integral(
     return value
 
 
+def _gpu4pyscf_eri_pair_matrix(
+    *,
+    atom: Any,
+    basis: Any,
+    unit: str,
+    charge: int,
+    spin: int,
+    cart: bool,
+    verbose: int,
+    mol_kwargs: dict[str, Any],
+) -> Array:
+    mol = build_libcint_mol(
+        atom=atom,
+        basis=basis,
+        unit=unit,
+        charge=int(charge),
+        spin=int(spin),
+        cart=bool(cart),
+        verbose=int(verbose),
+        **mol_kwargs,
+    )
+    return jnp.asarray(gpu4pyscf_int2e_s4(mol))
+
+
+def _gpu4pyscf_eri_tensor(
+    *,
+    atom: Any,
+    basis: Any,
+    unit: str,
+    charge: int,
+    spin: int,
+    cart: bool,
+    verbose: int,
+    mol_kwargs: dict[str, Any],
+) -> Array:
+    mol = build_libcint_mol(
+        atom=atom,
+        basis=basis,
+        unit=unit,
+        charge=int(charge),
+        spin=int(spin),
+        cart=bool(cart),
+        verbose=int(verbose),
+        **mol_kwargs,
+    )
+    return jnp.asarray(gpu4pyscf_int2e_full(mol))
+
+
 def _build_grid_ao_input_bundle(
     *,
     spec: MoleculeSpec,
@@ -337,14 +386,16 @@ def _cached_grid_ao_input_bundle(
 
 def _resolve_integral_input_modes(
     *,
-    integral_backend: Literal["jax", "libcint"],
+    integral_backend: Literal["jax", "cpu", "gpu", "libcint"],
     grid_ao_backend: Literal["jax"],
     libcint_geometry_grad_policy: LibcintGeometryGradPolicy,
 ) -> tuple[str, str, str]:
     integral_backend_mode = str(integral_backend).lower()
-    if integral_backend_mode not in {"jax", "libcint"}:
+    if integral_backend_mode == "libcint":
+        integral_backend_mode = "cpu"
+    if integral_backend_mode not in {"jax", "cpu", "gpu"}:
         raise ValueError(
-            f"Unsupported integral_backend={integral_backend!r}. Expected 'jax' or 'libcint'."
+            f"Unsupported integral_backend={integral_backend!r}. Expected 'jax', 'cpu', or 'gpu'."
         )
     grid_ao_backend_mode = str(grid_ao_backend).lower()
     if grid_ao_backend_mode != "jax":
@@ -555,7 +606,7 @@ def _unrestricted_spin_electron_counts(
     return int(nalpha), int(nbeta)
 
 
-def _build_rks_inputs_from_libcint_backbone(
+def _build_rks_inputs_from_cpu_backbone(
     *,
     atom: Any,
     basis: Any,
@@ -685,7 +736,7 @@ def _build_rks_inputs_from_libcint_backbone(
             )
             if precompile_eri:
                 warnings.warn(
-                    "precompile_eri is ignored when integral_backend='libcint'.",
+                    "precompile_eri is ignored when integral_backend='cpu'.",
                     RuntimeWarning,
                     stacklevel=2,
                 )
@@ -874,7 +925,7 @@ def _build_rks_inputs_from_jax_backbone(
     return inputs
 
 
-def _build_uks_inputs_from_libcint_backbone(
+def _build_uks_inputs_from_cpu_backbone(
     *,
     atom: Any,
     basis: Any,
@@ -972,7 +1023,7 @@ def _build_uks_inputs_from_libcint_backbone(
         )
         if precompile_eri:
             warnings.warn(
-                "precompile_eri is ignored when integral_backend='libcint'.",
+                "precompile_eri is ignored when integral_backend='cpu'.",
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -1136,7 +1187,7 @@ def build_rks_integral_inputs(
     grids_level: int = 0,
     max_l: int = 3,
     grid_ao_backend: Literal["jax"] = "jax",
-    integral_backend: Literal["jax", "libcint"] = "libcint",
+    integral_backend: Literal["jax", "cpu", "gpu", "libcint"] = "cpu",
     libcint_geometry_grad_policy: LibcintGeometryGradPolicy = "analytic",
     precompile_eri: bool = False,
     precompile_eri_chunk_size: int = 512,
@@ -1165,8 +1216,8 @@ def build_rks_integral_inputs(
         grid_ao_backend=grid_ao_backend,
         libcint_geometry_grad_policy=libcint_geometry_grad_policy,
     )
-    if integral_backend_mode == "libcint":
-        return _build_rks_inputs_from_libcint_backbone(
+    if integral_backend_mode == "cpu":
+        return _build_rks_inputs_from_cpu_backbone(
             atom=atom,
             basis=basis,
             cfg=cfg,
@@ -1189,7 +1240,7 @@ def build_rks_integral_inputs(
             libcint_grad_policy_mode=libcint_grad_policy_mode,
             mol_kwargs=dict(mol_kwargs),
         )
-    return _build_rks_inputs_from_jax_backbone(
+    inputs = _build_rks_inputs_from_jax_backbone(
         atom=atom,
         basis=basis,
         cfg=cfg,
@@ -1211,6 +1262,21 @@ def build_rks_integral_inputs(
         grid_ao_backend_mode=grid_ao_backend_mode,
         _precompile_eri_kernels=_precompile_eri_kernels,
     )
+    if integral_backend_mode == "gpu" and cfg.jk_backend == "full":
+        inputs = replace(
+            inputs,
+            eri_pair_matrix=_gpu4pyscf_eri_pair_matrix(
+                atom=atom,
+                basis=basis,
+                unit=unit,
+                charge=charge,
+                spin=spin,
+                cart=bool(cart),
+                verbose=verbose,
+                mol_kwargs=dict(mol_kwargs),
+            ),
+        )
+    return inputs
 
 
 def build_uks_integral_inputs(
@@ -1226,7 +1292,7 @@ def build_uks_integral_inputs(
     grids_level: int = 0,
     max_l: int = 3,
     grid_ao_backend: Literal["jax"] = "jax",
-    integral_backend: Literal["jax", "libcint"] = "libcint",
+    integral_backend: Literal["jax", "cpu", "gpu", "libcint"] = "cpu",
     libcint_geometry_grad_policy: LibcintGeometryGradPolicy = "error",
     precompile_eri: bool = False,
     precompile_eri_chunk_size: int = 512,
@@ -1252,8 +1318,8 @@ def build_uks_integral_inputs(
         grid_ao_backend=grid_ao_backend,
         libcint_geometry_grad_policy=libcint_geometry_grad_policy,
     )
-    if integral_backend_mode == "libcint":
-        return _build_uks_inputs_from_libcint_backbone(
+    if integral_backend_mode == "cpu":
+        return _build_uks_inputs_from_cpu_backbone(
             atom=atom,
             basis=basis,
             xc_spec_resolved=xc_spec_resolved,
@@ -1274,7 +1340,7 @@ def build_uks_integral_inputs(
             libcint_grad_policy_mode=libcint_grad_policy_mode,
             mol_kwargs=dict(mol_kwargs),
         )
-    return _build_uks_inputs_from_jax_backbone(
+    inputs = _build_uks_inputs_from_jax_backbone(
         atom=atom,
         basis=basis,
         xc_spec_resolved=xc_spec_resolved,
@@ -1294,6 +1360,21 @@ def build_uks_integral_inputs(
         grid_ao_backend_mode=grid_ao_backend_mode,
         _precompile_eri_kernels=_precompile_eri_kernels,
     )
+    if integral_backend_mode == "gpu":
+        inputs = replace(
+            inputs,
+            eri=_gpu4pyscf_eri_tensor(
+                atom=atom,
+                basis=basis,
+                unit=unit,
+                charge=charge,
+                spin=spin,
+                cart=bool(cart),
+                verbose=verbose,
+                mol_kwargs=dict(mol_kwargs),
+            ),
+        )
+    return inputs
 
 
 __all__ = [

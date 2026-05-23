@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--grids-level", type=int, default=0)
     p.add_argument("--max-l", type=int, default=3)
     p.add_argument("--grid-ao-backend", choices=("jax", "pyscf"), default="jax")
-    p.add_argument("--integral-backend", choices=("jax", "libcint"), default="libcint")
+    p.add_argument("--integral-backend", choices=("jax", "cpu", "gpu", "libcint"), default="cpu")
     p.add_argument("--jk-backend", choices=("full", "df"), default="full")
     p.add_argument("--df-tol", type=float, default=1e-10)
     p.add_argument("--df-max-rank", type=int, default=None)

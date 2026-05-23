@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pytest
@@ -11,7 +11,20 @@ from td_graddft.tddft import RestrictedCasidaTDDFT
 from td_graddft.tddft.casida import solve_casida
 from td_graddft.tddft.types import TDDFTResult
 from td_graddft.tddft.types import TDDFTMatrices
-from td_graddft.xc import AdiabaticDensityFunctional
+
+
+@dataclass(frozen=True)
+class _HFOnlyResponseFunctional:
+    name: str
+    exact_exchange_fraction: float = 0.0
+
+    def __init__(self, name, energy_density_fn=None, exact_exchange_fraction=0.0):
+        del energy_density_fn
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "exact_exchange_fraction", exact_exchange_fraction)
+
+    def local_kernel(self, density):
+        return jnp.zeros_like(density)
 
 
 def _pyscf_or_skip():
@@ -93,7 +106,7 @@ def test_restricted_tdhf_matches_pyscf_water_reference():
     ref_a, ref_b = td.get_ab()
 
     reference = restricted_reference_from_pyscf(mf)
-    hf_xc = AdiabaticDensityFunctional(
+    hf_xc = _HFOnlyResponseFunctional(
         name="hf_exact_exchange",
         energy_density_fn=lambda rho: jnp.zeros_like(rho),
         exact_exchange_fraction=1.0,
@@ -134,7 +147,7 @@ def test_cached_mo_response_slices_match_ao_tensor_path():
         eri_ovvo=None,
         eri_oovv=None,
     )
-    hf_xc = AdiabaticDensityFunctional(
+    hf_xc = _HFOnlyResponseFunctional(
         name="hf_exact_exchange",
         energy_density_fn=lambda rho: jnp.zeros_like(rho),
         exact_exchange_fraction=1.0,
@@ -168,7 +181,7 @@ def test_restricted_casida_davidson_matches_dense():
     _pyscf_or_skip()
     mf = _make_water_reference("hf")
     reference = restricted_reference_from_pyscf(mf)
-    hf_xc = AdiabaticDensityFunctional(
+    hf_xc = _HFOnlyResponseFunctional(
         name="hf_exact_exchange",
         energy_density_fn=lambda rho: jnp.zeros_like(rho),
         exact_exchange_fraction=1.0,
@@ -199,7 +212,7 @@ def test_restricted_tda_davidson_matches_dense():
     _pyscf_or_skip()
     mf = _make_water_reference("hf")
     reference = restricted_reference_from_pyscf(mf)
-    hf_xc = AdiabaticDensityFunctional(
+    hf_xc = _HFOnlyResponseFunctional(
         name="hf_exact_exchange",
         energy_density_fn=lambda rho: jnp.zeros_like(rho),
         exact_exchange_fraction=1.0,

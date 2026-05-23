@@ -16,7 +16,15 @@ from pyscf import dft, gto
 from td_graddft import tdscf
 from td_graddft.reference_legacy import restricted_reference_from_pyscf
 from td_graddft.spectra import HARTREE_TO_EV
-from td_graddft.xc import AdiabaticDensityFunctional, lda_from_jax_xc
+from td_graddft.tddft._semilocal_response import SemilocalResponseFunctional
+
+
+@dataclass(frozen=True)
+class _HFOnlyResponseFunctional:
+    exact_exchange_fraction: float = 1.0
+
+    def local_kernel(self, density):
+        return jnp.zeros_like(density)
 
 
 MOLECULES = {
@@ -107,13 +115,9 @@ def _build_mf(atom: str, *, basis: str, xc_mode: str):
 
 def _jax_xc_for_mode(xc_mode: str):
     if xc_mode == "hf":
-        return AdiabaticDensityFunctional(
-            name="hf_exact_exchange",
-            energy_density_fn=lambda rho: jnp.zeros_like(rho),
-            exact_exchange_fraction=1.0,
-        )
+        return _HFOnlyResponseFunctional()
     if xc_mode == "lda":
-        return lda_from_jax_xc("lda")
+        return SemilocalResponseFunctional("lda,vwn")
     raise ValueError(f"Unsupported xc_mode={xc_mode!r}")
 
 

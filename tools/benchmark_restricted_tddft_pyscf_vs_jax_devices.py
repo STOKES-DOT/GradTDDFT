@@ -190,8 +190,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--integral-engine", choices=("auto", "jit", "legacy"), default="auto")
     p.add_argument(
         "--integral-backend",
-        choices=("libcint",),
-        default="libcint",
+        choices=("cpu", "libcint"),
+        default="cpu",
         help="AO integral source for jax_cpu/jax_gpu backends",
     )
     p.add_argument("--jk-backend", choices=("full", "df"), default="full")
@@ -360,13 +360,13 @@ def _build_ao_integrals_on_device(
         dipole_cpu = np.asarray(mol.intor_symmetric("int1e_r", comp=3), dtype=np.float64)
 
     backend_mode = str(integral_backend).lower()
-    if backend_mode not in {"jax", "libcint"}:
+    if backend_mode not in {"jax", "cpu", "gpu", "libcint"}:
         raise ValueError(
-            f"Unsupported integral_backend={integral_backend!r}. Expected 'jax' or 'libcint'."
+            f"Unsupported integral_backend={integral_backend!r}. Expected 'jax', 'cpu', or 'gpu'."
         )
 
     with jax.default_device(device):
-        if backend_mode == "libcint":
+        if backend_mode in {"cpu", "libcint"}:
             overlap = jax.device_put(jnp.asarray(mol.intor_symmetric("int1e_ovlp"), dtype=jnp.float64), device)
             hcore = jax.device_put(
                 jnp.asarray(mol.intor_symmetric("int1e_kin"), dtype=jnp.float64)
@@ -507,7 +507,6 @@ def _build_jax_reference(
         conv_tol_density=1e-8,
         damping=float(scf_damping),
         potential_clip=20.0,
-        iteration_backend="lax",
         jk_backend=str(jk_backend),
         df_tol=float(df_tol),
         df_max_rank=None if int(df_max_rank) <= 0 else int(df_max_rank),

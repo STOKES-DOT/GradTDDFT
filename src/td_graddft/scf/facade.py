@@ -28,7 +28,7 @@ class _BaseKS:
     level_shift: float = 0.0
     grids_level: int = 0
     max_l: int = 3
-    integral_backend: Literal["jax", "libcint"] = "libcint"
+    integral_backend: Literal["jax", "cpu", "gpu", "libcint"] = "cpu"
     geometry_grad_policy: Literal["analytic", "error", "zero"] = "analytic"
     grid_ao_backend: Literal["jax"] = "jax"
     execution_device: Literal["auto", "cpu", "gpu"] = "auto"
@@ -122,7 +122,6 @@ class RKS(_BaseKS):
     df_tol: float = 1e-10
     df_max_rank: int | None = None
     direct_scf_tol: float = 0.0
-    direct_scf_incremental: bool = True
     compute_local_hfx_features: bool = False
     compute_local_hfx_aux: bool = False
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4)
@@ -140,8 +139,6 @@ class RKS(_BaseKS):
             df_tol=self.df_tol,
             df_max_rank=self.df_max_rank,
             direct_scf_tol=self.direct_scf_tol,
-            direct_scf_incremental=self.direct_scf_incremental,
-            iteration_backend="runtime",
         )
 
     def _build_reference(self, spec: MoleculeSpec) -> Any:

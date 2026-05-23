@@ -123,7 +123,6 @@ def main() -> None:
             conv_tol_density=1e-7,
             damping=0.10,
             potential_clip=20.0,
-            iteration_backend="lax",
         )
 
         t0 = time.perf_counter()

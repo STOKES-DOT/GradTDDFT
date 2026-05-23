@@ -58,7 +58,7 @@ def make_rks_ground_state_surface_from_molecule_spec(
     max_l: int = 3,
     rks_config: RKSConfig | None = None,
     grid_ao_backend: Literal["jax"] = "jax",
-    integral_backend: Literal["jax", "libcint"] = "libcint",
+    integral_backend: Literal["jax", "cpu", "gpu", "libcint"] = "cpu",
     libcint_geometry_grad_policy: LibcintGeometryGradPolicy = "analytic",
     label: str = "rks_ground_state",
     verbose: int = 0,

@@ -22,7 +22,7 @@ class ImplicitFixedPointConfig:
     clip: float = 1e4
 
 
-FixedPointFn = Callable[[Array, PyTree], Array]
+FixedPointFn = Callable[..., Array]
 TransposeFn = Callable[..., Array]
 TransposeFactoryFn = Callable[..., Callable[[Array], Array]]
 ParamsVjpFn = Callable[..., PyTree]
@@ -33,6 +33,7 @@ def implicit_fixed_point_solution(
     *,
     solution: Array,
     fixed_point: FixedPointFn,
+    fixed_point_args: PyTree | None = None,
     config: ImplicitFixedPointConfig | None = None,
     apply_fixed_point_transpose: TransposeFn | None = None,
     apply_fixed_point_transpose_factory: TransposeFactoryFn | None = None,
@@ -49,17 +50,31 @@ def implicit_fixed_point_solution(
 
     cfg = ImplicitFixedPointConfig() if config is None else config
     primal_solution = jnp.asarray(solution)
+    has_fixed_point_args = fixed_point_args is not None
+    fixed_point_args_tree = () if fixed_point_args is None else fixed_point_args
 
     @jax.custom_vjp
-    def _solution_from_params(params_local: PyTree) -> Array:
-        del params_local
-        return primal_solution
+    def _solution_from_params(params_local: PyTree, solution_local: Array, args_local: PyTree) -> Array:
+        del params_local, args_local
+        return solution_local
 
-    def _fwd(params_local: PyTree) -> tuple[Array, tuple[PyTree, Array, Any | None]]:
-        return primal_solution, (params_local, primal_solution, callback_aux)
+    def _call_fixed_point(solution_value: Array, params_value: PyTree, args_value: PyTree) -> Array:
+        if has_fixed_point_args:
+            return fixed_point(solution_value, params_value, args_value)
+        return fixed_point(solution_value, params_value)
 
-    def _bwd(res: tuple[PyTree, Array, Any | None], cotangent_solution: Array) -> tuple[PyTree]:
-        params_local, solution_local, aux = res
+    def _fwd(
+        params_local: PyTree,
+        solution_local: Array,
+        args_local: PyTree,
+    ) -> tuple[Array, tuple[PyTree, Array, PyTree, Any | None]]:
+        return solution_local, (params_local, solution_local, args_local, callback_aux)
+
+    def _bwd(
+        res: tuple[PyTree, Array, PyTree, Any | None],
+        cotangent_solution: Array,
+    ) -> tuple[PyTree, Array, PyTree]:
+        params_local, solution_local, args_local, aux = res
         rhs = _clean_and_clip(cotangent_solution, cfg.clip)
 
         if apply_fixed_point_transpose_factory is not None:
@@ -76,7 +91,7 @@ def implicit_fixed_point_solution(
                 )
         elif apply_fixed_point_transpose is None:
             _, solution_vjp = jax.vjp(
-                lambda solution_var: fixed_point(solution_var, params_local),
+                lambda solution_var: _call_fixed_point(solution_var, params_local, args_local),
                 solution_local,
             )
 
@@ -126,7 +141,7 @@ def implicit_fixed_point_solution(
                 )
         else:
             _, params_vjp = jax.vjp(
-                lambda params_var: fixed_point(solution_local, params_var),
+                lambda params_var: _call_fixed_point(solution_local, params_var, args_local),
                 params_local,
             )
             grad_params = params_vjp(adjoint)[0]
@@ -135,10 +150,14 @@ def implicit_fixed_point_solution(
             lambda x: jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0),
             grad_params,
         )
-        return (grad_params,)
+        return (
+            grad_params,
+            jnp.zeros_like(solution_local),
+            jax.tree_util.tree_map(jnp.zeros_like, args_local),
+        )
 
     _solution_from_params.defvjp(_fwd, _bwd)
-    return _solution_from_params(params)
+    return _solution_from_params(params, primal_solution, fixed_point_args_tree)
 
 
 def solve_implicit_linear_system(

@@ -7,10 +7,6 @@ import jax
 from jaxtyping import Array
 
 
-SCFRuntimeForwardBackend = Literal["auto", "jax", "gpu4pyscf_rks"]
-ImplicitResponseBackend = Literal["jax", "gpu4pyscf_jk"]
-
-
 def _pytree_dataclass(*, static_fields: tuple[str, ...] = ()):
     static_field_names = frozenset(static_fields)
 
@@ -322,9 +318,6 @@ class GroundStateCoreTrainingConfig:
     scf_stop_gradient_on_unconverged: bool = False
     scf_stop_gradient_rms_threshold: float | None = None
     scf_gradient_mode: Literal["expl", "impl"] = "impl"
-    scf_implicit_forward_mode: Literal["expl", "input_state"] = "input_state"
-    scf_runtime_forward_backend: SCFRuntimeForwardBackend = "auto"
-    implicit_response_backend: ImplicitResponseBackend = "jax"
     scf_implicit_diff_max_iter: int = 6
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
@@ -349,7 +342,6 @@ class ExcitedStateTrainingConfig:
     spectrum_constraint_eta_ev: float = 0.15
     spectrum_mse_weight: float = 0.0
     spectrum_mae_weight: float = 1.0
-    implicit_response_backend: ImplicitResponseBackend = "jax"
 
 
 @dataclass(frozen=True)
@@ -410,9 +402,6 @@ class GroundStateTrainingConfig:
     scf_stop_gradient_on_unconverged: bool = False
     scf_stop_gradient_rms_threshold: float | None = None
     scf_gradient_mode: Literal["expl", "impl"] = "impl"
-    scf_implicit_forward_mode: Literal["expl", "input_state"] = "input_state"
-    scf_runtime_forward_backend: SCFRuntimeForwardBackend = "auto"
-    implicit_response_backend: ImplicitResponseBackend = "jax"
     scf_implicit_diff_max_iter: int = 6
     scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
@@ -480,9 +469,6 @@ class GroundStateTrainingConfig:
             scf_stop_gradient_on_unconverged=core.scf_stop_gradient_on_unconverged,
             scf_stop_gradient_rms_threshold=core.scf_stop_gradient_rms_threshold,
             scf_gradient_mode=core.scf_gradient_mode,
-            scf_implicit_forward_mode=core.scf_implicit_forward_mode,
-            scf_runtime_forward_backend=core.scf_runtime_forward_backend,
-            implicit_response_backend=core.implicit_response_backend,
             scf_implicit_diff_max_iter=core.scf_implicit_diff_max_iter,
             scf_implicit_diff_step_size=core.scf_implicit_diff_step_size,
             scf_implicit_diff_clip=core.scf_implicit_diff_clip,
@@ -531,9 +517,6 @@ class GroundStateTrainingConfig:
             scf_stop_gradient_on_unconverged=self.scf_stop_gradient_on_unconverged,
             scf_stop_gradient_rms_threshold=self.scf_stop_gradient_rms_threshold,
             scf_gradient_mode=self.scf_gradient_mode,
-            scf_implicit_forward_mode=self.scf_implicit_forward_mode,
-            scf_runtime_forward_backend=self.scf_runtime_forward_backend,
-            implicit_response_backend=self.implicit_response_backend,
             scf_implicit_diff_max_iter=self.scf_implicit_diff_max_iter,
             scf_implicit_diff_step_size=self.scf_implicit_diff_step_size,
             scf_implicit_diff_clip=self.scf_implicit_diff_clip,
@@ -556,5 +539,4 @@ class GroundStateTrainingConfig:
             spectrum_constraint_eta_ev=self.spectrum_constraint_eta_ev,
             spectrum_mse_weight=self.spectrum_mse_weight,
             spectrum_mae_weight=self.spectrum_mae_weight,
-            implicit_response_backend=self.implicit_response_backend,
         )

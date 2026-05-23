@@ -109,7 +109,7 @@ def test_rks_kernel_runs_ground_state_without_building_reference(monkeypatch):
     assert captured["basis"] == "sto-3g"
     assert captured["xc_spec"] == "pbe"
     assert captured["init_guess"] == "minao"
-    assert captured["integral_backend"] == "libcint"
+    assert captured["integral_backend"] == "cpu"
     assert captured["libcint_geometry_grad_policy"] == "analytic"
     assert captured["config"].jk_backend == "full"
     assert captured["include_dipole_integrals"] is False
@@ -203,7 +203,7 @@ def test_uks_kernel_calls_existing_unrestricted_reference_builder(monkeypatch):
     assert captured["atom"].symbols == ("O",)
     assert captured["basis"] == "sto-3g"
     assert captured["xc_spec"] == "pbe"
-    assert captured["integral_backend"] == "libcint"
+    assert captured["integral_backend"] == "cpu"
     assert captured["libcint_geometry_grad_policy"] == "analytic"
     assert captured["uks_config"].max_cycle == mf.max_cycle
     assert len(cache_calls) == 1

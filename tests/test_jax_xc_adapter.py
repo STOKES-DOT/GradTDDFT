@@ -5,7 +5,6 @@ import pytest
 from td_graddft import upstreams
 from td_graddft.xc_backend.jax_libxc import RestrictedFeatureBundle
 from td_graddft.xc_backend.jax_xc_adapter import load_jax_xc
-from td_graddft.xc import lda_from_jax_xc
 
 
 def _features():
@@ -35,13 +34,18 @@ def _factory(value):
 
 
 def test_load_jax_xc_backend_exposes_installed_factory(monkeypatch):
+    import td_graddft.xc_backend.jax_xc_adapter as jax_xc_adapter
+
+    original_import_module = jax_xc_adapter.importlib.import_module
+
     class FakeModule:
         __version__ = "fake"
         lda_x = staticmethod(_factory(1.0))
 
     monkeypatch.setattr(
-        "td_graddft.xc_backend.jax_xc_adapter.importlib.import_module",
-        lambda name: FakeModule() if name == "jax_xc" else None,
+        jax_xc_adapter.importlib,
+        "import_module",
+        lambda name: FakeModule() if name == "jax_xc" else original_import_module(name),
     )
 
     module, backend = load_jax_xc()
@@ -67,32 +71,6 @@ def test_load_jax_xc_raises_when_installed_backend_is_missing(monkeypatch):
         load_jax_xc()
 
 
-def test_lda_from_jax_xc_returns_finite_energy_density(monkeypatch):
-    class FakeModule:
-        __version__ = "fake"
-
-        @staticmethod
-        def lda_x(*, polarized=False):
-            assert not polarized
-
-            def functional(rho_fn, r):
-                return 2.0 * rho_fn(r)
-
-            return functional
-
-    monkeypatch.setattr(
-        "td_graddft.xc_backend.jax_xc_adapter.importlib.import_module",
-        lambda name: FakeModule() if name == "jax_xc" else None,
-    )
-
-    functional = lda_from_jax_xc("lda_x")
-    rho = jnp.asarray([0.05, 0.2, 0.8])
-    eps = functional.energy_density(rho)
-
-    assert eps.shape == rho.shape
-    assert bool(jnp.all(jnp.isfinite(eps)))
-
-
 def test_has_jax_xc_false_when_adapter_cannot_load(monkeypatch):
     import td_graddft.xc_backend.jax_xc_adapter as jax_xc_adapter
 
@@ -108,6 +86,8 @@ def test_has_jax_xc_false_when_adapter_cannot_load(monkeypatch):
 def test_load_jax_xc_wraps_known_hybrid_composites(monkeypatch):
     import td_graddft.xc_backend.jax_xc_adapter as jax_xc_adapter
 
+    original_import_module = jax_xc_adapter.importlib.import_module
+
     class BrokenHybridModule:
         __version__ = "fake"
         gga_x_pbe = staticmethod(_factory(2.0))
@@ -121,7 +101,7 @@ def test_load_jax_xc_wraps_known_hybrid_composites(monkeypatch):
     monkeypatch.setattr(
         jax_xc_adapter.importlib,
         "import_module",
-        lambda name: BrokenHybridModule() if name == "jax_xc" else None,
+        lambda name: BrokenHybridModule() if name == "jax_xc" else original_import_module(name),
     )
 
     module, backend = load_jax_xc()

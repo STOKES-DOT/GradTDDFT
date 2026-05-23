@@ -56,7 +56,6 @@ def test_pyscf_runtime_imports_are_limited_to_integral_modules():
     allowed = {
         Path("src/td_graddft/data/reference.py"),
         Path("src/td_graddft/df/jk.py"),
-        Path("src/td_graddft/scf/gpu4pyscf.py"),
         Path("src/td_graddft/scf/init_guess.py"),
     }
     allowed_prefixes = (

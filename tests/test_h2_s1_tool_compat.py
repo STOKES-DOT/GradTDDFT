@@ -71,7 +71,7 @@ def test_h2_reference_builder_requests_pt2_features_when_pt2_channel_enabled(mon
         grids_level=0,
         max_l=3,
         grid_ao_backend="jax",
-        integral_backend="libcint",
+        integral_backend="cpu",
         jk_backend="full",
         df_tol=1e-10,
         df_max_rank=None,

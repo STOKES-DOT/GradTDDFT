@@ -29,7 +29,6 @@ _NAMESPACE_EXPORTS = {
 }
 
 _PUBLIC_EXPORTS = {
-    "AdiabaticDensityFunctional": "xc",
     "BOHR_TO_ANGSTROM": "geomopt",
     "BoundNeuralXCFunctional": "neural_xc",
     "BoundXCFunctionalProtocol": "protocols",
@@ -130,8 +129,6 @@ _PUBLIC_EXPORTS = {
     "hybrid_coeff": "xc_backend.jax_libxc",
     "kinetic_element": "data.integrals",
     "kinetic_matrix": "data.integrals",
-    "lda_from_callable": "xc",
-    "lda_from_jax_xc": "xc",
     "load_jax_xc": "xc_backend.jax_xc_adapter",
     "lorentzian_spectrum": "spectra",
     "make_b3lyp_functional": "traditional_xc",

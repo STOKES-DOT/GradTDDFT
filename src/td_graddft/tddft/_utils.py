@@ -6,7 +6,6 @@ import jax.numpy as jnp
 from jax.lax import Precision
 from jaxtyping import Array
 
-from ..xc import AdiabaticDensityFunctional
 
 
 def _symmetrize(matrix: Array) -> Array:
@@ -92,7 +91,7 @@ def _resolve_xc_functional(
     molecule: Any,
     xc_functional: Any,
     xc_params: Any | None,
-) -> AdiabaticDensityFunctional | None:
+) -> Any | None:
     if xc_functional is None:
         return None
     if xc_params is None:

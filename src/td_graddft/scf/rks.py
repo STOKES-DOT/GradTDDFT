@@ -58,12 +58,10 @@ class RKSConfig:
     orthogonalization_eps: float = 1e-10
     density_floor: float = 1e-12
     potential_clip: float | None = None
-    iteration_backend: Literal["runtime", "lax"] = "runtime"
     jk_backend: Literal["full", "df", "direct"] = "full"
     df_tol: float = 1e-10
     df_max_rank: int | None = None
     direct_scf_tol: float = 0.0
-    direct_scf_incremental: bool = True
 
 
 @dataclass(frozen=True)
@@ -155,15 +153,6 @@ def _build_jk(eri: Array, density: Array) -> tuple[Array, Array]:
     j_mat = jnp.einsum("pqrs,rs->pq", eri, density, precision=Precision.HIGHEST)
     k_mat = jnp.einsum("prqs,rs->pq", eri, density, precision=Precision.HIGHEST)
     return j_mat, k_mat
-
-
-def _build_j(eri: Array, density: Array) -> Array:
-    eri_arr = jnp.asarray(eri)
-    if eri_arr.ndim == 2:
-        return build_j_from_eri_pair_matrix(eri_arr, density)
-    if int(eri_arr.size) == 0:
-        raise ValueError("J build requires full AO ERI or packed AO-pair ERI data.")
-    return jnp.einsum("pqrs,rs->pq", eri_arr, density, precision=Precision.HIGHEST)
 
 
 def _commutator_error(fock: Array, density: Array, overlap: Array) -> Array:
@@ -341,11 +330,7 @@ def _make_jk_builder(
                 density_arg = density
                 base_j = None
                 base_k = None
-                if cfg.direct_scf_incremental and density_last is not None:
-                    if j_last is None or k_last is None:
-                        raise ValueError(
-                            "j_last and k_last are required when density_last is provided."
-                        )
+                if density_last is not None:
                     density_arg = jnp.asarray(density) - jnp.asarray(density_last)
                     base_j = jnp.asarray(j_last)
                     base_k = jnp.asarray(k_last)
@@ -371,7 +356,7 @@ def _make_jk_builder(
             result = build_direct_jk_incremental(
                 direct_basis,
                 density,
-                density_last=density_last if cfg.direct_scf_incremental else None,
+                density_last=density_last,
                 j_last=j_last,
                 k_last=k_last,
                 screening_threshold=threshold,
@@ -403,7 +388,10 @@ def _make_jk_builder(
                     return build_j_from_eri_pair_matrix(pair_arr, density), jnp.zeros_like(density)
                 if eri_arr is None:
                     raise ValueError("jk_backend='full' requires full AO ERI or packed AO-pair ERI.")
-                return _build_j(eri_arr, density), jnp.zeros_like(density)
+                return (
+                    jnp.einsum("pqrs,rs->pq", eri_arr, density, precision=Precision.HIGHEST),
+                    jnp.zeros_like(density),
+                )
 
             return _full_j
 
@@ -540,7 +528,6 @@ def _array_xc_value_and_grad_kernel(
     xc_spec: str,
     xc_kind: str,
     density_floor: float,
-    use_jit: bool = True,
 ) -> Callable[[Array], tuple[Array, Array]]:
     xc_spec_norm = str(xc_spec)
     xc_kind_norm = str(xc_kind)
@@ -576,9 +563,7 @@ def _array_xc_value_and_grad_kernel(
         _, grad = value_and_grad(variables)
         return point_exc_array(variables), grad
 
-    if bool(use_jit):
-        return jax.jit(kernel)
-    return kernel
+    return jax.jit(kernel)
 
 
 def _xc_energy_and_potential_on_grid(
@@ -588,7 +573,6 @@ def _xc_energy_and_potential_on_grid(
     density_floor: float,
     potential_clip: float | None,
     xc_kind: str,
-    jit_xc: bool,
 ) -> tuple[Array, Array, Array]:
     features, grad = restricted_grid_features_with_gradients(molecule)
     rho = jnp.maximum(features.rho, density_floor)
@@ -612,7 +596,6 @@ def _xc_energy_and_potential_on_grid(
         xc_spec,
         xc_kind,
         density_floor,
-        bool(jit_xc),
     )(response_variables)
     point_exc = jnp.nan_to_num(point_exc, nan=0.0, posinf=0.0, neginf=0.0)
     point_grad = jnp.nan_to_num(point_grad, nan=0.0, posinf=0.0, neginf=0.0)
@@ -705,7 +688,6 @@ def _fock_components_for_density(
     alpha: Array,
     cfg: RKSConfig,
     xc_kind: str,
-    jit_xc: bool,
 ) -> tuple[Array, Array, Array, Array]:
     j_mat, k_mat = jk_builder(density, mo_coeff, mo_occ, density_last, j_last, k_last)
     molecule = _restricted_spin_view(
@@ -723,7 +705,6 @@ def _fock_components_for_density(
         density_floor=cfg.density_floor,
         potential_clip=cfg.potential_clip,
         xc_kind=xc_kind,
-        jit_xc=jit_xc,
     )
     ao_laplacian = getattr(molecule, "ao_laplacian", None)
     if ao_laplacian is None:
@@ -760,7 +741,6 @@ def _energy_and_raw_fock_for_density(
     alpha: Array,
     cfg: RKSConfig,
     xc_kind: str,
-    jit_xc: bool,
 ) -> tuple[Array, Array, Array, Array, Array]:
     j_mat, k_mat, xc_energy, fock = _fock_components_for_density(
         density=density,
@@ -778,7 +758,6 @@ def _energy_and_raw_fock_for_density(
         alpha=alpha,
         cfg=cfg,
         xc_kind=xc_kind,
-        jit_xc=jit_xc,
     )
 
     e_one = jnp.einsum("ij,ij->", density, h, precision=Precision.HIGHEST)
@@ -791,67 +770,6 @@ def _energy_and_raw_fock_for_density(
     )
     total = e_one + e_coul + e_x_hf + xc_energy + enuc
     return total, xc_energy, fock, j_mat, k_mat
-
-
-def _run_extra_final_cycle(
-    *,
-    density: Array,
-    mo_coeff: Array,
-    mo_occ: Array,
-    mo_energy: Array,
-    raw_fock: Array,
-    x: Array,
-    jk_builder: JKBuilder,
-    ao: Array,
-    ao_deriv1: Array,
-    weights: Array,
-    h: Array,
-    s: Array,
-    enuc: Array,
-    cfg: RKSConfig,
-    alpha: Array,
-    xc_kind: str,
-    mo_occ_fixed: Array,
-    energy: Array,
-    j_mat: Array,
-    k_mat: Array,
-    jit_xc: bool,
-) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
-    mo_energy_final, mo_coeff_final = _diagonalize_fock(raw_fock, x)
-    density_final = _build_density_from_occ(mo_coeff_final, mo_occ_fixed)
-    total_final, xc_energy_final, raw_fock_final, _, _ = _energy_and_raw_fock_for_density(
-        density=density_final,
-        mo_coeff=mo_coeff_final,
-        mo_occ=mo_occ,
-        mo_energy=mo_energy_final,
-        jk_builder=jk_builder,
-        density_last=density,
-        j_last=j_mat,
-        k_last=k_mat,
-        ao=ao,
-        ao_deriv1=ao_deriv1,
-        weights=weights,
-        h=h,
-        enuc=enuc,
-        alpha=alpha,
-        cfg=cfg,
-        xc_kind=xc_kind,
-        jit_xc=jit_xc,
-    )
-    tol_e = jnp.asarray(cfg.conv_tol, dtype=h.dtype) * jnp.asarray(10.0, dtype=h.dtype)
-    grad_tol = jnp.sqrt(jnp.asarray(cfg.conv_tol, dtype=h.dtype)) * jnp.asarray(3.0, dtype=h.dtype)
-    delta_e = jnp.abs(total_final - energy)
-    grad_rms = _scf_residual_norm(raw_fock_final, density_final, s)
-    converged_final = jnp.logical_or(delta_e < tol_e, grad_rms < grad_tol)
-    return (
-        density_final,
-        mo_coeff_final,
-        mo_energy_final,
-        total_final,
-        xc_energy_final,
-        raw_fock_final,
-        converged_final,
-    )
 
 
 def _maybe_run_extra_final_cycle(
@@ -878,34 +796,45 @@ def _maybe_run_extra_final_cycle(
     j_mat: Array,
     k_mat: Array,
     traceable: bool,
-    jit_xc: bool,
 ) -> tuple[Array, Array, Array, Array, Array, Array, Any]:
     if cfg.level_shift == 0.0:
         return density, mo_coeff, mo_energy, energy, xc_energy, raw_fock, converged
 
     def _run_cycle(_: None):
-        return _run_extra_final_cycle(
-            density=density,
-            mo_coeff=mo_coeff,
+        mo_energy_final, mo_coeff_final = _diagonalize_fock(raw_fock, x)
+        density_final = _build_density_from_occ(mo_coeff_final, mo_occ_fixed)
+        total_final, xc_energy_final, raw_fock_final, _, _ = _energy_and_raw_fock_for_density(
+            density=density_final,
+            mo_coeff=mo_coeff_final,
             mo_occ=mo_occ_fixed,
-            mo_energy=mo_energy,
-            raw_fock=raw_fock,
-            x=x,
+            mo_energy=mo_energy_final,
             jk_builder=jk_builder,
+            density_last=density,
+            j_last=j_mat,
+            k_last=k_mat,
             ao=ao,
             ao_deriv1=ao_deriv1,
             weights=weights,
             h=h,
-            s=s,
             enuc=enuc,
-            cfg=cfg,
             alpha=alpha,
+            cfg=cfg,
             xc_kind=xc_kind,
-            mo_occ_fixed=mo_occ_fixed,
-            energy=energy,
-            j_mat=j_mat,
-            k_mat=k_mat,
-            jit_xc=jit_xc,
+        )
+        tol_e = jnp.asarray(cfg.conv_tol, dtype=h.dtype) * jnp.asarray(10.0, dtype=h.dtype)
+        grad_tol = jnp.sqrt(jnp.asarray(cfg.conv_tol, dtype=h.dtype)) * jnp.asarray(3.0, dtype=h.dtype)
+        converged_final = jnp.logical_or(
+            jnp.abs(total_final - energy) < tol_e,
+            _scf_residual_norm(raw_fock_final, density_final, s) < grad_tol,
+        )
+        return (
+            density_final,
+            mo_coeff_final,
+            mo_energy_final,
+            total_final,
+            xc_energy_final,
+            raw_fock_final,
+            converged_final,
         )
 
     if traceable:
@@ -1226,108 +1155,6 @@ def _run_scf_iterations_lax_core(
     )
 
 
-def _run_scf_iterations_lax_arrays(
-    *,
-    h: Array,
-    s: Array,
-    x: Array,
-    jk_builder: JKBuilder,
-    ao: Array,
-    ao_deriv1: Array,
-    weights: Array,
-    enuc: Array,
-    cfg: RKSConfig,
-    alpha: Array,
-    xc_kind: str,
-    mo_occ_fixed: Array,
-    diis_basis: Array,
-    skip_first_fock_damping: bool,
-    density: Array,
-    mo_coeff: Array,
-    mo_occ: Array,
-    mo_energy: Array,
-    raw_fock: Array,
-    j_mat: Array,
-    k_mat: Array,
-    jit_xc: bool,
-) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array, Array]:
-    """Array-valued SCF loop shared by regular and traceable RKS execution."""
-
-    def energy_and_fock_builder(
-        density_i: Array,
-        mo_coeff_i: Array,
-        mo_occ_i: Array,
-        mo_energy_i: Array,
-        density_last: Array | None,
-        j_last: Array | None,
-        k_last: Array | None,
-    ) -> tuple[Array, Array, Array, Array, Array]:
-        return _energy_and_raw_fock_for_density(
-            density=density_i,
-            mo_coeff=mo_coeff_i,
-            mo_occ=mo_occ_i,
-            mo_energy=mo_energy_i,
-            jk_builder=jk_builder,
-            density_last=density_last,
-            j_last=j_last,
-            k_last=k_last,
-            ao=ao,
-            ao_deriv1=ao_deriv1,
-            weights=weights,
-            h=h,
-            enuc=enuc,
-            alpha=alpha,
-            cfg=cfg,
-            xc_kind=xc_kind,
-            jit_xc=jit_xc,
-        )
-
-    (
-        converged,
-        cycles,
-        density,
-        mo_coeff,
-        mo_energy,
-        energy,
-        xc_energy,
-        raw_fock,
-        j_mat,
-        k_mat,
-        _density_history,
-        _mo_coeff_history,
-        _mo_energy_history,
-        _density_rms_history,
-    ) = _run_scf_iterations_lax_core(
-        h=h,
-        s=s,
-        x=x,
-        energy_and_fock_builder=energy_and_fock_builder,
-        cfg=cfg,
-        mo_occ_fixed=mo_occ_fixed,
-        diis_basis=diis_basis,
-        skip_first_fock_damping=skip_first_fock_damping,
-        density=density,
-        mo_coeff=mo_coeff,
-        mo_occ=mo_occ,
-        mo_energy=mo_energy,
-        raw_fock=raw_fock,
-        j_mat=j_mat,
-        k_mat=k_mat,
-    )
-    return (
-        converged,
-        cycles,
-        density,
-        mo_coeff,
-        mo_energy,
-        energy,
-        xc_energy,
-        raw_fock,
-        j_mat,
-        k_mat,
-    )
-
-
 def _run_rks_from_integrals_shared(
     *,
     overlap: Array,
@@ -1364,16 +1191,6 @@ def _run_rks_from_integrals_shared(
     Array,
 ]:
     cfg = RKSConfig() if config is None else config
-    if cfg.iteration_backend not in {"runtime", "lax"}:
-        raise ValueError(
-            f"Unsupported iteration_backend={cfg.iteration_backend!r}. "
-            "RKS SCF supports {'runtime', 'lax'}."
-        )
-    if traceable and cfg.iteration_backend != "lax":
-        raise ValueError(
-            "run_rks_from_integrals_traceable requires config.iteration_backend='lax' "
-            "to remain JAX-traceable."
-        )
     parse_xc(cfg.xc_spec)
     xc_kind = xc_type(cfg.xc_spec)
     if xc_kind == "MGGA":
@@ -1464,20 +1281,42 @@ def _run_rks_from_integrals_shared(
         alpha=alpha,
         cfg=cfg,
         xc_kind=xc_kind,
-        jit_xc=cfg.iteration_backend == "lax",
     )
+
+    def energy_and_fock_builder(
+        density_i: Array,
+        mo_coeff_i: Array,
+        mo_occ_i: Array,
+        mo_energy_i: Array,
+        density_last: Array | None,
+        j_last: Array | None,
+        k_last: Array | None,
+    ) -> tuple[Array, Array, Array, Array, Array]:
+        return _energy_and_raw_fock_for_density(
+            density=density_i,
+            mo_coeff=mo_coeff_i,
+            mo_occ=mo_occ_i,
+            mo_energy=mo_energy_i,
+            jk_builder=jk_builder,
+            density_last=density_last,
+            j_last=j_last,
+            k_last=k_last,
+            ao=ao,
+            ao_deriv1=ao_deriv1,
+            weights=weights,
+            h=h,
+            enuc=enuc,
+            alpha=alpha,
+            cfg=cfg,
+            xc_kind=xc_kind,
+        )
+
     scf_kwargs = dict(
         h=h,
         s=s,
         x=x,
-        jk_builder=jk_builder,
-        ao=ao,
-        ao_deriv1=ao_deriv1,
-        weights=weights,
-        enuc=enuc,
+        energy_and_fock_builder=energy_and_fock_builder,
         cfg=cfg,
-        alpha=alpha,
-        xc_kind=xc_kind,
         mo_occ_fixed=mo_occ_fixed,
         diis_basis=mo_coeff,
         skip_first_fock_damping=skip_first_fock_damping,
@@ -1489,9 +1328,23 @@ def _run_rks_from_integrals_shared(
         j_mat=j_mat,
         k_mat=k_mat,
     )
-    converged, cycles, density, mo_coeff, mo_energy, energy, xc_energy, fock, j_mat, k_mat = _run_scf_iterations_lax_arrays(
+    (
+        converged,
+        cycles,
+        density,
+        mo_coeff,
+        mo_energy,
+        energy,
+        xc_energy,
+        fock,
+        j_mat,
+        k_mat,
+        _density_history,
+        _mo_coeff_history,
+        _mo_energy_history,
+        _density_rms_history,
+    ) = _run_scf_iterations_lax_core(
         **scf_kwargs,
-        jit_xc=cfg.iteration_backend == "lax",
     )
     density, mo_coeff, mo_energy, energy, xc_energy, fock, converged = _maybe_run_extra_final_cycle(
         density=density,
@@ -1516,7 +1369,6 @@ def _run_rks_from_integrals_shared(
         j_mat=j_mat,
         k_mat=k_mat,
         traceable=traceable,
-        jit_xc=cfg.iteration_backend == "lax",
     )
     if not traceable:
         converged = bool(converged)
@@ -1632,7 +1484,7 @@ def run_rks_from_integrals_traceable(
     config: RKSConfig | None = None,
 ) -> TraceableRKSResult:
     """Traceable RKS SCF from AO integrals (array-valued outputs for autodiff)."""
-    cfg = replace(RKSConfig() if config is None else config, iteration_backend="lax")
+    cfg = RKSConfig() if config is None else config
     (
         enuc,
         _alpha_scalar,
