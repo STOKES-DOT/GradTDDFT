@@ -10,17 +10,12 @@ import numpy as np
 from jaxtyping import Array, PyTree
 
 from ..features import restricted_grid_features
-from ..data.molecule import MoleculeSpec
 from ..scf import (
     DifferentiableSCF,
     DifferentiableSCFConfig,
-    GPU4PYSCF_RKS_RUNTIME_BACKEND,
-    GPU4PYSCF_UKS_RUNTIME_BACKEND,
     UKSConfig,
-    run_gpu4pyscf_uks_forward,
     run_uks_from_integrals,
 )
-from ..scf.core import _contains_jax_tracer
 from ..data.integrals import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix
 from ..scf.rks import _vxc_matrix_from_grid_potential
 from ..spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
@@ -1066,17 +1061,6 @@ def charged_state_uks_from_molecule(
         sign_hint=neutral_spin if neutral_spin != 0 else 1,
     )
     charged_cfg = _default_charged_state_uks_config(bound_xc, config)
-    gpu4pyscf_result = _charged_state_gpu4pyscf_uks_from_molecule(
-        molecule,
-        bound_xc,
-        charge_delta=int(charge_delta),
-        nalpha=nalpha,
-        nbeta=nbeta,
-        config=charged_cfg,
-        occupation_tolerance=occupation_tolerance,
-    )
-    if gpu4pyscf_result is not None:
-        return gpu4pyscf_result
     return run_uks_from_integrals(
         overlap=jnp.asarray(molecule.overlap_matrix),
         hcore=jnp.asarray(molecule.h1e),
@@ -1097,77 +1081,6 @@ def charged_state_uks_from_molecule(
         bound_xc=bound_xc,
         molecule_template=molecule,
     )
-
-
-def _charged_state_gpu4pyscf_uks_from_molecule(
-    molecule: Any,
-    bound_xc: Any,
-    *,
-    charge_delta: int,
-    nalpha: int,
-    nbeta: int,
-    config: UKSConfig,
-    occupation_tolerance: float = 1e-8,
-) -> Any | None:
-    backend = getattr(molecule, "runtime_scf_backend", None)
-    if backend not in {GPU4PYSCF_RKS_RUNTIME_BACKEND, GPU4PYSCF_UKS_RUNTIME_BACKEND}:
-        return None
-    if _contains_jax_tracer(bound_xc):
-        return None
-    runtime_options = getattr(molecule, "runtime_scf_options", None)
-    as_kwargs = getattr(runtime_options, "as_kwargs", None)
-    if runtime_options is None or not callable(as_kwargs):
-        return None
-
-    kwargs = dict(as_kwargs())
-    base_charge = int(kwargs.get("charge", 0))
-    charged_charge = base_charge + int(charge_delta)
-    charged_spin = int(nalpha) - int(nbeta)
-    atom = kwargs.get("atom", None)
-    if isinstance(atom, MoleculeSpec):
-        kwargs["atom"] = replace(atom, charge=charged_charge, spin=charged_spin)
-    kwargs.update(
-        charge=charged_charge,
-        spin=charged_spin,
-        xc_spec=str(config.xc_spec),
-        conv_tol=float(config.conv_tol),
-        max_cycle=int(config.max_cycle),
-        molecule_template=_charged_spin_molecule_from_molecule(
-            molecule,
-            charge_delta=charge_delta,
-            occupation_tolerance=occupation_tolerance,
-        ),
-        xc_functional=_FrozenFunctionalAdapter(bound_xc),
-        xc_params=None,
-        neural_vxc_clip=(
-            None if config.potential_clip is None else float(config.potential_clip)
-        ),
-        neural_xc_compute_exc=True,
-        neural_xc_jit_payload=True,
-        collect_fock=False,
-    )
-    forward = run_gpu4pyscf_uks_forward(**kwargs)
-    template = kwargs["molecule_template"]
-    dtype = jnp.asarray(template.h1e).dtype
-    solution_molecule = _replace_molecule_copy(
-        template,
-        mo_coeff=jnp.asarray(forward.mo_coeff, dtype=dtype),
-        mo_occ=jnp.asarray(forward.mo_occ, dtype=dtype),
-        mo_energy=jnp.asarray(forward.mo_energy, dtype=dtype),
-        rdm1=jnp.asarray(forward.density_matrix, dtype=dtype),
-        mf_energy=jnp.asarray(forward.total_energy, dtype=dtype),
-        scf_converged=bool(forward.converged),
-    )
-    corrected_energy = _predict_ground_state_total_energy_from_molecule(
-        None,
-        _FrozenFunctionalAdapter(bound_xc),
-        solution_molecule,
-    )
-    if is_dataclass(forward):
-        return replace(forward, total_energy=corrected_energy)
-    out = copy.copy(forward)
-    setattr(out, "total_energy", corrected_energy)
-    return out
 
 
 def _charged_spin_molecule_from_molecule(
@@ -2856,8 +2769,6 @@ def _make_differentiable_scf(
             vxc_clip=cfg.scf_vxc_clip,
             iterate_selection=cfg.scf_iterate_selection,
             require_converged_iterates=cfg.scf_require_convergence,
-            implicit_forward_mode=cfg.scf_implicit_forward_mode,
-            implicit_response_backend=cfg.implicit_response_backend,
             implicit_diff_max_iter=cfg.scf_implicit_diff_max_iter,
             implicit_diff_step_size=cfg.scf_implicit_diff_step_size,
             implicit_diff_clip=cfg.scf_implicit_diff_clip,
@@ -2925,11 +2836,10 @@ def _stack_pytree_batch(items: Sequence[Any]) -> Any:
 
 
 def _pytree_shape_signature(tree: Any) -> tuple[tuple[tuple[int, ...], str], ...]:
-    signature = []
-    for leaf in jax.tree_util.tree_leaves(tree):
-        arr = jnp.asarray(leaf)
-        signature.append((tuple(int(dim) for dim in arr.shape), str(arr.dtype)))
-    return tuple(signature)
+    return tuple(
+        (tuple(int(dim) for dim in jnp.asarray(leaf).shape), str(jnp.asarray(leaf).dtype))
+        for leaf in jax.tree_util.tree_leaves(tree)
+    )
 
 
 def _can_use_batched_self_consistent_ground_state_path(
@@ -2937,8 +2847,41 @@ def _can_use_batched_self_consistent_ground_state_path(
     cfg: GroundStateTrainingConfig,
     predictor: Callable[[PyTree, Any], tuple[Array, Any]] | None,
 ) -> bool:
-    del dataset, cfg, predictor
-    return False
+    core_cfg = cfg.ground_state_core_config()
+    unsupported_weights = (
+        "xc_potential_constraint_weight xc_kernel_constraint_weight "
+        "stationarity_constraint_weight dm21_scf_regularization_weight "
+        "orbital_energy_constraint_weight janak_frontier_constraint_weight "
+        "s1_constraint_weight first_excited_total_energy_constraint_weight "
+        "excitation_constraint_weight oscillator_strength_constraint_weight "
+        "spectrum_constraint_weight"
+    ).split()
+    if (
+        predictor is not None
+        or len(dataset) <= 1
+        or core_cfg.mode != "self_consistent"
+        or core_cfg.self_consistent_energy_weight != 0.0
+        or core_cfg.coefficient_prior_weight != 0.0
+        or core_cfg.fractional_linearity_weight != 0.0
+        or any(
+            any(float(getattr(datum, name)) != 0.0 for name in unsupported_weights)
+            for datum in dataset
+        )
+        or (
+            any(float(datum.density_constraint_weight) != 0.0 for datum in dataset)
+            and any(datum.target_density_matrix is None for datum in dataset)
+        )
+    ):
+        return False
+    molecule_signature = _pytree_shape_signature(dataset[0].molecule)
+    if any(_pytree_shape_signature(datum.molecule) != molecule_signature for datum in dataset[1:]):
+        return False
+    density_targets = [datum.target_density_matrix for datum in dataset if datum.target_density_matrix is not None]
+    if density_targets:
+        density_signature = _pytree_shape_signature(density_targets[0])
+        if any(_pytree_shape_signature(target) != density_signature for target in density_targets[1:]):
+            return False
+    return True
 
 
 def _ground_state_mse_loss_batched_self_consistent(
@@ -2952,9 +2895,12 @@ def _ground_state_mse_loss_batched_self_consistent(
     batched_molecule = _stack_pytree_batch([datum.molecule for datum in dataset])
     targets = jnp.asarray([datum.target_total_energy for datum in dataset])
     weights = jnp.asarray([datum.weight for datum in dataset])
+    density_weights = jnp.asarray([datum.density_constraint_weight for datum in dataset])
+    use_density_targets = any(float(datum.density_constraint_weight) != 0.0 for datum in dataset)
+    density_targets = _stack_pytree_batch([datum.target_density_matrix for datum in dataset]) if use_density_targets else None
     scf = _make_differentiable_scf(training_config)
 
-    def _per_datum(molecule: Any, target: Array, weight: Array) -> dict[str, Array]:
+    def _per_datum(molecule, target, weight, density_weight, target_density_matrix):
         eval_molecule, scf_info = scf.run(molecule, functional, params)
         predicted = _predict_ground_state_total_energy_from_molecule(
             params,
@@ -2973,9 +2919,22 @@ def _ground_state_mse_loss_batched_self_consistent(
             + core_cfg.energy_mae_weight * datum_mae
         )
         stop_gradient_mask = _scf_stop_gradient_mask(core_cfg, scf_info)
-        if bool(core_cfg.scf_require_convergence):
+        if bool(core_cfg.scf_require_convergence) and scf_info.mode == "self_consistent":
             weight = weight * jnp.asarray(scf_info.converged, dtype=predicted.dtype)
-        loss_contrib = weight * datum_loss
+        density_weight = jnp.asarray(density_weight, dtype=predicted.dtype)
+        if use_density_targets:
+            density_mse = density_matching_penalty(
+                params,
+                functional,
+                molecule,
+                training_config=training_config,
+                self_consistent_molecule=eval_molecule,
+                target_density_matrix=target_density_matrix,
+            )
+        else:
+            density_mse = jnp.asarray(0.0, dtype=predicted.dtype)
+        density_penalty = density_weight * density_mse
+        loss_contrib = weight * (datum_loss + density_penalty)
         loss_contrib = _preserve_value_stop_gradient(loss_contrib, stop_gradient_mask)
         return {
             "loss_contrib": loss_contrib,
@@ -2985,6 +2944,8 @@ def _ground_state_mse_loss_batched_self_consistent(
             "raw_mae": jnp.abs(error),
             "normalized_mse": datum_mse,
             "normalized_mae": datum_mae,
+            "density_penalty": density_penalty,
+            "density_mse": density_mse,
             "scf_stop_gradient_applied": jnp.asarray(
                 stop_gradient_mask,
                 dtype=predicted.dtype,
@@ -3001,21 +2962,16 @@ def _ground_state_mse_loss_batched_self_consistent(
             "scf_best_rms": jnp.asarray(scf_info.best_rms_density, dtype=predicted.dtype),
         }
 
-    batch = jax.vmap(_per_datum)(batched_molecule, targets, weights)
+    batch = jax.vmap(_per_datum, in_axes=(0, 0, 0, 0, 0 if use_density_targets else None))(
+        batched_molecule, targets, weights, density_weights, density_targets
+    )
     dtype = batch["predicted"].dtype
     total_weight = jnp.sum(batch["weight"])
-    loss = jnp.sum(batch["loss_contrib"]) / jnp.maximum(
-        total_weight,
-        jnp.asarray(1.0, dtype=dtype),
-    )
+    loss = jnp.sum(batch["loss_contrib"]) / jnp.maximum(total_weight, jnp.asarray(1.0, dtype=dtype))
     zeros = jnp.zeros_like(batch["predicted"])
     empty = jnp.array([], dtype=dtype)
-
-    def _mean(values: Array) -> Array:
-        return jnp.asarray([jnp.mean(values)], dtype=dtype)
-
-    def _max(values: Array) -> Array:
-        return jnp.asarray([jnp.max(values)], dtype=dtype)
+    _mean = lambda values: jnp.asarray([jnp.mean(values)], dtype=dtype)  # noqa: E731
+    _max = lambda values: jnp.asarray([jnp.max(values)], dtype=dtype)  # noqa: E731
 
     metrics = {
         "loss": loss,
@@ -3023,50 +2979,8 @@ def _ground_state_mse_loss_batched_self_consistent(
         "energy_mae": batch["raw_mae"],
         "normalized_energy_mse": batch["normalized_mse"],
         "normalized_energy_mae": batch["normalized_mae"],
-        "density_penalty": zeros,
-        "density_mse": zeros,
-        "xc_potential_penalty": zeros,
-        "xc_potential_mse": zeros,
-        "xc_kernel_penalty": zeros,
-        "xc_kernel_mse": zeros,
-        "self_consistent_energy_penalty": zeros,
-        "self_consistent_energy_mse": zeros,
-        "self_consistent_energy_mae": zeros,
-        "orbital_energy_penalty": zeros,
-        "orbital_energy_mse": zeros,
-        "orbital_energy_mae": zeros,
-        "janak_frontier_penalty": zeros,
-        "janak_frontier_mse": zeros,
-        "janak_frontier_mae": zeros,
-        "coefficient_prior_penalty": zeros,
-        "coefficient_prior_mse": zeros,
-        "stationarity_penalty": zeros,
-        "dm21_scf_penalty": zeros,
-        "dm21_scf_mse": zeros,
-        "dm21_scf_delta_energy": zeros,
-        "fractional_penalty": zeros,
-        "s1_penalty": zeros,
-        "s1_mse": zeros,
-        "s1_mae": zeros,
-        "s1_predicted": zeros,
-        "s1_target": zeros,
-        "first_excited_total_penalty": zeros,
-        "first_excited_total_mse": zeros,
-        "first_excited_total_predicted": zeros,
-        "first_excited_total_target": zeros,
-        "excitation_penalty": zeros,
-        "excitation_mse": zeros,
-        "excitation_mae": zeros,
-        "excitation_predicted": empty,
-        "excitation_target": empty,
-        "oscillator_strength_penalty": zeros,
-        "oscillator_strength_mse": zeros,
-        "oscillator_strength_mae": zeros,
-        "oscillator_strength_predicted": empty,
-        "oscillator_strength_target": empty,
-        "spectrum_penalty": zeros,
-        "spectrum_mse": zeros,
-        "spectrum_mae": zeros,
+        "density_penalty": batch["density_penalty"],
+        "density_mse": batch["density_mse"],
         "scf_converged": batch["scf_converged"],
         "scf_stop_gradient_applied": batch["scf_stop_gradient_applied"],
         "scf_cycles": batch["scf_cycles"],
@@ -3089,6 +3003,24 @@ def _ground_state_mse_loss_batched_self_consistent(
         "scf_best_rms_max": _max(batch["scf_best_rms"]),
         "predicted_total_energies": batch["predicted"],
     }
+    metrics.update(dict.fromkeys((
+        "xc_potential_penalty xc_potential_mse xc_kernel_penalty xc_kernel_mse "
+        "self_consistent_energy_penalty self_consistent_energy_mse self_consistent_energy_mae "
+        "orbital_energy_penalty orbital_energy_mse orbital_energy_mae "
+        "janak_frontier_penalty janak_frontier_mse janak_frontier_mae "
+        "coefficient_prior_penalty coefficient_prior_mse stationarity_penalty "
+        "dm21_scf_penalty dm21_scf_mse dm21_scf_delta_energy fractional_penalty "
+        "s1_penalty s1_mse s1_mae s1_predicted s1_target "
+        "first_excited_total_penalty first_excited_total_mse "
+        "first_excited_total_predicted first_excited_total_target "
+        "excitation_penalty excitation_mse excitation_mae "
+        "oscillator_strength_penalty oscillator_strength_mse oscillator_strength_mae "
+        "spectrum_penalty spectrum_mse spectrum_mae"
+    ).split(), zeros))
+    metrics.update(dict.fromkeys((
+        "excitation_predicted excitation_target "
+        "oscillator_strength_predicted oscillator_strength_target"
+    ).split(), empty))
     return loss, metrics
 
 

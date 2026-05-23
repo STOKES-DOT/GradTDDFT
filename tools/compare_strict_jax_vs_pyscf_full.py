@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--nstates", type=int, default=8)
     parser.add_argument("--grids-level", type=int, default=0)
     parser.add_argument("--jax-jk-backend", choices=("full", "df", "direct"), default="full")
-    parser.add_argument("--integral-backend", choices=("libcint",), default="libcint")
+    parser.add_argument("--integral-backend", choices=("cpu", "libcint"), default="cpu")
     parser.add_argument(
         "--libcint-geometry-grad-policy",
         choices=("error", "zero"),

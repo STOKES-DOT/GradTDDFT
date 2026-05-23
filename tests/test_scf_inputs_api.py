@@ -28,7 +28,7 @@ def _h_atom_spec():
     return parse_molecule_spec("H 0 0 0", spin=1)
 
 
-def test_rks_integral_inputs_default_integral_backend_is_libcint():
+def test_rks_integral_inputs_default_integral_backend_is_cpu():
     inputs = RKSIntegralInputs(
         basis=object(),
         overlap=jnp.zeros((1, 1)),
@@ -47,11 +47,11 @@ def test_rks_integral_inputs_default_integral_backend_is_libcint():
         dipole_integrals=None,
     )
 
-    assert inputs.integral_backend == "libcint"
+    assert inputs.integral_backend == "cpu"
     assert inputs.grid_ao_backend == "jax"
 
 
-def test_uks_integral_inputs_default_integral_backend_is_libcint():
+def test_uks_integral_inputs_default_integral_backend_is_cpu():
     inputs = UKSIntegralInputs(
         basis=object(),
         overlap=jnp.zeros((1, 1)),
@@ -68,7 +68,7 @@ def test_uks_integral_inputs_default_integral_backend_is_libcint():
         dipole_integrals=jnp.zeros((3, 1, 1)),
     )
 
-    assert inputs.integral_backend == "libcint"
+    assert inputs.integral_backend == "cpu"
     assert inputs.grid_ao_backend == "jax"
 
 
@@ -131,14 +131,14 @@ def test_build_rks_integral_inputs_direct_backend_keeps_basis_not_eri():
 
 
 @pytest.mark.parametrize("jk_backend", ["full", "df"])
-def test_build_rks_integral_inputs_libcint_nondirect_skips_eri_group_precompute(jk_backend):
+def test_build_rks_integral_inputs_cpu_nondirect_skips_eri_group_precompute(jk_backend):
     pytest.importorskip("pyscf")
 
     inputs = build_rks_integral_inputs(
         atom=_h2_spec(),
         basis="sto-3g",
         config=RKSConfig(jk_backend=jk_backend),
-        integral_backend="libcint",
+        integral_backend="cpu",
         grid_ao_backend="jax",
         grids_level=0,
         max_l=1,
@@ -150,7 +150,7 @@ def test_build_rks_integral_inputs_libcint_nondirect_skips_eri_group_precompute(
     assert inputs.basis.shell_quartet_groups == ()
 
 
-def test_build_rks_integral_inputs_libcint_default_uses_minao_initial_density(monkeypatch):
+def test_build_rks_integral_inputs_cpu_default_uses_minao_initial_density(monkeypatch):
     import td_graddft.scf.inputs as inputs_mod
 
     captured = {}
@@ -165,7 +165,7 @@ def test_build_rks_integral_inputs_libcint_default_uses_minao_initial_density(mo
         atom=_h2_spec(),
         basis="sto-3g",
         config=RKSConfig(xc_spec="pbe0", jk_backend="full"),
-        integral_backend="libcint",
+        integral_backend="cpu",
         grid_ao_backend="jax",
         grids_level=0,
         max_l=1,
@@ -218,6 +218,63 @@ def test_build_rks_integral_inputs_jax_uses_fused_core_matrices(monkeypatch):
 
     assert inputs.overlap.shape == inputs.hcore.shape
     assert inputs.direct_basis is inputs.basis
+
+
+def test_build_rks_integral_inputs_gpu_uses_integral_backbone(monkeypatch):
+    import td_graddft.scf.inputs as inputs_mod
+
+    calls = {"core": 0}
+
+    def fake_overlap_hcore_matrices(basis, *, backend="auto", **kwargs):
+        calls["core"] += 1
+        if backend != "jax":
+            raise AssertionError("GPU integral backbone should reuse the integral module kernels.")
+        return jnp.eye(basis.nao), 2.0 * jnp.eye(basis.nao)
+
+    monkeypatch.setattr(inputs_mod, "overlap_hcore_matrices", fake_overlap_hcore_matrices)
+
+    inputs = build_rks_integral_inputs(
+        atom=_h2_spec(),
+        basis="sto-3g",
+        config=RKSConfig(jk_backend="direct"),
+        integral_backend="gpu",
+        grid_ao_backend="jax",
+        grids_level=0,
+        max_l=1,
+    )
+
+    assert inputs.integral_backend == "gpu"
+    assert inputs.direct_basis is inputs.basis
+    assert calls["core"] == 1
+
+
+def test_build_rks_integral_inputs_gpu_full_uses_gpu4pyscf_eri(monkeypatch):
+    import td_graddft.scf.inputs as inputs_mod
+
+    pytest.importorskip("pyscf")
+    fake_pair = jnp.arange(9, dtype=jnp.float64).reshape(3, 3)
+    calls = {"eri": 0}
+
+    def fake_gpu_eri(*, atom, basis, unit, charge, spin, cart, verbose, mol_kwargs):
+        del atom, basis, unit, charge, spin, cart, verbose, mol_kwargs
+        calls["eri"] += 1
+        return fake_pair
+
+    monkeypatch.setattr(inputs_mod, "_gpu4pyscf_eri_pair_matrix", fake_gpu_eri, raising=False)
+
+    inputs = build_rks_integral_inputs(
+        atom=_h2_spec(),
+        basis="sto-3g",
+        config=RKSConfig(jk_backend="full"),
+        integral_backend="gpu",
+        grid_ao_backend="jax",
+        grids_level=0,
+        max_l=1,
+    )
+
+    assert inputs.integral_backend == "gpu"
+    assert inputs.eri_pair_matrix is fake_pair
+    assert calls["eri"] == 1
 
 
 def test_restricted_chk_init_guess_uses_bound_pyscf_chkfile_api(monkeypatch):
@@ -451,7 +508,7 @@ def test_cached_libcint_host_integral_reuses_s4_eri_binding():
     assert out1 is out2
 
 
-def test_build_rks_integral_inputs_libcint_reuses_cached_grid_ao_bundle(monkeypatch):
+def test_build_rks_integral_inputs_cpu_reuses_cached_grid_ao_bundle(monkeypatch):
     import td_graddft.scf.inputs as inputs_mod
 
     pytest.importorskip("pyscf")
@@ -486,7 +543,7 @@ def test_build_rks_integral_inputs_libcint_reuses_cached_grid_ao_bundle(monkeypa
             atom=spec,
             basis="sto-3g",
             config=cfg,
-            integral_backend="libcint",
+            integral_backend="cpu",
             grid_ao_backend="jax",
             grids_level=0,
             max_l=1,
@@ -496,7 +553,7 @@ def test_build_rks_integral_inputs_libcint_reuses_cached_grid_ao_bundle(monkeypa
     assert counts == {"basis": 1, "grid": 1, "ao": 1}
 
 
-def test_build_rks_integral_inputs_libcint_grid_ao_cache_misses_on_geometry_change(monkeypatch):
+def test_build_rks_integral_inputs_cpu_grid_ao_cache_misses_on_geometry_change(monkeypatch):
     import td_graddft.scf.inputs as inputs_mod
 
     pytest.importorskip("pyscf")
@@ -534,7 +591,7 @@ def test_build_rks_integral_inputs_libcint_grid_ao_cache_misses_on_geometry_chan
             atom=spec,
             basis="sto-3g",
             config=cfg,
-            integral_backend="libcint",
+            integral_backend="cpu",
             grid_ao_backend="jax",
             grids_level=0,
             max_l=1,

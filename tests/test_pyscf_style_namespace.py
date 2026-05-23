@@ -4,7 +4,7 @@ import importlib
 def test_td_graddft_dir_lists_recommended_namespaces():
     import td_graddft
 
-    for name in ("gto", "scf", "dft", "tdscf", "neural_xc", "nn_rsh", "training"):
+    for name in ("gto", "scf", "dft", "tdscf", "neural_xc", "training"):
         assert name in td_graddft.__all__
         assert name in dir(td_graddft)
         assert getattr(td_graddft, name) is importlib.import_module(f"td_graddft.{name}")

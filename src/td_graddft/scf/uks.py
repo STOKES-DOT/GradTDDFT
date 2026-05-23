@@ -189,6 +189,58 @@ def _unrestricted_xc_energy_and_potential_on_grid(
     return exc, vxc_rho_a, vxc_rho_b, vxc_grad_a, vxc_grad_b
 
 
+def _spin_jk_matrices(
+    eri: Array,
+    density_a: Array,
+    density_b: Array,
+) -> tuple[Array, Array, Array, Array]:
+    density_tot = density_a + density_b
+    j_tot, _ = _build_jk(eri, density_tot)
+    _, k_a = _build_jk(eri, density_a)
+    _, k_b = _build_jk(eri, density_b)
+    return density_tot, j_tot, k_a, k_b
+
+
+def _unrestricted_vxc_matrices(
+    *,
+    ao: Array,
+    ao_deriv1: Array,
+    ao_laplacian: Array,
+    weights: Array,
+    vxc_rho_a: Array,
+    vxc_rho_b: Array,
+    vxc_grad_a: Array,
+    vxc_grad_b: Array,
+    xc_kind: str,
+) -> tuple[Array, Array]:
+    zeros_a = jnp.zeros_like(vxc_rho_a)
+    zeros_b = jnp.zeros_like(vxc_rho_b)
+    return (
+        _vxc_matrix_from_grid_potential(
+            ao=ao,
+            ao_deriv1=ao_deriv1,
+            ao_laplacian=ao_laplacian,
+            weights=weights,
+            vxc_rho=vxc_rho_a,
+            vxc_grad=vxc_grad_a,
+            vxc_tau=zeros_a,
+            vxc_lapl=zeros_a,
+            xc_kind=xc_kind,
+        ),
+        _vxc_matrix_from_grid_potential(
+            ao=ao,
+            ao_deriv1=ao_deriv1,
+            ao_laplacian=ao_laplacian,
+            weights=weights,
+            vxc_rho=vxc_rho_b,
+            vxc_grad=vxc_grad_b,
+            vxc_tau=zeros_b,
+            vxc_lapl=zeros_b,
+            xc_kind=xc_kind,
+        ),
+    )
+
+
 def _raw_fock_and_energy_for_state(
     *,
     density_a: Array,
@@ -199,57 +251,91 @@ def _raw_fock_and_energy_for_state(
     h: Array,
     eri: Array,
     enuc: Array,
-    alpha: Array,
+    alpha: Array | None,
     cfg: UKSConfig,
     xc_kind: str,
+    mo_coeff_a: Array | None = None,
+    mo_coeff_b: Array | None = None,
+    mo_occ_a: Array | None = None,
+    mo_occ_b: Array | None = None,
+    mo_energy_a: Array | None = None,
+    mo_energy_b: Array | None = None,
+    overlap: Array | None = None,
+    bound_xc: Any | None = None,
+    molecule_template: Any | None = None,
 ) -> tuple[Array, Array, Array, Array]:
-    density_tot = density_a + density_b
-    j_tot, _ = _build_jk(eri, density_tot)
-    _, k_a = _build_jk(eri, density_a)
-    _, k_b = _build_jk(eri, density_b)
-    xc_energy, vxc_rho_a, vxc_rho_b, vxc_grad_a, vxc_grad_b = _unrestricted_xc_energy_and_potential_on_grid(
-        ao=ao,
-        ao_deriv1=ao_deriv1,
-        weights=weights,
-        density_a=density_a,
-        density_b=density_b,
-        xc_spec=cfg.xc_spec,
-        density_floor=cfg.density_floor,
-        potential_clip=cfg.potential_clip,
-        xc_kind=xc_kind,
-    )
-    ao_laplacian = jnp.zeros_like(ao)
-    zeros = jnp.zeros_like(vxc_rho_a)
-    vxc_matrix_a = _vxc_matrix_from_grid_potential(
+    density_tot, j_tot, k_a, k_b = _spin_jk_matrices(eri, density_a, density_b)
+    extra_fock_a = extra_fock_b = jnp.zeros_like(h)
+    include_hf_energy = bound_xc is None
+    if bound_xc is None:
+        alpha_eff = jnp.asarray(alpha, dtype=h.dtype)
+        ao_laplacian = jnp.zeros_like(ao)
+        xc_energy, vxc_rho_a, vxc_rho_b, vxc_grad_a, vxc_grad_b = _unrestricted_xc_energy_and_potential_on_grid(
+            ao=ao,
+            ao_deriv1=ao_deriv1,
+            weights=weights,
+            density_a=density_a,
+            density_b=density_b,
+            xc_spec=cfg.xc_spec,
+            density_floor=cfg.density_floor,
+            potential_clip=cfg.potential_clip,
+            xc_kind=xc_kind,
+        )
+    else:
+        molecule_state = _molecule_like_state_for_bound_xc(
+            density_a=density_a,
+            density_b=density_b,
+            mo_coeff_a=mo_coeff_a,
+            mo_coeff_b=mo_coeff_b,
+            mo_occ_a=mo_occ_a,
+            mo_occ_b=mo_occ_b,
+            mo_energy_a=mo_energy_a,
+            mo_energy_b=mo_energy_b,
+            ao=ao,
+            ao_deriv1=ao_deriv1,
+            weights=weights,
+            h=h,
+            eri=eri,
+            overlap=overlap,
+            molecule_template=molecule_template,
+        )
+        (
+            vxc_rho_a,
+            vxc_rho_b,
+            vxc_grad_a,
+            vxc_grad_b,
+            xc_kind,
+            alpha_eff,
+            extra_fock_a,
+            extra_fock_b,
+        ) = bound_xc.unrestricted_scf_components(molecule_state)
+        ao_laplacian = getattr(molecule_state, "ao_laplacian", None)
+        if ao_laplacian is None:
+            ao_laplacian = jnp.zeros_like(ao)
+        xc_energy = jnp.asarray(bound_xc.energy_from_molecule(molecule_state), dtype=h.dtype)
+    vxc_matrix_a, vxc_matrix_b = _unrestricted_vxc_matrices(
         ao=ao,
         ao_deriv1=ao_deriv1,
         ao_laplacian=ao_laplacian,
         weights=weights,
-        vxc_rho=vxc_rho_a,
-        vxc_grad=vxc_grad_a,
-        vxc_tau=zeros,
-        vxc_lapl=zeros,
+        vxc_rho_a=vxc_rho_a,
+        vxc_rho_b=vxc_rho_b,
+        vxc_grad_a=vxc_grad_a,
+        vxc_grad_b=vxc_grad_b,
         xc_kind=xc_kind,
     )
-    vxc_matrix_b = _vxc_matrix_from_grid_potential(
-        ao=ao,
-        ao_deriv1=ao_deriv1,
-        ao_laplacian=ao_laplacian,
-        weights=weights,
-        vxc_rho=vxc_rho_b,
-        vxc_grad=vxc_grad_b,
-        vxc_tau=zeros,
-        vxc_lapl=zeros,
-        xc_kind=xc_kind,
-    )
-    fock_a = h + j_tot - alpha * k_a + vxc_matrix_a
-    fock_b = h + j_tot - alpha * k_b + vxc_matrix_b
+    fock_a = h + j_tot - alpha_eff * k_a + vxc_matrix_a + extra_fock_a
+    fock_b = h + j_tot - alpha_eff * k_b + vxc_matrix_b + extra_fock_b
 
     e_one = jnp.einsum("ij,ij->", density_tot, h, precision=Precision.HIGHEST)
     e_coul = 0.5 * jnp.einsum("ij,ij->", density_tot, j_tot, precision=Precision.HIGHEST)
-    e_x_hf = -0.5 * alpha * (
-        jnp.einsum("ij,ij->", density_a, k_a, precision=Precision.HIGHEST)
-        + jnp.einsum("ij,ij->", density_b, k_b, precision=Precision.HIGHEST)
+    e_x_hf = jnp.where(
+        include_hf_energy,
+        -0.5 * alpha_eff * (
+            jnp.einsum("ij,ij->", density_a, k_a, precision=Precision.HIGHEST)
+            + jnp.einsum("ij,ij->", density_b, k_b, precision=Precision.HIGHEST)
+        ),
+        jnp.asarray(0.0, dtype=h.dtype),
     )
     total = e_one + e_coul + e_x_hf + xc_energy + enuc
     return total, xc_energy, fock_a, fock_b
@@ -290,93 +376,6 @@ def _molecule_like_state_for_bound_xc(
         hfx_omega_values=getattr(molecule_template, "hfx_omega_values", None),
         hfx_nu=getattr(molecule_template, "hfx_nu", None),
     )
-
-
-def _raw_fock_and_energy_for_bound_xc_state(
-    *,
-    density_a: Array,
-    density_b: Array,
-    mo_coeff_a: Array,
-    mo_coeff_b: Array,
-    mo_occ_a: Array,
-    mo_occ_b: Array,
-    mo_energy_a: Array,
-    mo_energy_b: Array,
-    ao: Array,
-    ao_deriv1: Array,
-    weights: Array,
-    h: Array,
-    eri: Array,
-    enuc: Array,
-    overlap: Array,
-    bound_xc: Any,
-    molecule_template: Any | None,
-) -> tuple[Array, Array, Array, Array]:
-    molecule_state = _molecule_like_state_for_bound_xc(
-        density_a=density_a,
-        density_b=density_b,
-        mo_coeff_a=mo_coeff_a,
-        mo_coeff_b=mo_coeff_b,
-        mo_occ_a=mo_occ_a,
-        mo_occ_b=mo_occ_b,
-        mo_energy_a=mo_energy_a,
-        mo_energy_b=mo_energy_b,
-        ao=ao,
-        ao_deriv1=ao_deriv1,
-        weights=weights,
-        h=h,
-        eri=eri,
-        overlap=overlap,
-        molecule_template=molecule_template,
-    )
-    density_tot = density_a + density_b
-    j_tot, _ = _build_jk(eri, density_tot)
-    _, k_a = _build_jk(eri, density_a)
-    _, k_b = _build_jk(eri, density_b)
-    (
-        vxc_rho_a,
-        vxc_rho_b,
-        vxc_grad_a,
-        vxc_grad_b,
-        xc_kind,
-        alpha,
-        extra_fock_a,
-        extra_fock_b,
-    ) = bound_xc.unrestricted_scf_components(molecule_state)
-    ao_laplacian = getattr(molecule_state, "ao_laplacian", None)
-    if ao_laplacian is None:
-        ao_laplacian = jnp.zeros_like(ao)
-    zeros_a = jnp.zeros_like(vxc_rho_a)
-    zeros_b = jnp.zeros_like(vxc_rho_b)
-    vxc_matrix_a = _vxc_matrix_from_grid_potential(
-        ao=ao,
-        ao_deriv1=ao_deriv1,
-        ao_laplacian=ao_laplacian,
-        weights=weights,
-        vxc_rho=vxc_rho_a,
-        vxc_grad=vxc_grad_a,
-        vxc_tau=zeros_a,
-        vxc_lapl=zeros_a,
-        xc_kind=xc_kind,
-    )
-    vxc_matrix_b = _vxc_matrix_from_grid_potential(
-        ao=ao,
-        ao_deriv1=ao_deriv1,
-        ao_laplacian=ao_laplacian,
-        weights=weights,
-        vxc_rho=vxc_rho_b,
-        vxc_grad=vxc_grad_b,
-        vxc_tau=zeros_b,
-        vxc_lapl=zeros_b,
-        xc_kind=xc_kind,
-    )
-    fock_a = h + j_tot - alpha * k_a + vxc_matrix_a + extra_fock_a
-    fock_b = h + j_tot - alpha * k_b + vxc_matrix_b + extra_fock_b
-    xc_energy = jnp.asarray(bound_xc.energy_from_molecule(molecule_state), dtype=h.dtype)
-    e_one = jnp.einsum("ij,ij->", density_tot, h, precision=Precision.HIGHEST)
-    e_coul = 0.5 * jnp.einsum("ij,ij->", density_tot, j_tot, precision=Precision.HIGHEST)
-    total = e_one + e_coul + xc_energy + enuc
-    return total, xc_energy, fock_a, fock_b
 
 
 def _density_rms(density_a_new: Array, density_a_old: Array, density_b_new: Array, density_b_old: Array) -> Array:
@@ -490,21 +489,7 @@ def run_uks_from_integrals(
         mo_energy_a_arg: Array,
         mo_energy_b_arg: Array,
     ) -> tuple[Array, Array, Array, Array]:
-        if bound_xc is None:
-            return _raw_fock_and_energy_for_state(
-                density_a=density_a_arg,
-                density_b=density_b_arg,
-                ao=ao,
-                ao_deriv1=ao_deriv1,
-                weights=weights,
-                h=h,
-                eri=eri,
-                enuc=enuc,
-                alpha=alpha,
-                cfg=cfg,
-                xc_kind=xc_kind,
-            )
-        return _raw_fock_and_energy_for_bound_xc_state(
+        return _raw_fock_and_energy_for_state(
             density_a=density_a_arg,
             density_b=density_b_arg,
             mo_coeff_a=mo_coeff_a_arg,
@@ -519,6 +504,9 @@ def run_uks_from_integrals(
             h=h,
             eri=eri,
             enuc=enuc,
+            alpha=alpha,
+            cfg=cfg,
+            xc_kind=xc_kind,
             overlap=s,
             bound_xc=bound_xc,
             molecule_template=molecule_template,

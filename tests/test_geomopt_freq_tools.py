@@ -145,7 +145,7 @@ def test_rks_libcint_ground_surface_from_molecule_spec_is_differentiable():
         xc_spec="hf",
         coordinate_unit="bohr",
         max_l=1,
-        integral_backend="libcint",
+        integral_backend="cpu",
         grid_ao_backend="jax",
         rks_config=RKSConfig(
             xc_spec="hf",

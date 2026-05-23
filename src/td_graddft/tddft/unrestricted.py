@@ -8,7 +8,6 @@ import jax.numpy as jnp
 from jax.lax import Precision
 from jaxtyping import Array
 
-from ..xc import AdiabaticDensityFunctional
 from ._utils import (
     _casida_metric_factor,
     _resolve_xc_functional,
@@ -175,7 +174,7 @@ def _normalize_spin_kernel_values(raw_kernel: Any, dtype: Any) -> tuple[Array, A
 
 def _spin_resolved_kernel_on_grid(
     molecule: Any,
-    resolved_xc: AdiabaticDensityFunctional,
+    resolved_xc: Any,
     density_alpha: Array,
     density_beta: Array,
     dtype: Any,
@@ -198,7 +197,7 @@ def _spin_resolved_kernel_on_grid(
 
 def _build_unrestricted_response_blocks(
     molecule: Any,
-    resolved_xc: AdiabaticDensityFunctional | None,
+    resolved_xc: Any | None,
     *,
     occupation_tolerance: float,
 ) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array, Array]:
@@ -385,7 +384,7 @@ def _build_unrestricted_response_blocks(
 
 def build_unrestricted_response_matrices(
     molecule: Any,
-    xc_functional: AdiabaticDensityFunctional | None = None,
+    xc_functional: Any | None = None,
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
@@ -429,7 +428,7 @@ def build_unrestricted_response_matrices(
 
 def build_unrestricted_tda_matrices(
     molecule: Any,
-    xc_functional: AdiabaticDensityFunctional | None = None,
+    xc_functional: Any | None = None,
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
@@ -544,7 +543,7 @@ class UnrestrictedTDA:
     """PySCF-like unrestricted TDA driver."""
 
     molecule: Any
-    xc_functional: AdiabaticDensityFunctional | None = None
+    xc_functional: Any | None = None
     xc_params: Any | None = None
     occupation_tolerance: float = 1e-8
     excitation_threshold: float = 1e-7
@@ -580,7 +579,7 @@ class UnrestrictedCasidaTDDFT:
     """PySCF-like unrestricted Casida TDDFT driver."""
 
     molecule: Any
-    xc_functional: AdiabaticDensityFunctional | None = None
+    xc_functional: Any | None = None
     xc_params: Any | None = None
     occupation_tolerance: float = 1e-8
     excitation_threshold: float = 1e-7

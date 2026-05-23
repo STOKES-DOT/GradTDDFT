@@ -1,14 +1,14 @@
 # TD-GradDFT/GradTDDFT
 
 TD-GradDFT/GradTDDFT is a JAX research codebase for differentiable ground-state DFT,
-TDDFT/TDA response calculations, and Neural XC/RSH training. The Python package
+TDDFT/TDA response calculations, and Neural XC training. The Python package
 name is `td-graddft`; the import namespace is `td_graddft`.
 
 This repository is an active research prototype. APIs are kept practical for
 experiments, but the most stable entry points are:
 
 ```python
-from td_graddft import gto, scf, dft, tdscf, neural_xc, nn_rsh, training, workflows
+from td_graddft import gto, scf, dft, tdscf, neural_xc, training, workflows
 ```
 
 ## What The Project Does
@@ -19,7 +19,6 @@ from td_graddft import gto, scf, dft, tdscf, neural_xc, nn_rsh, training, workfl
 - Restricted and unrestricted TDA and Casida TDDFT response solvers.
 - Neural XC functionals with semilocal, HF, and optional PT2 local channels.
 - Strict and approximate response-kernel paths for HF/PT2 Neural XC channels.
-- Neural range-separated hybrid functionals with trainable RSH parameters.
 - GPU4PySCF-backed reference and training workflows for GPU SCF work.
 - Research scripts for H2 dissociation, S1 training, QH9-style benchmarks, and
   closed-shell excited-state training.
@@ -57,7 +56,6 @@ src/td_graddft/
   tddft/               Response matrices, TDA/Casida solvers, response kernels
   xc_backend/          jax_xc adapter, XC parser, RSH preset metadata
   neural_xc/           Neural XC construction, channels, response logic
-  nn_rsh/              Neural range-separated hybrid models(under coding!)
   training/            Ground-state and excited-state training utilities
   workflows/           Config-driven workflow helpers
   data/                Basis data, grids, integral helpers, references
@@ -402,7 +400,7 @@ backend availability error.
 ## Development Notes
 
 - Prefer public namespaces in scripts: `gto`, `scf`, `dft`, `tdscf`,
-  `neural_xc`, `nn_rsh`, `training`, and `workflows`.
+  `neural_xc`, `training`, and `workflows`.
 - Keep XC component parsing centralized in `td_graddft.xc_backend.jax_libxc`.
 - Keep installed `jax_xc` discovery centralized in
   `td_graddft.xc_backend.jax_xc_adapter`.

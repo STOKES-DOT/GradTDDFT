@@ -51,7 +51,7 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use GPU4PySCF density fitting. Default is exact/non-DF dft.RKS(...).to_gpu().",
     )
-    p.add_argument("--integral-backend", choices=("libcint",), default="libcint")
+    p.add_argument("--integral-backend", choices=("cpu", "libcint"), default="cpu")
     p.add_argument(
         "--libcint-geometry-grad-policy",
         choices=("error", "zero"),

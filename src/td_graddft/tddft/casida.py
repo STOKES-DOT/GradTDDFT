@@ -10,7 +10,6 @@ import jax
 import jax.numpy as jnp
 from jax import core as jax_core
 
-from ..xc import AdiabaticDensityFunctional
 from .eigensolvers import davidson_lowest_symmetric
 from ._utils import (
     _casida_metric_factor,
@@ -268,7 +267,7 @@ class RestrictedCasidaTDDFT:
     """PySCF-like restricted TDDFT driver for GradDFT-style molecules."""
 
     molecule: Any
-    xc_functional: AdiabaticDensityFunctional | None = None
+    xc_functional: Any | None = None
     xc_params: Any | None = None
     occupation_tolerance: float = 1e-8
     excitation_threshold: float = 1e-7

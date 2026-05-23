@@ -44,23 +44,6 @@ def _water_mol():
     )
 
 
-def test_rks_rejects_removed_python_iteration_backend():
-    cfg = RKSConfig(xc_spec="hf", iteration_backend="python")  # type: ignore[arg-type]
-
-    with pytest.raises(ValueError, match="supports \\{'runtime', 'lax'\\}"):
-        run_rks_from_integrals(
-            overlap=np.eye(1),
-            hcore=np.zeros((1, 1)),
-            eri=np.zeros((1, 1, 1, 1)),
-            nelectron=2,
-            nuclear_repulsion=0.0,
-            ao=np.ones((1, 1)),
-            ao_deriv1=np.zeros((4, 1, 1)),
-            grid_weights=np.ones(1),
-            config=cfg,
-        )
-
-
 def test_df_jk_matches_dense_eri_contractions_for_water():
     _pyscf_or_skip()
     mol = _water_mol()
@@ -441,7 +424,7 @@ def test_rks_direct_backend_accepts_basis_without_prebuilt_eri_for_water():
     assert np.isclose(out.total_energy, mf.e_tot, atol=2e-4, rtol=2e-6)
 
 
-def test_rks_lax_iteration_backend_matches_pyscf_for_water():
+def test_rks_direct_backend_matches_pyscf_for_water():
     _pyscf_or_skip()
     from pyscf import dft
 
@@ -478,7 +461,6 @@ def test_rks_lax_iteration_backend_matches_pyscf_for_water():
         conv_tol_density=1e-6,
         damping=0.15,
         potential_clip=20.0,
-        iteration_backend="lax",
         jk_backend="direct",
         direct_scf_tol=0.0,
     )
@@ -689,7 +671,7 @@ def test_strict_jax_libcint_df_reference_for_water_skips_full_eri(monkeypatch):
             df_tol=1e-10,
         ),
         grid_ao_backend="jax",
-        integral_backend="libcint",
+        integral_backend="cpu",
     )
 
     assert ref.df_factors is not None
@@ -735,7 +717,7 @@ def test_libcint_df_reference_preserves_df_backend_when_xc_overrides_config(monk
             df_tol=1e-10,
         ),
         grid_ao_backend="jax",
-        integral_backend="libcint",
+        integral_backend="cpu",
     )
 
     assert ref.df_factors is not None
@@ -765,7 +747,7 @@ def test_df_reference_lazy_slices_support_tda():
             df_tol=1e-10,
         ),
         grid_ao_backend="jax",
-        integral_backend="libcint",
+        integral_backend="cpu",
     )
 
     assert ref.df_factors is not None

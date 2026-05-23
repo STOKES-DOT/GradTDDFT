@@ -19,7 +19,6 @@ from td_graddft.scf.rhf import (
     nuclear_repulsion_energy,
 )
 from td_graddft.tddft import RestrictedCasidaTDDFT
-from td_graddft.xc import AdiabaticDensityFunctional
 
 from .objectives import EnergySurface
 from .optimization import (
@@ -32,15 +31,15 @@ ANGSTROM_TO_BOHR = 1.8897261254578281
 BOHR_TO_ANGSTROM = 1.0 / ANGSTROM_TO_BOHR
 
 
-def _zero_energy_density(rho: Array) -> Array:
-    return jnp.zeros_like(rho)
+@dataclass(frozen=True)
+class _HFOnlyResponseFunctional:
+    exact_exchange_fraction: float = 1.0
+
+    def local_kernel(self, density: Array) -> Array:
+        return jnp.zeros_like(density)
 
 
-_HF_ONLY_RESPONSE_FUNCTIONAL = AdiabaticDensityFunctional(
-    name="hf_only_response",
-    energy_density_fn=_zero_energy_density,
-    exact_exchange_fraction=1.0,
-)
+_HF_ONLY_RESPONSE_FUNCTIONAL = _HFOnlyResponseFunctional()
 
 
 @dataclass(frozen=True)

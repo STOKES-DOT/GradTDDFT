@@ -196,6 +196,8 @@ class AssemblyMixin:
             return params
         n_semilocal = int(self.resolved_non_hf_module().n_channels)
         expected = n_semilocal + 1 + int(bool(self.include_pt2_channel))
+        if self.include_pt2_channel and len(prior) == n_semilocal + 1:
+            prior = tuple(prior[:n_semilocal]) + (0.0,) + tuple(prior[n_semilocal:])
         if len(prior) != expected or "params" not in params:
             return params
         scale = float(getattr(self.model, "sigmoid_scale_factor", 0.0))

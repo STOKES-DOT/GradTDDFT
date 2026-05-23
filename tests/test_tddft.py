@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import jax
@@ -9,7 +10,26 @@ import td_graddft.tddft.casida as casida_module
 import td_graddft.tddft.response as response_module
 from td_graddft.tddft import RestrictedCasidaTDDFT, build_restricted_response_matrices
 from td_graddft.tddft.response import build_restricted_tda_operator
-from td_graddft.xc import AdiabaticDensityFunctional, lda_from_callable
+
+
+@dataclass(frozen=True)
+class _ToyAdiabaticFunctional:
+    name: str
+    energy_density_fn: Callable[[jnp.ndarray], jnp.ndarray]
+    exact_exchange_fraction: float = 0.0
+
+    def local_kernel(self, density):
+        density = jnp.asarray(density)
+        flat = density.reshape(-1)
+
+        def local_energy(value):
+            return value * self.energy_density_fn(value)
+
+        return jax.vmap(jax.grad(jax.grad(local_energy)))(flat).reshape(density.shape)
+
+
+def _lda_from_callable(name, energy_density_fn):
+    return _ToyAdiabaticFunctional(name=name, energy_density_fn=energy_density_fn)
 
 
 @dataclass
@@ -175,7 +195,7 @@ def test_restricted_response_operator_precomputes_effective_eri_actions():
         rdm1=jnp.stack([rdm1_single, rdm1_single], axis=0),
     )
     molecule.nocc = 2
-    xc = AdiabaticDensityFunctional(
+    xc = _ToyAdiabaticFunctional(
         name="hybrid_only",
         energy_density_fn=lambda rho: jnp.zeros_like(rho),
         exact_exchange_fraction=0.25,
@@ -238,7 +258,7 @@ def test_packed_eri_pair_matrix_response_matches_full_tensor_path():
     packed_molecule.eri_pair_matrix = pair_values
     base_molecule.nocc = 2
     packed_molecule.nocc = 2
-    xc = AdiabaticDensityFunctional(
+    xc = _ToyAdiabaticFunctional(
         name="hybrid_only",
         energy_density_fn=lambda rho: jnp.zeros_like(rho),
         exact_exchange_fraction=0.25,
@@ -272,7 +292,7 @@ def test_matrix_free_tdhf_matches_materialized_matrix_for_multi_virtual_hybrid()
         rdm1=jnp.stack([rdm1_single, rdm1_single], axis=0),
     )
     molecule.nocc = 2
-    xc = AdiabaticDensityFunctional(
+    xc = _ToyAdiabaticFunctional(
         name="hybrid_only",
         energy_density_fn=lambda rho: jnp.zeros_like(rho),
         exact_exchange_fraction=0.25,
@@ -313,7 +333,7 @@ def test_matrix_free_tdhf_matches_materialized_matrix_for_multi_virtual_hybrid()
 
 def test_response_matrices_match_toy_analytic_values():
     molecule = _make_toy_molecule()
-    xc = lda_from_callable("toy", lambda rho: 0.5 * rho)
+    xc = _lda_from_callable("toy", lambda rho: 0.5 * rho)
 
     matrices = build_restricted_response_matrices(molecule, xc)
 
@@ -325,7 +345,7 @@ def test_response_matrices_match_toy_analytic_values():
 
 def test_restricted_casida_tddft_returns_expected_toy_excitation():
     molecule = _make_toy_molecule()
-    xc = lda_from_callable("toy", lambda rho: 0.5 * rho)
+    xc = _lda_from_callable("toy", lambda rho: 0.5 * rho)
     solver = RestrictedCasidaTDDFT(molecule, xc)
 
     result = solver.kernel(nstates=1)
@@ -339,7 +359,7 @@ def test_restricted_casida_tddft_returns_expected_toy_excitation():
 
 def test_matrix_free_tda_vind_matches_materialized_matrix_action():
     molecule = _make_toy_molecule()
-    xc = lda_from_callable("toy", lambda rho: 0.5 * rho)
+    xc = _lda_from_callable("toy", lambda rho: 0.5 * rho)
     solver = RestrictedCasidaTDDFT(molecule, xc)
     matrices = solver.build_matrices()
     vind_dense, flat_a = solver.gen_tda_vind(materialize_matrix=True)
@@ -414,7 +434,7 @@ def test_large_toy_casida_davidson_uses_operator_path():
 def test_jitted_tda_does_not_cache_traced_matrix_before_jitted_kernel():
     molecule = _make_toy_molecule()
     molecule.nocc = 1
-    xc = lda_from_callable("toy", lambda rho: 0.5 * rho)
+    xc = _lda_from_callable("toy", lambda rho: 0.5 * rho)
     solver = RestrictedCasidaTDDFT(molecule, xc, eigensolver="dense")
 
     with jax.checking_leaks():
@@ -549,7 +569,7 @@ def test_nonlocal_response_action_contributes_to_dense_and_operator_paths():
 
 def test_small_dense_tda_skips_operator_builder(monkeypatch):
     molecule = _make_toy_molecule()
-    xc = lda_from_callable("toy", lambda rho: 0.5 * rho)
+    xc = _lda_from_callable("toy", lambda rho: 0.5 * rho)
     solver = RestrictedCasidaTDDFT(molecule, xc, eigensolver="dense")
 
     def _unexpected(*args, **kwargs):
@@ -562,7 +582,7 @@ def test_small_dense_tda_skips_operator_builder(monkeypatch):
 
 def test_small_dense_casida_skips_a_minus_b_builder(monkeypatch):
     molecule = _make_toy_molecule()
-    xc = lda_from_callable("toy", lambda rho: 0.5 * rho)
+    xc = _lda_from_callable("toy", lambda rho: 0.5 * rho)
     solver = RestrictedCasidaTDDFT(molecule, xc, eigensolver="dense")
 
     def _unexpected(*args, **kwargs):
@@ -579,7 +599,7 @@ def test_hybrid_exchange_contributes_to_restricted_response_matrices():
     rep_tensor = rep_tensor.at[0, 1, 0, 1].set(0.6)
     rep_tensor = rep_tensor.at[0, 0, 1, 1].set(0.5)
     molecule = _make_toy_molecule(rep_tensor=rep_tensor)
-    xc = AdiabaticDensityFunctional(
+    xc = _ToyAdiabaticFunctional(
         name="hybrid_only",
         energy_density_fn=lambda rho: jnp.zeros_like(rho),
         exact_exchange_fraction=0.25,
@@ -649,7 +669,7 @@ def test_scalar_grid_hf_fraction_is_broadcast_in_response():
     scalar_local = build_restricted_response_matrices(molecule, _ScalarLocalHybridXC())
     hybrid_ref = build_restricted_response_matrices(
         molecule,
-        AdiabaticDensityFunctional(
+        _ToyAdiabaticFunctional(
             name="hybrid_ref",
             energy_density_fn=lambda rho: jnp.zeros_like(rho),
             exact_exchange_fraction=0.25,

@@ -99,7 +99,6 @@ def main() -> None:
         conv_tol_density=1e-8,
         damping=float(args.scf_damping),
         potential_clip=20.0,
-        iteration_backend="lax",
     )
     jax_out = run_rks_from_integrals(
         overlap=jnp.asarray(overlap),

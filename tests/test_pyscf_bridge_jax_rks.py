@@ -121,7 +121,7 @@ def test_build_rks_integral_inputs_accepts_strict_jax_default_grid_level():
         cart=True,
         grids_level=0,
         max_l=1,
-        integral_backend="libcint",
+        integral_backend="cpu",
         config=RKSConfig(max_cycle=1),
     )
     level3_inputs = build_rks_integral_inputs(
@@ -133,7 +133,7 @@ def test_build_rks_integral_inputs_accepts_strict_jax_default_grid_level():
         cart=True,
         grids_level=3,
         max_l=1,
-        integral_backend="libcint",
+        integral_backend="cpu",
         config=RKSConfig(max_cycle=1),
     )
 
@@ -451,7 +451,7 @@ def test_restricted_molecule_from_spec_with_jax_rks_libcint_matches_jax():
         max_l=1,
         rks_config=cfg,
         grid_ao_backend="jax",
-        integral_backend="libcint",
+        integral_backend="cpu",
     )
 
     assert np.isclose(float(ref_jax.mf_energy), float(ref_libcint.mf_energy), atol=1e-6, rtol=0.0)
@@ -500,7 +500,7 @@ def test_restricted_molecule_from_spec_with_jax_rks_libcint_full_uses_packed_eri
             potential_clip=20.0,
         ),
         grid_ao_backend="jax",
-        integral_backend="libcint",
+        integral_backend="cpu",
     )
 
     assert "s4" in seen_aosym
@@ -522,7 +522,7 @@ def test_restricted_molecule_from_spec_with_jax_rks_libcint_skips_precompile(mon
 
     monkeypatch.setattr("td_graddft.scf.builders.precompile_eri_kernels", fake_precompile)
 
-    with pytest.warns(RuntimeWarning, match="ignored when integral_backend='libcint'"):
+    with pytest.warns(RuntimeWarning, match="ignored when integral_backend='cpu'"):
         _ = restricted_molecule_from_spec_with_jax_rks(
             atom="""
             H 0.0 0.0 -0.35
@@ -546,7 +546,7 @@ def test_restricted_molecule_from_spec_with_jax_rks_libcint_skips_precompile(mon
                 potential_clip=20.0,
             ),
             grid_ao_backend="jax",
-            integral_backend="libcint",
+            integral_backend="cpu",
             precompile_eri=True,
         )
 
@@ -579,7 +579,7 @@ def test_restricted_molecule_from_spec_with_jax_rks_libcint_zero_policy_runs():
             potential_clip=20.0,
         ),
         grid_ao_backend="jax",
-        integral_backend="libcint",
+        integral_backend="cpu",
         libcint_geometry_grad_policy="zero",
     )
     assert np.isfinite(float(ref.mf_energy))
@@ -610,6 +610,6 @@ def test_restricted_molecule_from_spec_with_jax_rks_invalid_libcint_policy_raise
                 potential_clip=20.0,
             ),
             grid_ao_backend="jax",
-            integral_backend="libcint",
+            integral_backend="cpu",
             libcint_geometry_grad_policy="invalid_policy",  # type: ignore[arg-type]
         )

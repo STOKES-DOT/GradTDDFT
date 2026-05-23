@@ -39,14 +39,14 @@ def test_reference_legacy_and_pyscf_adapter_are_not_runtime_modules():
 
 def test_runtime_public_api_does_not_expose_pyscf_bridge_symbols():
     import td_graddft
-    from td_graddft import dft, nn_rsh, upstreams
+    from td_graddft import dft, upstreams
 
     forbidden = {
         "PySCFRSHSpec",
         "make_pyscf_rsh_spec",
         "ground_state_from_pyscf_mean_field",
     }
-    for module in (td_graddft, dft, nn_rsh, upstreams):
+    for module in (td_graddft, dft, upstreams):
         names = set(getattr(module, "__all__", ())) | set(vars(module))
         assert forbidden.isdisjoint(names)
 
@@ -56,7 +56,6 @@ def test_pyscf_runtime_imports_are_limited_to_integral_modules():
     allowed = {
         Path("src/td_graddft/data/reference.py"),
         Path("src/td_graddft/df/jk.py"),
-        Path("src/td_graddft/scf/gpu4pyscf.py"),
         Path("src/td_graddft/scf/init_guess.py"),
     }
     allowed_prefixes = (

@@ -61,7 +61,6 @@ class StrictJaxFullFlowRow:
     integral_backend: str
     jk_backend: str
     direct_scf_tol: float
-    direct_scf_incremental: bool
     nstates: int
     nao: int
     nocc: int
@@ -189,10 +188,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--grids-level", type=int, default=0)
     parser.add_argument("--max-l", type=int, default=3)
     parser.add_argument("--platform", choices=("cpu", "gpu"), default="cpu")
-    parser.add_argument("--integral-backend", choices=("jax", "libcint"), default="jax")
+    parser.add_argument("--integral-backend", choices=("jax", "cpu", "gpu", "libcint"), default="jax")
     parser.add_argument("--jk-backend", choices=("direct", "full", "df"), default="direct")
     parser.add_argument("--direct-scf-tol", type=float, default=1e-12)
-    parser.add_argument("--disable-direct-incremental", action="store_true")
     parser.add_argument("--scf-max-cycle", type=int, default=80)
     parser.add_argument("--conv-tol", type=float, default=1e-9)
     parser.add_argument("--conv-tol-density", type=float, default=1e-7)
@@ -286,7 +284,6 @@ def _build_strict_jax_reference(args: argparse.Namespace, *, device: Any):
         potential_clip=20.0,
         jk_backend=str(args.jk_backend),
         direct_scf_tol=float(args.direct_scf_tol),
-        direct_scf_incremental=not bool(args.disable_direct_incremental),
     )
     with jax.default_device(device):
         return restricted_molecule_from_spec_with_jax_rks(
@@ -493,7 +490,6 @@ def _make_row(
         integral_backend=str(args.integral_backend),
         jk_backend=str(args.jk_backend),
         direct_scf_tol=float(args.direct_scf_tol),
-        direct_scf_incremental=not bool(args.disable_direct_incremental),
         nstates=int(strict_result["nstates"]),
         nao=int(strict_result["nao"]),
         nocc=int(strict_result["nocc"]),

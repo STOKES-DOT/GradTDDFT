@@ -95,7 +95,7 @@ def build_libcint_mol(
     try:
         from pyscf import gto
     except ModuleNotFoundError as exc:
-        raise ImportError("PySCF/libcint is required when integral_backend='libcint'.") from exc
+        raise ImportError("PySCF/libcint is required when integral_backend='cpu'.") from exc
 
     cache_key = _libcint_mol_cache_key(
         atom=atom,

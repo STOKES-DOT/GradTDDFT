@@ -1,36 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any, Callable, Sequence
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import optax
 from flax.training.train_state import TrainState
 from jaxtyping import Array, PRNGKeyArray
 
-from td_graddft.scf.gpu4pyscf import (
-    GPU4PYSCF_RKS_RUNTIME_BACKEND,
-    molecule_from_gpu4pyscf_rks_forward_result,
-    run_gpu4pyscf_rks_forward,
-)
-
 from .config import GroundStateDatum, GroundStateTrainingConfig
 from .targets import density_on_grid, ground_state_mse_loss
-
-
-RuntimeForwardStateProvider = Callable[[Any, Any, Any], Any]
-
-
-def _gpu4pyscf_neural_payload_can_jit(functional: Any) -> bool:
-    """Avoid compiling generated WPBEH expressions inside GPU4PySCF callbacks."""
-    local_terms = getattr(functional, "local_term_specs", ())
-    for term in local_terms or ():
-        if str(getattr(term, "name", "")).lower() == "gga_x_wpbeh":
-            return False
-    local_xc_spec = str(getattr(functional, "local_xc_spec", "")).lower()
-    return "wpbeh" not in local_xc_spec and "lc_wpbe" not in local_xc_spec
 
 
 def _tree_l2_norm(tree: Any, *, sanitize: bool = False) -> Array:
@@ -80,189 +59,6 @@ def _sanitize_gradients(tree: Any) -> tuple[Any, Array]:
     return cleaned_tree, fraction
 
 
-def _runtime_forward_implicit_config(
-    training_config: GroundStateTrainingConfig | None,
-) -> GroundStateTrainingConfig:
-    cfg = GroundStateTrainingConfig() if training_config is None else training_config
-    return replace(
-        cfg,
-        mode="self_consistent",
-        scf_gradient_mode="impl",
-        scf_implicit_forward_mode="input_state",
-    )
-
-
-def _resolve_runtime_forward_setup(
-    training_config: GroundStateTrainingConfig | None,
-    runtime_forward_state_provider: RuntimeForwardStateProvider | None,
-) -> tuple[GroundStateTrainingConfig | None, RuntimeForwardStateProvider | None]:
-    if runtime_forward_state_provider is not None:
-        return training_config, runtime_forward_state_provider
-
-    cfg = GroundStateTrainingConfig() if training_config is None else training_config
-    if cfg.mode == "self_consistent" and cfg.scf_gradient_mode == "impl":
-        return (
-            _runtime_forward_implicit_config(cfg),
-            make_self_consistent_runtime_forward_provider(cfg),
-        )
-    return training_config, None
-
-
-def _loss_runtime_forward_state_provider(
-    loss_fn: Callable[..., tuple[Array, dict[str, Array]]] | None,
-    training_config: GroundStateTrainingConfig | None,
-) -> RuntimeForwardStateProvider | None:
-    if loss_fn is None:
-        return None
-    factory = getattr(loss_fn, "runtime_forward_state_provider", None)
-    if not callable(factory):
-        return None
-    provider = factory(training_config)
-    if provider is None:
-        return None
-    if not callable(provider):
-        raise TypeError("loss_fn.runtime_forward_state_provider(...) must return a callable or None.")
-    return provider
-
-
-def _compose_runtime_forward_state_providers(
-    first: RuntimeForwardStateProvider | None,
-    second: RuntimeForwardStateProvider | None,
-) -> RuntimeForwardStateProvider | None:
-    if first is None:
-        return second
-    if second is None:
-        return first
-
-    def provider(params: Any, functional: Any, molecule: Any):
-        return second(params, functional, first(params, functional, molecule))
-
-    return provider
-
-
-def _restricted_runtime_initial_density_matrix(molecule: Any) -> np.ndarray | None:
-    rdm1 = getattr(molecule, "rdm1", None)
-    if rdm1 is None:
-        return None
-    density = np.asarray(jax.device_get(rdm1), dtype=float)
-    if density.ndim == 3 and int(density.shape[0]) == 2:
-        density = density[0] + density[1]
-    if density.ndim != 2:
-        return None
-    return np.asarray(density, dtype=float).copy()
-
-
-def make_self_consistent_runtime_forward_provider(
-    training_config: GroundStateTrainingConfig | None = None,
-) -> RuntimeForwardStateProvider:
-    """Create a Python-controlled SCF forward provider for implicit training.
-
-    The returned provider runs the self-consistent primal state before
-    ``jax.value_and_grad``.  Pair it with
-    ``make_runtime_forward_implicit_loss_and_grad`` so the backward pass uses
-    the implicit fixed-point VJP rather than differentiating through
-    SCF iterations.
-    """
-
-    from .targets import _make_differentiable_scf
-
-    cfg = replace(
-        GroundStateTrainingConfig() if training_config is None else training_config,
-        mode="self_consistent",
-        scf_gradient_mode="impl",
-        scf_implicit_forward_mode="input_state",
-    )
-    scf_solver = _make_differentiable_scf(cfg)
-    cached_density_by_molecule_id: dict[int, np.ndarray] = {}
-
-    def provider(params: Any, functional: Any, molecule: Any):
-        backend = str(getattr(cfg, "scf_runtime_forward_backend", "auto")).lower()
-        if backend not in {"auto", "jax", GPU4PYSCF_RKS_RUNTIME_BACKEND}:
-            raise ValueError(
-                "scf_runtime_forward_backend must be one of "
-                "{'auto', 'jax', 'gpu4pyscf_rks'}."
-            )
-        molecule_backend = getattr(molecule, "runtime_scf_backend", None)
-        if (
-            backend == GPU4PYSCF_RKS_RUNTIME_BACKEND
-            and molecule_backend != GPU4PYSCF_RKS_RUNTIME_BACKEND
-        ):
-            raise ValueError(
-                "scf_runtime_forward_backend='gpu4pyscf_rks' requires a molecule "
-                "built by the GPU4PySCF RKS forward path."
-            )
-        forward_params = jax.tree_util.tree_map(jax.lax.stop_gradient, params)
-        if (
-            backend in {"auto", GPU4PYSCF_RKS_RUNTIME_BACKEND}
-            and molecule_backend == GPU4PYSCF_RKS_RUNTIME_BACKEND
-        ):
-            runtime_options = getattr(molecule, "runtime_scf_options", None)
-            if runtime_options is None:
-                return molecule
-            forward_kwargs = runtime_options.as_kwargs()
-            forward_kwargs["require_convergence"] = bool(cfg.scf_require_convergence)
-            cache_key = id(molecule)
-            initial_density_matrix = cached_density_by_molecule_id.get(cache_key)
-            if initial_density_matrix is None:
-                initial_density_matrix = _restricted_runtime_initial_density_matrix(molecule)
-            if initial_density_matrix is not None:
-                forward_kwargs["initial_density_matrix"] = initial_density_matrix
-            forward = run_gpu4pyscf_rks_forward(
-                **forward_kwargs,
-                molecule_template=molecule,
-                xc_functional=functional,
-                xc_params=forward_params,
-                neural_vxc_clip=float(cfg.scf_vxc_clip),
-                neural_xc_compute_exc=bool(cfg.scf_require_convergence),
-                neural_xc_jit_payload=_gpu4pyscf_neural_payload_can_jit(functional),
-                collect_fock=False,
-            )
-            cached_density_by_molecule_id[cache_key] = np.asarray(
-                forward.density_matrix,
-                dtype=float,
-            ).copy()
-            return molecule_from_gpu4pyscf_rks_forward_result(molecule, forward)
-        return scf_solver.run_runtime_forward(molecule, functional, forward_params)
-
-    return provider
-
-
-def _runtime_forward_molecule(
-    provider: RuntimeForwardStateProvider,
-    params: Any,
-    functional: Any,
-    molecule: Any,
-) -> Any:
-    out = provider(params, functional, molecule)
-    if isinstance(out, tuple) and len(out) == 2:
-        return out[0]
-    return out
-
-
-def _with_runtime_forward_state(
-    data: GroundStateDatum | Sequence[GroundStateDatum],
-    *,
-    params: Any,
-    functional: Any,
-    provider: RuntimeForwardStateProvider | None,
-) -> GroundStateDatum | list[GroundStateDatum]:
-    if provider is None:
-        return data
-
-    def _one(datum: GroundStateDatum) -> GroundStateDatum:
-        molecule = _runtime_forward_molecule(
-            provider,
-            params,
-            functional,
-            datum.molecule,
-        )
-        return replace(datum, molecule=molecule)
-
-    if isinstance(data, GroundStateDatum):
-        return _one(data)
-    return [_one(datum) for datum in data]
-
-
 def create_train_state(
     functional: Any,
     rng: PRNGKeyArray,
@@ -295,7 +91,6 @@ def make_ground_state_loss_and_grad(
     training_config: GroundStateTrainingConfig | None = None,
     loss_fn: Callable[..., tuple[Array, dict[str, Array]]] | None = None,
     predictor: Callable[[Any, Any], tuple[Array, Any]] | None = None,
-    runtime_forward_state_provider: RuntimeForwardStateProvider | None = None,
 ):
     """Create a params-only ground-state objective+gradient kernel.
 
@@ -304,17 +99,9 @@ def make_ground_state_loss_and_grad(
     """
 
     objective = ground_state_mse_loss if loss_fn is None else loss_fn
-    effective_training_config, effective_runtime_provider = _resolve_runtime_forward_setup(
-        training_config,
-        runtime_forward_state_provider,
-    )
-    effective_runtime_provider = _compose_runtime_forward_state_providers(
-        effective_runtime_provider,
-        _loss_runtime_forward_state_provider(objective, effective_training_config),
-    )
 
     def compute_loss(local_params, local_data):
-        kwargs = {"training_config": effective_training_config}
+        kwargs = {"training_config": training_config}
         if predictor is not None:
             kwargs["predictor"] = predictor
         return objective(
@@ -334,14 +121,7 @@ def make_ground_state_loss_and_grad(
         params: Any,
         data: GroundStateDatum | Sequence[GroundStateDatum],
     ):
-        data_for_loss = _with_runtime_forward_state(
-            data,
-            params=params,
-            functional=functional,
-            provider=effective_runtime_provider,
-        )
-
-        (loss, metrics), grads = loss_value_and_grad(params, data_for_loss)
+        (loss, metrics), grads = loss_value_and_grad(params, data)
         cleaned_grads, nonfinite_grad_fraction = _sanitize_gradients(grads)
         metrics = dict(metrics)
         metrics["loss"] = loss
@@ -359,65 +139,26 @@ def make_ground_state_eval(
     training_config: GroundStateTrainingConfig | None = None,
     loss_fn: Callable[..., tuple[Array, dict[str, Array]]] | None = None,
     predictor: Callable[[Any, Any], tuple[Array, Any]] | None = None,
-    runtime_forward_state_provider: RuntimeForwardStateProvider | None = None,
 ):
     """Create a params-only evaluation kernel aligned with the train-step policy."""
 
     objective = ground_state_mse_loss if loss_fn is None else loss_fn
-    effective_training_config, effective_runtime_provider = _resolve_runtime_forward_setup(
-        training_config,
-        runtime_forward_state_provider,
-    )
-    effective_runtime_provider = _compose_runtime_forward_state_providers(
-        effective_runtime_provider,
-        _loss_runtime_forward_state_provider(objective, effective_training_config),
-    )
 
     def evaluate(
         params: Any,
         data: GroundStateDatum | Sequence[GroundStateDatum],
     ):
-        data_for_loss = _with_runtime_forward_state(
-            data,
-            params=params,
-            functional=functional,
-            provider=effective_runtime_provider,
-        )
-        kwargs = {"training_config": effective_training_config}
+        kwargs = {"training_config": training_config}
         if predictor is not None:
             kwargs["predictor"] = predictor
         return objective(
             params,
             functional,
-            data_for_loss,
+            data,
             **kwargs,
         )
 
     return evaluate
-
-
-def make_runtime_forward_implicit_loss_and_grad(
-    functional: Any,
-    runtime_forward_state_provider: RuntimeForwardStateProvider,
-    training_config: GroundStateTrainingConfig | None = None,
-    loss_fn: Callable[..., tuple[Array, dict[str, Array]]] | None = None,
-    predictor: Callable[[Any, Any], tuple[Array, Any]] | None = None,
-):
-    """Create a two-stage loss+grad kernel for runtime-forward implicit SCF.
-
-    The runtime provider is called before ``jax.value_and_grad`` and should
-    return a molecule-like object containing the converged forward SCF state.
-    Gradients are then computed with the implicit fixed-point custom VJP using
-    that state as the primal density.
-    """
-
-    return make_ground_state_loss_and_grad(
-        functional,
-        training_config=_runtime_forward_implicit_config(training_config),
-        loss_fn=loss_fn,
-        predictor=predictor,
-        runtime_forward_state_provider=runtime_forward_state_provider,
-    )
 
 
 def make_ground_state_train_step(
@@ -425,7 +166,6 @@ def make_ground_state_train_step(
     training_config: GroundStateTrainingConfig | None = None,
     loss_fn: Callable[..., tuple[Array, dict[str, Array]]] | None = None,
     predictor: Callable[[Any, Any], tuple[Array, Any]] | None = None,
-    runtime_forward_state_provider: RuntimeForwardStateProvider | None = None,
 ):
     """Create one ground-state training step.
 
@@ -438,7 +178,6 @@ def make_ground_state_train_step(
         training_config=training_config,
         loss_fn=loss_fn,
         predictor=predictor,
-        runtime_forward_state_provider=runtime_forward_state_provider,
     )
 
     def train_step(
@@ -457,19 +196,3 @@ def make_ground_state_train_step(
         return new_state, metrics
 
     return train_step
-
-
-def make_runtime_forward_implicit_train_step(
-    functional: Any,
-    runtime_forward_state_provider: RuntimeForwardStateProvider,
-    training_config: GroundStateTrainingConfig | None = None,
-    loss_fn: Callable[..., tuple[Array, dict[str, Array]]] | None = None,
-    predictor: Callable[[Any, Any], tuple[Array, Any]] | None = None,
-):
-    return make_ground_state_train_step(
-        functional,
-        training_config=_runtime_forward_implicit_config(training_config),
-        loss_fn=loss_fn,
-        predictor=predictor,
-        runtime_forward_state_provider=runtime_forward_state_provider,
-    )

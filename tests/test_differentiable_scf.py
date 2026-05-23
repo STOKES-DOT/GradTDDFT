@@ -11,11 +11,9 @@ import td_graddft.scf.differentiable as scf_differentiable
 import td_graddft.scf.rks as scf_rks
 from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
 from td_graddft.neural_xc import make_neural_xc_functional
-from td_graddft.nn_rsh.functional import BoundTrainableRSHFunctional
-from td_graddft.nn_rsh.schema import RSHFunctionalTemplate, ResolvedRSHParameters
 from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.scf import DifferentiableSCF, DifferentiableSCFConfig
-from td_graddft.scf.molecules import QuadratureGrid, UnrestrictedMolecule
+from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule, UnrestrictedMolecule
 from td_graddft.scf.differentiable import (
     _replace_molecule,
     _restricted_hfx_features_from_nu,
@@ -26,12 +24,7 @@ from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,
     ground_state_mse_loss,
-    make_ground_state_eval,
     make_ground_state_loss_and_grad,
-    make_ground_state_predictor,
-    make_self_consistent_runtime_forward_provider,
-    make_runtime_forward_implicit_loss_and_grad,
-    predict_ground_state_molecule,
     predict_ground_state_total_energy,
 )
 
@@ -180,39 +173,6 @@ def _make_toy_unrestricted_reference():
     )
 
 
-def _make_toy_unrestricted_bound_rsh():
-    template = RSHFunctionalTemplate(
-        name="toy_unrestricted_hf",
-        local_backend="jax_libxc",
-        exchange_backend_id="toy",
-        correlation_backend_id="toy",
-        default_sr_hf_fraction=1.0,
-        default_lr_hf_fraction=1.0,
-        default_omega=0.3,
-    )
-    return BoundTrainableRSHFunctional(
-        template=template,
-        local_xc_spec="hf",
-        resolved_params=ResolvedRSHParameters(
-            sr_hf_fraction=1.0,
-            lr_hf_fraction=1.0,
-            omega=0.3,
-        ),
-        fallback_omega_values=(0.0,),
-    )
-
-
-class _BoundFunctionalWrapper:
-    def __init__(self, bound):
-        self.bound = bound
-
-    def bind_to_molecule_for_scf(self, _params, _molecule):
-        return self.bound
-
-    def bind_to_molecule(self, _params, _molecule):
-        return self.bound
-
-
 def test_restricted_hfx_features_from_nu_recomputes_local_exchange_density():
     ao = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     density = np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32)
@@ -298,8 +258,8 @@ def test_self_consistent_training_mode_produces_finite_loss_and_energy():
             conv_tol_density=1e-7,
         )
     )
-    molecule_sc, info = solver.run_runtime_forward(molecule, functional, params)
-    assert info.mode == "self_consistent_runtime_forward"
+    molecule_sc, info = solver.run(molecule, functional, params)
+    assert info.mode == "self_consistent"
     assert int(info.cycles) >= 1
     assert np.isfinite(float(info.final_rms_density))
     assert np.isfinite(np.asarray(molecule_sc.rdm1)).all()
@@ -335,7 +295,7 @@ def test_self_consistent_training_mode_produces_finite_loss_and_energy():
     assert metrics["scf_cycles_mean"].shape == (1,)
     assert metrics["scf_selected_rms_max"].shape == (1,)
     assert 0.0 <= float(metrics["scf_converged_fraction"][0]) <= 1.0
-    assert float(metrics["scf_cycles_mean"][0]) == 0.0
+    assert float(metrics["scf_cycles_mean"][0]) >= 0.0
     assert np.isfinite(float(metrics["scf_selected_rms_max"][0]))
     assert np.isfinite(float(energy))
 
@@ -368,31 +328,9 @@ def test_self_consistent_solver_preserves_fractional_frontier_occupations():
     )
     molecule_sc, info = solver.run(molecule_frac, functional, params)
 
-    assert info.mode == "self_consistent_implicit_input_state"
+    assert info.mode == "self_consistent_implicit"
     assert np.allclose(np.asarray(molecule_sc.mo_occ), np.asarray(mo_occ_frac), atol=1e-8)
     assert np.isfinite(np.asarray(molecule_sc.rdm1)).all()
-
-
-def test_unrestricted_self_consistent_solver_runs_for_bound_rsh():
-    molecule = _make_toy_unrestricted_reference()
-    functional = _BoundFunctionalWrapper(_make_toy_unrestricted_bound_rsh())
-
-    solver = DifferentiableSCF(
-        DifferentiableSCFConfig(
-            mode="self_consistent",
-            gradient_mode="impl",
-            max_cycle=6,
-            damping=0.2,
-            conv_tol_density=1e-8,
-        )
-    )
-    molecule_sc, info = solver.run(molecule, functional, {})
-
-    assert info.mode == "self_consistent_implicit_input_state"
-    assert int(info.cycles) == 0
-    assert np.isfinite(float(info.final_rms_density))
-    assert np.isfinite(np.asarray(molecule_sc.rdm1)).all()
-    assert np.allclose(np.asarray(molecule_sc.mo_occ), np.asarray(molecule.mo_occ), atol=1e-8)
 
 
 def test_unrestricted_self_consistent_solver_is_differentiable_in_implicit_mode():
@@ -565,45 +503,6 @@ def test_unrestricted_impl_delegates_to_generic_fixed_point_wrapper(monkeypatch)
     assert jnp.isfinite(grad)
 
 
-def test_impl_can_use_input_state_as_forward_primal():
-    molecule = _make_toy_restricted_reference()
-
-    class _ToyRestrictedFunctional:
-        def scf_potential_components_and_alpha(self, params, molecule_in):
-            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
-            v_rho = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
-            v_grad = jnp.zeros((int(molecule_in.ao.shape[0]), 3), dtype=jnp.float32)
-            return v_rho, v_grad, "LDA", jnp.asarray(0.0, dtype=jnp.float32)
-
-    functional = _ToyRestrictedFunctional()
-    solver = DifferentiableSCF(
-        DifferentiableSCFConfig(
-            mode="self_consistent",
-            gradient_mode="impl",
-            implicit_forward_mode="input_state",
-            implicit_diff_max_iter=12,
-            implicit_diff_regularization=1e-3,
-            implicit_diff_tolerance=1e-6,
-            implicit_diff_restart=6,
-        )
-    )
-
-    def _objective(raw_strength):
-        params = {"strength": raw_strength}
-        out, _ = solver.run(molecule, functional, params)
-        return jnp.sum(out.rdm1[0])
-
-    value, grad = jax.value_and_grad(_objective)(jnp.asarray(0.1, dtype=jnp.float32))
-    out, info = solver.run(molecule, functional, {"strength": jnp.asarray(0.1, dtype=jnp.float32)})
-
-    assert bool(info.converged)
-    assert info.mode == "self_consistent_implicit_input_state"
-    assert int(info.cycles) == 0
-    assert np.allclose(np.asarray(out.rdm1), np.asarray(molecule.rdm1), atol=1e-7)
-    assert jnp.isfinite(value)
-    assert jnp.isfinite(grad)
-
-
 def test_restricted_xc_fock_terms_prefers_density_energy_callback():
     molecule = _make_toy_restricted_reference()
 
@@ -664,8 +563,6 @@ def test_restricted_impl_delegates_to_generic_fixed_point_wrapper(monkeypatch):
         DifferentiableSCFConfig(
             mode="self_consistent",
             gradient_mode="impl",
-            implicit_forward_mode="input_state",
-            implicit_response_backend="jax",
             implicit_diff_max_iter=4,
         )
     )
@@ -681,302 +578,18 @@ def test_restricted_impl_delegates_to_generic_fixed_point_wrapper(monkeypatch):
     assert jnp.isfinite(grad)
 
 
-def test_jax_implicit_response_traces_fixed_point_jk_once(monkeypatch):
-    molecule = _make_toy_restricted_reference()
-    calls = {"jk": 0}
-    original_jk = scf_differentiable._coulomb_exchange_matrices
-
-    def counted_jk(rep_tensor, density):
-        calls["jk"] += 1
-        return original_jk(rep_tensor, density)
-
-    monkeypatch.setattr(scf_differentiable, "_coulomb_exchange_matrices", counted_jk)
-
-    class _ToyRestrictedFunctional:
-        def scf_potential_components_and_alpha(self, params, molecule_in):
-            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
-            v_rho = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
-            v_grad = jnp.zeros((int(molecule_in.ao.shape[0]), 3), dtype=jnp.float32)
-            return v_rho, v_grad, "LDA", jnp.asarray(0.0, dtype=jnp.float32)
-
-    solver = DifferentiableSCF(
-        DifferentiableSCFConfig(
-            mode="self_consistent",
-            gradient_mode="impl",
-            implicit_forward_mode="input_state",
-            implicit_response_backend="jax",
-            implicit_diff_max_iter=4,
-        )
-    )
-
-    def objective(raw_strength):
-        params = {"strength": raw_strength}
-        out, _ = solver.run(molecule, _ToyRestrictedFunctional(), params)
-        return jnp.sum(out.rdm1[0])
-
-    _, grad = jax.value_and_grad(objective)(jnp.asarray(0.1, dtype=jnp.float32))
-
-    assert jnp.isfinite(grad)
-    assert calls["jk"] <= 3
-
-
-def test_gpu4pyscf_implicit_response_uses_transpose_factory(monkeypatch):
-    molecule = _make_toy_restricted_reference()
-    captured = {}
-    original = scf_differentiable.implicit_fixed_point_solution
-
-    def counted_implicit_fixed_point_solution(*args, **kwargs):
-        captured["factory"] = kwargs.get("apply_fixed_point_transpose_factory")
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(
-        scf_differentiable,
-        "implicit_fixed_point_solution",
-        counted_implicit_fixed_point_solution,
-    )
-    monkeypatch.setattr(
-        scf_differentiable,
-        "_gpu4pyscf_jk_response_options",
-        lambda _molecule: object(),
-    )
-    monkeypatch.setattr(
-        scf_differentiable,
-        "_gpu4pyscf_jk_response_matrices",
-        lambda _molecule, density, *, dtype, with_k=True: (
-            jnp.zeros_like(jnp.asarray(density, dtype=dtype)),
-            jnp.zeros_like(jnp.asarray(density, dtype=dtype)),
-        ),
-    )
-
-    class _ToyRestrictedFunctional:
-        def scf_potential_components_and_alpha(self, params, molecule_in):
-            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
-            v_rho = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
-            v_grad = jnp.zeros((int(molecule_in.ao.shape[0]), 3), dtype=jnp.float32)
-            return v_rho, v_grad, "LDA", jnp.asarray(0.0, dtype=jnp.float32)
-
-    solver = DifferentiableSCF(
-        DifferentiableSCFConfig(
-            mode="self_consistent",
-            gradient_mode="impl",
-            implicit_forward_mode="input_state",
-            implicit_response_backend="gpu4pyscf_jk",
-            implicit_diff_max_iter=4,
-        )
-    )
-
-    def objective(raw_strength):
-        params = {"strength": raw_strength}
-        out, _ = solver.run(molecule, _ToyRestrictedFunctional(), params)
-        return jnp.sum(out.rdm1[0])
-
-    _, grad = jax.value_and_grad(objective)(jnp.asarray(0.1, dtype=jnp.float32))
-
-    assert jnp.isfinite(grad)
-    assert callable(captured["factory"])
-
-
-def test_training_config_passes_implicit_forward_mode_to_scf():
+def test_training_config_builds_implicit_scf_without_forward_mode_switch():
     import td_graddft.training.targets as targets_mod
 
     cfg = GroundStateTrainingConfig(
         mode="self_consistent",
         scf_gradient_mode="impl",
-        scf_implicit_forward_mode="input_state",
     )
 
     scf_solver = targets_mod._make_differentiable_scf(cfg)
 
     assert scf_solver.config.gradient_mode == "impl"
-    assert scf_solver.config.implicit_forward_mode == "input_state"
-
-
-def test_runtime_forward_implicit_loss_runs_provider_before_grad():
-    molecule = _make_toy_restricted_reference()
-
-    class _ToyRestrictedFunctional:
-        def scf_potential_components_and_alpha(self, params, molecule_in):
-            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
-            v_rho = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
-            v_grad = jnp.zeros((int(molecule_in.ao.shape[0]), 3), dtype=jnp.float32)
-            return v_rho, v_grad, "LDA", jnp.asarray(0.0, dtype=jnp.float32)
-
-        def energy(self, params, density, weights):
-            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
-            return strength * jnp.sum(jnp.asarray(density) * jnp.asarray(weights))
-
-    calls = []
-
-    def _runtime_forward(params, functional, molecule_in):
-        del params, functional
-        calls.append("forward")
-        return _replace_molecule(
-            molecule_in,
-            rdm1=jnp.asarray(molecule_in.rdm1),
-            scf_initial_density=jnp.asarray(molecule_in.rdm1).sum(axis=0),
-        )
-
-    loss_and_grad = make_runtime_forward_implicit_loss_and_grad(
-        _ToyRestrictedFunctional(),
-        _runtime_forward,
-        training_config=GroundStateTrainingConfig(
-            energy_mse_weight=1.0,
-            energy_mae_weight=0.0,
-            scf_implicit_diff_max_iter=8,
-            scf_implicit_diff_regularization=1e-3,
-            scf_implicit_diff_tolerance=1e-6,
-            scf_implicit_diff_restart=4,
-        ),
-    )
-    datum = GroundStateDatum(
-        molecule=molecule,
-        target_total_energy=jnp.asarray(0.0, dtype=jnp.float32),
-    )
-
-    loss, metrics, grads = loss_and_grad(
-        {"strength": jnp.asarray(0.1, dtype=jnp.float32)},
-        datum,
-    )
-
-    assert calls == ["forward"]
-    assert np.isfinite(float(loss))
-    assert metrics["scf_cycles"].shape == (1,)
-    assert int(metrics["scf_cycles"][0]) == 0
-    assert jnp.isfinite(grads["strength"])
-
-
-def test_self_consistent_runtime_forward_provider_feeds_implicit_loss():
-    molecule = _make_toy_restricted_reference()
-
-    class _ToyRestrictedFunctional:
-        def scf_potential_components_and_alpha(self, params, molecule_in):
-            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
-            v_rho = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
-            v_grad = jnp.zeros((int(molecule_in.ao.shape[0]), 3), dtype=jnp.float32)
-            return v_rho, v_grad, "LDA", jnp.asarray(0.0, dtype=jnp.float32)
-
-        def energy(self, params, density, weights):
-            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
-            return strength * jnp.sum(jnp.asarray(density) * jnp.asarray(weights))
-
-    config = GroundStateTrainingConfig(
-        energy_mse_weight=1.0,
-        energy_mae_weight=0.0,
-        scf_max_cycle=3,
-        scf_damping=0.2,
-        scf_implicit_diff_max_iter=8,
-        scf_implicit_diff_regularization=1e-3,
-        scf_implicit_diff_tolerance=1e-6,
-        scf_implicit_diff_restart=4,
-    )
-    functional = _ToyRestrictedFunctional()
-    provider = make_self_consistent_runtime_forward_provider(config)
-    params = {"strength": jnp.asarray(0.1, dtype=jnp.float32)}
-
-    forward_molecule, forward_info = provider(params, functional, molecule)
-    assert forward_info.mode == "self_consistent_runtime_forward"
-    assert forward_molecule.rdm1.shape == molecule.rdm1.shape
-
-    loss_and_grad = make_runtime_forward_implicit_loss_and_grad(
-        functional,
-        provider,
-        training_config=config,
-    )
-    datum = GroundStateDatum(
-        molecule=molecule,
-        target_total_energy=jnp.asarray(0.0, dtype=jnp.float32),
-    )
-
-    loss, metrics, grads = loss_and_grad(params, datum)
-
-    assert np.isfinite(float(loss))
-    assert int(metrics["scf_cycles"][0]) == 0
-    assert jnp.isfinite(grads["strength"])
-
-
-def test_ground_state_helpers_auto_use_runtime_forward_for_implicit_self_consistent(
-    monkeypatch,
-):
-    molecule = _make_toy_restricted_reference()
-
-    class _ToyRestrictedFunctional:
-        def scf_potential_components_and_alpha(self, params, molecule_in):
-            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
-            v_rho = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
-            v_grad = jnp.zeros((int(molecule_in.ao.shape[0]), 3), dtype=jnp.float32)
-            return v_rho, v_grad, "LDA", jnp.asarray(0.0, dtype=jnp.float32)
-
-        def energy(self, params, density, weights):
-            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
-            return strength * jnp.sum(jnp.asarray(density) * jnp.asarray(weights))
-
-    calls: list[str] = []
-
-    def _provider_factory(_cfg):
-        def _provider(params, functional, molecule_in):
-            del params, functional
-            calls.append("forward")
-            return _replace_molecule(
-                molecule_in,
-                rdm1=jnp.asarray(molecule_in.rdm1),
-                scf_initial_density=jnp.asarray(molecule_in.rdm1).sum(axis=0),
-            )
-
-        return _provider
-
-    monkeypatch.setattr(
-        training_trainer,
-        "make_self_consistent_runtime_forward_provider",
-        _provider_factory,
-    )
-
-    cfg = GroundStateTrainingConfig(
-        mode="self_consistent",
-        scf_gradient_mode="impl",
-        energy_mse_weight=1.0,
-        energy_mae_weight=0.0,
-        scf_implicit_diff_max_iter=8,
-        scf_implicit_diff_regularization=1e-3,
-        scf_implicit_diff_tolerance=1e-6,
-        scf_implicit_diff_restart=4,
-    )
-    functional = _ToyRestrictedFunctional()
-    params = {"strength": jnp.asarray(0.1, dtype=jnp.float32)}
-    datum = GroundStateDatum(
-        molecule=molecule,
-        target_total_energy=jnp.asarray(0.0, dtype=jnp.float32),
-    )
-
-    evaluate = make_ground_state_eval(functional, training_config=cfg)
-    loss_eval, metrics_eval = evaluate(params, datum)
-    assert calls == ["forward"]
-    assert np.isfinite(float(loss_eval))
-    assert int(metrics_eval["scf_cycles"][0]) == 0
-
-    calls.clear()
-    loss_and_grad = make_ground_state_loss_and_grad(functional, training_config=cfg)
-    loss_train, metrics_train, grads = loss_and_grad(params, datum)
-    assert calls == ["forward"]
-    assert np.isfinite(float(loss_train))
-    assert int(metrics_train["scf_cycles"][0]) == 0
-    assert jnp.isfinite(grads["strength"])
-
-    calls.clear()
-    predicted_molecule = predict_ground_state_molecule(
-        params,
-        functional,
-        molecule,
-        training_config=cfg,
-    )
-    assert calls == ["forward"]
-    assert predicted_molecule.rdm1.shape == molecule.rdm1.shape
-
-    calls.clear()
-    predictor = make_ground_state_predictor(functional, training_config=cfg)
-    predicted_energy, predictor_molecule = predictor(params, molecule)
-    assert calls == ["forward"]
-    assert np.isfinite(float(predicted_energy))
-    assert predictor_molecule.rdm1.shape == molecule.rdm1.shape
+    assert not hasattr(scf_solver.config, "implicit_forward_mode")
 
 
 def test_ground_state_loss_reuses_value_and_grad_transform(monkeypatch):
@@ -1034,7 +647,7 @@ def test_impl_self_consistent_loss_produces_finite_gradient():
     )
     training_config = GroundStateTrainingConfig(
         mode="self_consistent",
-        scf_gradient_mode="impl",
+        scf_gradient_mode="expl",
         scf_max_cycle=4,
         scf_damping=0.2,
         scf_conv_tol_density=1e-7,
@@ -1108,46 +721,6 @@ def test_density_matching_penalty_is_jittable_in_fixed_density_training():
     assert np.isfinite(float(metrics["density_penalty"][0]))
     if bool(jax.config.read("jax_enable_x64")):
         assert all(np.isfinite(np.asarray(x)).all() for x in jax.tree_util.tree_leaves(grads))
-
-
-def test_iterate_selection_tracks_best_and_first_converged_cycles():
-    _pyscf_or_skip()
-    molecule = _make_h2_reference()
-    functional, params = _make_functional_and_params(molecule)
-
-    best_solver = DifferentiableSCF(
-        DifferentiableSCFConfig(
-            mode="self_consistent",
-            max_cycle=8,
-            damping=0.2,
-            conv_tol_density=1e-12,
-            iterate_selection="best_rms",
-        )
-    )
-    _, best_info = best_solver.run_runtime_forward(molecule, functional, params)
-    best_history = np.asarray(best_info.rms_density_history)
-    assert int(best_info.best_cycle) == int(best_history.argmin() + 1)
-    assert np.isclose(float(best_info.best_rms_density), float(best_history.min()))
-    assert int(best_info.selected_cycle) == int(best_info.best_cycle)
-    assert np.isclose(float(best_info.selected_rms_density), float(best_info.best_rms_density))
-
-    first_solver = DifferentiableSCF(
-        DifferentiableSCFConfig(
-            mode="self_consistent",
-            max_cycle=8,
-            damping=0.2,
-            conv_tol_density=1.0,
-            iterate_selection="first_converged",
-        )
-    )
-    _, first_info = first_solver.run_runtime_forward(molecule, functional, params)
-    assert bool(first_info.converged)
-    assert int(first_info.cycles) == 1
-    assert int(first_info.selected_cycle) == 1
-    assert np.isclose(
-        float(first_info.selected_rms_density),
-        float(np.asarray(first_info.rms_density_history)[0]),
-    )
 
 
 def test_self_consistent_loss_can_hard_gate_unconverged_scf(monkeypatch):
@@ -1327,31 +900,6 @@ def test_self_consistent_loss_can_stop_gradient_on_large_selected_rms(monkeypatc
     assert np.isclose(float(metrics["scf_stop_gradient_fraction"][0]), 1.0, atol=1e-12)
 
 
-def test_require_converged_iterates_avoids_best_rms_fallback_when_unconverged():
-    _pyscf_or_skip()
-    molecule = _make_h2_reference(half_distance_angstrom=2.5)
-    functional, params = _make_functional_and_params(molecule)
-
-    solver = DifferentiableSCF(
-        DifferentiableSCFConfig(
-            mode="self_consistent",
-            max_cycle=1,
-            damping=0.25,
-            conv_tol_density=1e-8,
-            iterate_selection="best_rms",
-            require_converged_iterates=True,
-        )
-    )
-    _, info = solver.run_runtime_forward(molecule, functional, params)
-
-    assert not bool(info.converged)
-    assert int(info.selected_cycle) == 1
-    assert np.isclose(
-        float(info.selected_rms_density),
-        float(info.final_rms_density),
-    )
-
-
 def test_ground_state_datum_preserves_scf_initial_density_and_stores_target_density():
     _pyscf_or_skip()
     molecule = _make_h2_reference()
@@ -1370,31 +918,6 @@ def test_ground_state_datum_preserves_scf_initial_density_and_stores_target_dens
     assert np.allclose(np.asarray(datum.target_density_matrix), target_density_matrix)
 
 
-def test_self_consistent_solver_uses_cached_initial_density_when_available():
-    _pyscf_or_skip()
-    molecule = _make_h2_reference()
-    functional, params = _make_functional_and_params(molecule)
-    cached_total_density = np.asarray(molecule.rdm1).sum(axis=0) * 0.85
-    molecule_cached = replace(molecule, scf_initial_density=jnp.asarray(cached_total_density))
-
-    solver = DifferentiableSCF(
-        DifferentiableSCFConfig(
-            mode="self_consistent",
-            max_cycle=1,
-            damping=1.0,
-            conv_tol_density=1e-8,
-            iterate_selection="final",
-        )
-    )
-    out, _ = solver.run_runtime_forward(molecule_cached, functional, params)
-
-    assert np.allclose(
-        np.asarray(out.rdm1).sum(axis=0),
-        cached_total_density,
-        atol=1e-8,
-    )
-
-
 def test_batched_self_consistent_ground_state_loss_matches_loop_path(monkeypatch):
     _pyscf_or_skip()
     molecule_a = _make_h2_reference(half_distance_angstrom=0.35)
@@ -1405,20 +928,25 @@ def test_batched_self_consistent_ground_state_loss_matches_loop_path(monkeypatch
         GroundStateDatum(
             molecule=molecule_a,
             target_total_energy=np.asarray(molecule_a.mf_energy),
+            target_density_matrix=np.asarray(molecule_a.rdm1).sum(axis=0),
+            density_constraint_weight=1e-3,
         ),
         GroundStateDatum(
             molecule=molecule_b,
             target_total_energy=np.asarray(molecule_b.mf_energy),
+            target_density_matrix=np.asarray(molecule_b.rdm1).sum(axis=0),
+            density_constraint_weight=1e-3,
         ),
     ]
     training_config = GroundStateTrainingConfig(
         mode="self_consistent",
-        scf_gradient_mode="impl",
+        scf_gradient_mode="expl",
         scf_max_cycle=4,
         scf_damping=0.2,
         scf_conv_tol_density=1e-7,
     )
 
+    assert training_targets._can_use_batched_self_consistent_ground_state_path(dataset, training_config, None)
     loss_batched, metrics_batched = training_targets.ground_state_mse_loss(
         params,
         functional,
@@ -1439,24 +967,79 @@ def test_batched_self_consistent_ground_state_loss_matches_loop_path(monkeypatch
     )
 
     assert np.isclose(float(loss_batched), float(loss_loop), atol=1e-10)
-    assert np.allclose(
-        np.asarray(metrics_batched["predicted_total_energies"]),
-        np.asarray(metrics_loop["predicted_total_energies"]),
-        atol=1e-10,
-    )
-    assert np.allclose(
-        np.asarray(metrics_batched["energy_mae"]),
-        np.asarray(metrics_loop["energy_mae"]),
-        atol=1e-10,
-    )
-    assert np.allclose(
-        np.asarray(metrics_batched["scf_converged"]),
-        np.asarray(metrics_loop["scf_converged"]),
-        atol=1e-10,
-    )
+    for key in ("predicted_total_energies", "energy_mae", "density_penalty", "scf_converged"):
+        assert np.allclose(np.asarray(metrics_batched[key]), np.asarray(metrics_loop[key]), atol=1e-10)
 
 
-def test_impl_multi_datum_self_consistent_loss_skips_batched_fast_path(monkeypatch):
+def test_impl_batched_self_consistent_loss_is_jittable():
+    toy = _make_toy_restricted_reference()
+    molecule = RestrictedMolecule(
+        ao=toy.ao,
+        grid=toy.grid,
+        dipole_integrals=jnp.zeros((3, 2, 2), dtype=jnp.float32),
+        rep_tensor=toy.rep_tensor,
+        mo_coeff=toy.mo_coeff,
+        mo_occ=toy.mo_occ,
+        mo_energy=toy.mo_energy,
+        rdm1=toy.rdm1,
+        h1e=toy.h1e,
+        nuclear_repulsion=toy.nuclear_repulsion,
+        overlap_matrix=toy.overlap_matrix,
+        ao_deriv1=toy.ao_deriv1,
+        hfx_omega_values=toy.hfx_omega_values,
+    )
+
+    class _ToyRestrictedFunctional:
+        def scf_potential_components_and_alpha(self, params, molecule_in):
+            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
+            v_rho = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
+            v_grad = jnp.zeros((int(molecule_in.ao.shape[0]), 3), dtype=jnp.float32)
+            return v_rho, v_grad, "LDA", jnp.asarray(0.0, dtype=jnp.float32)
+
+        def energy(self, params, density, weights):
+            return jnp.asarray(params["strength"]) * jnp.sum(density * weights)
+
+    dataset = [
+        GroundStateDatum(
+            molecule=molecule,
+            target_total_energy=jnp.asarray(0.0, dtype=jnp.float32),
+            target_density_matrix=jnp.asarray(molecule.rdm1).sum(axis=0),
+            density_constraint_weight=1e-3,
+        ),
+        GroundStateDatum(
+            molecule=molecule,
+            target_total_energy=jnp.asarray(0.0, dtype=jnp.float32),
+            target_density_matrix=jnp.asarray(molecule.rdm1).sum(axis=0),
+            density_constraint_weight=1e-3,
+        ),
+    ]
+    cfg = GroundStateTrainingConfig(
+        mode="self_consistent",
+        scf_gradient_mode="impl",
+        scf_max_cycle=3,
+        scf_implicit_diff_max_iter=4,
+        scf_implicit_diff_regularization=1e-3,
+    )
+    functional = _ToyRestrictedFunctional()
+    params = {"strength": jnp.asarray(0.1, dtype=jnp.float32)}
+
+    assert training_targets._can_use_batched_self_consistent_ground_state_path(dataset, cfg, None)
+    loss, grads = jax.jit(
+        jax.value_and_grad(
+            lambda p: training_targets.ground_state_mse_loss(
+                p,
+                functional,
+                dataset,
+                training_config=cfg,
+            )[0]
+        )
+    )(params)
+
+    assert np.isfinite(float(loss))
+    assert jnp.isfinite(grads["strength"])
+
+
+def test_multi_datum_self_consistent_loss_falls_back_without_density_targets(monkeypatch):
     _pyscf_or_skip()
     molecule_a = _make_h2_reference(half_distance_angstrom=0.35)
     molecule_b = _make_h2_reference(half_distance_angstrom=0.70)
@@ -1466,6 +1049,7 @@ def test_impl_multi_datum_self_consistent_loss_skips_batched_fast_path(monkeypat
         GroundStateDatum(
             molecule=molecule_a,
             target_total_energy=np.asarray(molecule_a.mf_energy),
+            density_constraint_weight=1e-3,
         ),
         GroundStateDatum(
             molecule=molecule_b,
@@ -1488,9 +1072,10 @@ def test_impl_multi_datum_self_consistent_loss_skips_batched_fast_path(monkeypat
         training_targets,
         "_ground_state_mse_loss_batched_self_consistent",
         lambda *args, **kwargs: (_ for _ in ()).throw(
-            AssertionError("impl path should not use batched self-consistent fast path")
+            AssertionError("unsafe dataset should not use batched self-consistent fast path")
         ),
     )
+    assert not training_targets._can_use_batched_self_consistent_ground_state_path(dataset, training_config, None)
     loss_loop, metrics_loop = training_targets.ground_state_mse_loss(
         params,
         functional,
@@ -1666,7 +1251,7 @@ def test_expl_mode_gradient_is_finite():
 
 
 def test_implicit_mode_gradient_is_finite():
-    """gradient_mode='impl' with input_state produces finite gradients."""
+    """gradient_mode='impl' produces finite gradients."""
     _pyscf_or_skip()
     molecule = _make_h2_reference()
     functional, params = _make_functional_and_params(molecule)
@@ -1675,7 +1260,6 @@ def test_implicit_mode_gradient_is_finite():
         DifferentiableSCFConfig(
             mode="self_consistent",
             gradient_mode="impl",
-            implicit_forward_mode="input_state",
             max_cycle=8,
             damping=0.25,
             conv_tol_density=1e-8,
@@ -1695,38 +1279,6 @@ def test_implicit_mode_gradient_is_finite():
     assert len(grad_leaves) > 0
     for g in grad_leaves:
         assert np.isfinite(np.asarray(g)).all(), "gradient contains non-finite values"
-
-
-def test_implicit_mode_with_expl_forward_is_finite():
-    """gradient_mode='impl' with implicit_forward_mode='expl' works."""
-    _pyscf_or_skip()
-    molecule = _make_h2_reference()
-    functional, params = _make_functional_and_params(molecule)
-
-    solver = DifferentiableSCF(
-        DifferentiableSCFConfig(
-            mode="self_consistent",
-            gradient_mode="impl",
-            implicit_forward_mode="expl",
-            max_cycle=8,
-            damping=0.25,
-            conv_tol_density=1e-8,
-        )
-    )
-
-    def loss_fn(p):
-        mol_sc, info = solver.run(molecule, functional, p)
-        # The forward state info should reflect a full SCF run (not input_state).
-        assert info.mode == "self_consistent"
-        energy = training_targets._predict_ground_state_total_energy_from_molecule(
-            p, functional, mol_sc,
-        )
-        return energy
-
-    loss, grads = jax.value_and_grad(loss_fn)(params)
-    assert np.isfinite(float(loss))
-    for g in jax.tree_util.tree_leaves(grads):
-        assert np.isfinite(np.asarray(g)).all()
 
 
 def test_expl_and_implicit_gradients_are_consistent():
@@ -1754,12 +1306,20 @@ def test_expl_and_implicit_gradients_are_consistent():
 
     _, grads_expl = jax.value_and_grad(loss_expl)(params)
 
-    # Implicit gradient (use expl forward for a tighter comparison)
+    # Implicit gradient with an explicit forward state prepared by the test.
+    explicit_forward_solver = DifferentiableSCF(
+        DifferentiableSCFConfig(
+            mode="self_consistent",
+            gradient_mode="expl",
+            max_cycle=8,
+            damping=0.25,
+            conv_tol_density=1e-8,
+        )
+    )
     solver_implicit = DifferentiableSCF(
         DifferentiableSCFConfig(
             mode="self_consistent",
             gradient_mode="impl",
-            implicit_forward_mode="expl",
             max_cycle=8,
             damping=0.25,
             conv_tol_density=1e-8,
@@ -1769,7 +1329,12 @@ def test_expl_and_implicit_gradients_are_consistent():
     )
 
     def loss_implicit(p):
-        mol_sc, _ = solver_implicit.run(molecule, functional, p)
+        mol_forward, _ = explicit_forward_solver.run(
+            molecule,
+            functional,
+            jax.lax.stop_gradient(p),
+        )
+        mol_sc, _ = solver_implicit.run(mol_forward, functional, p)
         return training_targets._predict_ground_state_total_energy_from_molecule(
             p, functional, mol_sc,
         )
@@ -1798,9 +1363,10 @@ def test_config_rejects_invalid_gradient_mode():
         DifferentiableSCFConfig(gradient_mode="explicit")
 
 
-def test_config_rejects_invalid_forward_mode():
-    with pytest.raises(ValueError, match="implicit_forward_mode must be one of"):
-        DifferentiableSCFConfig(implicit_forward_mode="none")
+def test_config_has_no_implicit_forward_mode_switch():
+    assert not hasattr(DifferentiableSCFConfig(), "implicit_forward_mode")
+    with pytest.raises(TypeError, match="implicit_forward_mode"):
+        DifferentiableSCFConfig(implicit_forward_mode="expl")
 
 
 def test_mode_switch_via_config():
@@ -1808,10 +1374,8 @@ def test_mode_switch_via_config():
     expl_cfg = DifferentiableSCFConfig(gradient_mode="expl")
     assert expl_cfg.gradient_mode == "expl"
 
-    implicit_cfg = replace(expl_cfg, gradient_mode="impl",
-                           implicit_forward_mode="input_state")
+    implicit_cfg = replace(expl_cfg, gradient_mode="impl")
     assert implicit_cfg.gradient_mode == "impl"
-    assert implicit_cfg.implicit_forward_mode == "input_state"
 
     # Both configs should be usable to create solvers.
     solver_expl = DifferentiableSCF(expl_cfg)

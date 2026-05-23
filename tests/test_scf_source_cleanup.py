@@ -21,11 +21,7 @@ def test_scf_does_not_keep_unreferenced_private_helpers():
 
 
 def test_scf_core_no_longer_contains_custom_cuda_direct_backend():
-    source_text = "\n".join(
-        path.read_text()
-        for path in Path("src/td_graddft").rglob("*.py")
-        if path.name != "gpu4pyscf.py"
-    )
+    source_text = "\n".join(path.read_text() for path in Path("src/td_graddft").rglob("*.py"))
 
     for token in (
         "CudaDirectJKBuilder",

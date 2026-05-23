@@ -17,7 +17,6 @@ from ..features import (
     restricted_transition_response_features,
 )
 from ..data.integrals import eri_pair_matrix_to_mo_eri_slices
-from ..xc import AdiabaticDensityFunctional
 from ._utils import (
     _density_on_grid,
     _resolve_xc_functional,
@@ -164,7 +163,7 @@ def _as_grid_response_tensor(values: Any, *, ngrids: int) -> Array:
 
 
 def _strict_hybrid_fraction(
-    resolved_xc: AdiabaticDensityFunctional | None,
+    resolved_xc: Any | None,
     molecule: Any,
     total_density: Array | None,
 ) -> Array:
@@ -403,7 +402,7 @@ def _resolve_nonlocal_response_matrix_pair(
 
 def build_restricted_response_matrices(
     molecule: Any,
-    xc_functional: AdiabaticDensityFunctional | None = None,
+    xc_functional: Any | None = None,
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
@@ -699,7 +698,7 @@ def _restricted_eri_slices(
 
 def build_restricted_tda_matrix(
     molecule: Any,
-    xc_functional: AdiabaticDensityFunctional | None = None,
+    xc_functional: Any | None = None,
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
@@ -847,7 +846,7 @@ def build_restricted_tda_matrix(
 
 def _build_restricted_response_operator_data(
     molecule: Any,
-    xc_functional: AdiabaticDensityFunctional | None = None,
+    xc_functional: Any | None = None,
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
@@ -1162,7 +1161,7 @@ def _restricted_tda_diagonal(data: _RestrictedResponseOperatorData) -> Array:
 
 def build_restricted_tda_operator(
     molecule: Any,
-    xc_functional: AdiabaticDensityFunctional | None = None,
+    xc_functional: Any | None = None,
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
@@ -1198,7 +1197,7 @@ def build_restricted_tda_operator(
 
 def build_restricted_tdhf_operator(
     molecule: Any,
-    xc_functional: AdiabaticDensityFunctional | None = None,
+    xc_functional: Any | None = None,
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
@@ -1241,7 +1240,7 @@ def build_restricted_tdhf_operator(
 
 def build_restricted_a_minus_b_matrix(
     molecule: Any,
-    xc_functional: AdiabaticDensityFunctional | None = None,
+    xc_functional: Any | None = None,
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
@@ -1277,7 +1276,7 @@ def build_restricted_a_minus_b_matrix(
 
 def gen_tda_vind(
     molecule: Any,
-    xc_functional: AdiabaticDensityFunctional | None = None,
+    xc_functional: Any | None = None,
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
@@ -1295,7 +1294,7 @@ def gen_tda_vind(
 
 def gen_tdhf_vind(
     molecule: Any,
-    xc_functional: AdiabaticDensityFunctional | None = None,
+    xc_functional: Any | None = None,
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,

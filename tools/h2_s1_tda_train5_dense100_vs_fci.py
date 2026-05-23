@@ -227,8 +227,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--integral-backend",
-        choices=("jax", "libcint"),
-        default="libcint",
+        choices=("jax", "cpu", "gpu", "libcint"),
+        default="cpu",
     )
     p.add_argument(
         "--jk-backend",
@@ -244,7 +244,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--reference-scf-potential-clip", type=float, default=20.0)
     p.add_argument(
         "--reference-scf-backend",
-        choices=("pyscf", "gpu4pyscf_rks"),
+        choices=("pyscf", "jax_rks"),
         default="pyscf",
         help="SCF backend used to build the training/evaluation reference molecules.",
     )
@@ -261,18 +261,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--scf-gradient-mode",
         choices=("expl", "impl", "unrolled", "implicit_commutator"),
         default="impl",
-    )
-    p.add_argument(
-        "--scf-runtime-forward-backend",
-        choices=("auto", "jax", "gpu4pyscf_rks"),
-        default="auto",
-        help="Runtime forward SCF backend for self-consistent prediction/training.",
-    )
-    p.add_argument(
-        "--implicit-response-backend",
-        choices=("jax", "gpu4pyscf_jk"),
-        default="jax",
-        help="Linear-response backend used by implicit SCF differentiation.",
     )
     p.add_argument(
         "--scf-implicit-diff-solver",
@@ -435,7 +423,7 @@ def _make_s1_functional(args: argparse.Namespace) -> Any:
         input_feature_mode=str(args.input_feature_mode),
         include_pt2_channel=bool(args.include_pt2_channel),
         pt2_channel_mode=str(args.pt2_channel_mode),
-        response_hf_mode="strict",
+        response_hf_mode="approx",
         response_pt2_mode=str(args.response_pt2_mode),
         name=f"neural_xc_h2_s1_tda_{str(args.training_mode)}",
     )
@@ -483,8 +471,6 @@ def _self_consistent_prediction_config(args: argparse.Namespace) -> GroundStateT
         scf_iterate_selection=str(args.scf_iterate_selection),
         scf_require_convergence=bool(args.scf_require_convergence),
         scf_gradient_mode=str(args.scf_gradient_mode),
-        scf_runtime_forward_backend=str(args.scf_runtime_forward_backend),
-        implicit_response_backend=str(args.implicit_response_backend),
         scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
@@ -548,6 +534,22 @@ def train_functional(
         density_constraint_weight=float(args.density_constraint_weight),
     )
     functional = _make_s1_functional(args)
+    coefficient_prior = neural_xc.resolve_coefficient_prior_values(
+        tuple(str(name) for name in args.semilocal_xc)
+    )
+    if coefficient_prior is not None and bool(args.include_pt2_channel):
+        n_semilocal = len(tuple(str(name) for name in args.semilocal_xc))
+        if len(coefficient_prior) == n_semilocal + 1:
+            coefficient_prior = (
+                tuple(coefficient_prior[:n_semilocal])
+                + (0.0,)
+                + tuple(coefficient_prior[n_semilocal:])
+            )
+    logger.log(
+        "[init] coefficient_prior="
+        f"{None if coefficient_prior is None else tuple(float(x) for x in coefficient_prior)} "
+        f"include_pt2_channel={bool(args.include_pt2_channel)}"
+    )
     gs_training = GroundStateTrainingConfig(
         mode=str(args.training_mode),
         energy_mse_weight=float(args.energy_mse_weight),
@@ -562,8 +564,6 @@ def train_functional(
         scf_stop_gradient_on_unconverged=bool(args.scf_stop_gradient_on_unconverged),
         scf_stop_gradient_rms_threshold=args.scf_stop_gradient_rms_threshold,
         scf_gradient_mode=str(args.scf_gradient_mode),
-        scf_runtime_forward_backend=str(args.scf_runtime_forward_backend),
-        implicit_response_backend=str(args.implicit_response_backend),
         scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
@@ -1461,8 +1461,6 @@ def write_summary(
         "xc": str(args.xc),
         "training_mode": str(args.training_mode),
         "reference_scf_backend": str(args.reference_scf_backend),
-        "scf_runtime_forward_backend": str(args.scf_runtime_forward_backend),
-        "implicit_response_backend": str(args.implicit_response_backend),
         "objective": objective_name,
         "scf_stop_gradient_on_unconverged": bool(args.scf_stop_gradient_on_unconverged),
         "scf_stop_gradient_rms_threshold": args.scf_stop_gradient_rms_threshold,
@@ -1523,8 +1521,6 @@ def main() -> None:
         f"pt2_channel_mode={str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else 'none'}, "
         f"response_pt2_mode={str(args.response_pt2_mode) if bool(args.include_pt2_channel) else 'none'}, "
         f"reference_scf_backend={str(args.reference_scf_backend)}, "
-        f"scf_runtime_forward_backend={str(args.scf_runtime_forward_backend)}, "
-        f"implicit_response_backend={str(args.implicit_response_backend)}, "
         f"s1_weight={float(args.s1_weight)}, density_constraint_weight={float(args.density_constraint_weight)}, "
         f"train_solver={'tda' if bool(args.s1_use_tda) else 'casida'}, "
         f"eval_solver={'tda' if (bool(args.s1_use_tda) if args.eval_use_tda is None else bool(args.eval_use_tda)) else 'casida'}"
@@ -1646,8 +1642,6 @@ def main() -> None:
             "xc": str(args.xc),
             "training_mode": str(args.training_mode),
             "reference_scf_backend": str(args.reference_scf_backend),
-            "scf_runtime_forward_backend": str(args.scf_runtime_forward_backend),
-            "implicit_response_backend": str(args.implicit_response_backend),
             "objective": f"s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'}",
             "include_pt2_channel": bool(args.include_pt2_channel),
             "pt2_channel_mode": (

@@ -120,7 +120,7 @@ def test_restricted_libcint_reference_energy_gradient_matches_pyscf_rhf(jk_backe
             cart=True,
             grids_level=0,
             max_l=1,
-            integral_backend="libcint",
+            integral_backend="cpu",
             grid_ao_backend="jax",
             libcint_geometry_grad_policy="analytic",
             rks_config=RKSConfig(
@@ -186,7 +186,7 @@ def test_restricted_libcint_tda_oscillator_strength_is_differentiable_by_geometr
             cart=True,
             grids_level=0,
             max_l=1,
-            integral_backend="libcint",
+            integral_backend="cpu",
             grid_ao_backend="jax",
             libcint_geometry_grad_policy="analytic",
             rks_config=RKSConfig(
@@ -239,7 +239,7 @@ def test_restricted_libcint_df_reference_energy_gradient_matches_finite_differen
             cart=True,
             grids_level=0,
             max_l=1,
-            integral_backend="libcint",
+            integral_backend="cpu",
             grid_ao_backend="jax",
             libcint_geometry_grad_policy="analytic",
             rks_config=RKSConfig(
@@ -297,7 +297,7 @@ def test_unrestricted_libcint_reference_energy_is_differentiable_by_geometry():
             cart=True,
             grids_level=0,
             max_l=1,
-            integral_backend="libcint",
+            integral_backend="cpu",
             grid_ao_backend="jax",
             libcint_geometry_grad_policy="analytic",
             uks_config=UKSConfig(

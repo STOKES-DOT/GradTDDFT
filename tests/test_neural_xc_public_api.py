@@ -2,7 +2,7 @@ import pytest
 
 import jax.numpy as jnp
 
-from td_graddft import neural_xc, nn_rsh, training
+from td_graddft import neural_xc, training
 from td_graddft.neural_xc.defaults import (
     DEFAULT_NEURAL_XC_HF_INPUT_MODE,
     DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
@@ -148,71 +148,6 @@ def test_neural_xc_factory_stays_as_assembly_layer():
         assert pattern not in factory_text, f"{pattern} should not live in neural_xc/factory.py"
 
 
-def test_rsh_public_constructor_builds_trainable_functional():
-    functional = nn_rsh.RSH("lc-wpbe").trainable(
-        params=("omega", "alpha", "beta"),
-        hidden_dims=(4,),
-    )
-
-    assert isinstance(functional, nn_rsh.TrainableRSHFunctional)
-    assert functional.template.name == "lc-wpbe"
-    assert functional.head_type == "gnn"
-
-
-def test_rsh_public_constructor_uses_strict_lc_wpbe_local_spec_by_default():
-    functional = nn_rsh.RSH("lc-wpbe").trainable()
-
-    assert functional.local_xc_spec == "lc_wpbe_local"
-
-
-def test_rsh_public_constructor_rejects_unknown_trainable_parameter():
-    with pytest.raises(ValueError, match="Unsupported RSH trainable parameter"):
-        nn_rsh.RSH("lc-wpbe").trainable(params=("gamma",))
-
-
-def test_rsh_public_constructor_rejects_presets_without_jax_local_decomposition():
-    with pytest.raises(NotImplementedError, match="does not yet define a JAX-local semilocal decomposition"):
-        nn_rsh.RSH("wb97x-d").trainable()
-
-
-def test_training_result_and_separate_trainers_expose_expected_history_keys():
-    neural_functional = neural_xc.Functional(hidden_dims=(8,))
-    rsh_functional = nn_rsh.RSH("lc-wpbe").trainable()
-
-    neural_trainer = training.NeuralXCTrainer(
-        functional=neural_functional,
-        molecules=[],
-    )
-    rsh_optimizer = training.RSHOptimizer(
-        functional=rsh_functional,
-        molecules=[],
-    )
-
-    assert type(neural_trainer) is not type(rsh_optimizer)
-
-    neural_result = neural_trainer.kernel(steps=0)
-    rsh_result = rsh_optimizer.kernel(steps=0)
-
-    assert isinstance(neural_result, training.TrainingResult)
-    assert isinstance(rsh_result, training.TrainingResult)
-    assert set(neural_result.history) == {
-        "loss",
-        "energy_mae",
-        "density_mse",
-        "orbital_energy_mae",
-        "scf_cycles",
-        "scf_converged",
-    }
-    assert set(rsh_result.history) == {
-        "loss",
-        "omega",
-        "alpha",
-        "beta",
-        "ip_error",
-        "ea_error",
-    }
-
-
 def test_neural_xc_trainer_positive_steps_require_ground_state_data():
     neural_trainer = training.NeuralXCTrainer(
         functional=neural_xc.Functional(hidden_dims=(8,)),
@@ -221,30 +156,6 @@ def test_neural_xc_trainer_positive_steps_require_ground_state_data():
 
     with pytest.raises(ValueError, match="requires at least one"):
         neural_trainer.kernel(steps=1)
-
-
-def test_rsh_optimizer_positive_steps_require_explicit_callable_loss():
-    functional = nn_rsh.RSH("lc-wpbe").trainable()
-    molecule = object()
-    with pytest.raises(NotImplementedError, match="Built-in RSH self-supervised losses were removed"):
-        training.RSHOptimizer(
-            functional=functional,
-            molecules=[molecule],
-        ).kernel(
-            steps=8,
-            learning_rate=0.5,
-            loss="koopmans_ip_ea",
-        )
-
-
-def test_rsh_optimizer_positive_steps_require_at_least_one_molecule():
-    optimizer = training.RSHOptimizer(
-        functional=nn_rsh.RSH("lc-wpbe").trainable(),
-        molecules=[],
-    )
-
-    with pytest.raises(ValueError, match="requires at least one"):
-        optimizer.kernel(steps=1)
 
 
 class _Grid:

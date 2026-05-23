@@ -37,7 +37,7 @@ basis_from_spec = None
 evaluate_cartesian_ao = None
 neural_xc = None
 restricted_reference_from_pyscf = None
-restricted_molecule_from_spec_with_gpu4pyscf_rks = None
+restricted_molecule_from_spec_with_jax_rks = None
 RKSConfig = None
 HARTREE_TO_EV = None
 GroundStateCoreDatum = None
@@ -69,7 +69,7 @@ def _load_runtime_dependencies(logger: "RunLogger | None" = None) -> None:
     global evaluate_cartesian_ao
     global neural_xc
     global restricted_reference_from_pyscf
-    global restricted_molecule_from_spec_with_gpu4pyscf_rks
+    global restricted_molecule_from_spec_with_jax_rks
     global RKSConfig
     global HARTREE_TO_EV
     global GroundStateCoreDatum
@@ -100,7 +100,7 @@ def _load_runtime_dependencies(logger: "RunLogger | None" = None) -> None:
     _log("[bootstrap] import td_graddft.scf")
     from td_graddft.scf import (
         RKSConfig as _RKSConfig,
-        restricted_molecule_from_spec_with_gpu4pyscf_rks as _restricted_molecule_from_spec_with_gpu4pyscf_rks,
+        restricted_molecule_from_spec_with_jax_rks as _restricted_molecule_from_spec_with_jax_rks,
     )
     _log("[bootstrap] import td_graddft.spectra")
     from td_graddft.spectra import HARTREE_TO_EV as _HARTREE_TO_EV
@@ -129,9 +129,7 @@ def _load_runtime_dependencies(logger: "RunLogger | None" = None) -> None:
     evaluate_cartesian_ao = _evaluate_cartesian_ao
     neural_xc = _neural_xc
     restricted_reference_from_pyscf = _restricted_reference_from_pyscf
-    restricted_molecule_from_spec_with_gpu4pyscf_rks = (
-        _restricted_molecule_from_spec_with_gpu4pyscf_rks
-    )
+    restricted_molecule_from_spec_with_jax_rks = _restricted_molecule_from_spec_with_jax_rks
     RKSConfig = _RKSConfig
     HARTREE_TO_EV = _HARTREE_TO_EV
     GroundStateCoreDatum = _GroundStateCoreDatum
@@ -271,18 +269,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="impl",
     )
     p.add_argument(
-        "--scf-runtime-forward-backend",
-        choices=("auto", "jax", "gpu4pyscf_rks"),
-        default="auto",
-        help="Runtime forward SCF backend for self-consistent implicit training.",
-    )
-    p.add_argument(
-        "--implicit-response-backend",
-        choices=("jax", "gpu4pyscf_jk"),
-        default="jax",
-        help="Linear-response backend used by implicit SCF differentiation.",
-    )
-    p.add_argument(
         "--scf-require-convergence",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -302,8 +288,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--integral-backend",
-        choices=("jax", "libcint"),
-        default="libcint",
+        choices=("jax", "cpu", "gpu", "libcint"),
+        default="cpu",
     )
     p.add_argument(
         "--jk-backend",
@@ -312,7 +298,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--reference-scf-backend",
-        choices=("pyscf", "gpu4pyscf_rks"),
+        choices=("pyscf", "jax_rks"),
         default="pyscf",
         help="SCF backend used to build the training/evaluation reference molecules.",
     )
@@ -547,10 +533,10 @@ def build_reference_point(
     )
 
     reference_backend = str(reference_scf_backend).strip().lower()
-    if reference_backend == "gpu4pyscf_rks":
+    if reference_backend == "jax_rks":
         if str(grid_ao_backend) != "jax":
-            raise ValueError("GPU4PySCF reference building requires --grid-ao-backend jax.")
-        reference = restricted_molecule_from_spec_with_gpu4pyscf_rks(
+            raise ValueError("JAX reference building requires --grid-ao-backend jax.")
+        reference = restricted_molecule_from_spec_with_jax_rks(
             atom=atom,
             basis=basis,
             xc_spec=xc,
@@ -576,7 +562,6 @@ def build_reference_point(
             compute_local_hfx_features=bool(compute_local_hfx_features),
             compute_local_hfx_aux=bool(compute_local_hfx_features),
             compute_local_pt2_features=bool(compute_local_pt2_features),
-            compute_response_eri_slices=True,
             verbose=0,
         )
     elif reference_backend == "pyscf":
@@ -660,7 +645,7 @@ def build_reference_point(
     else:
         raise ValueError(
             f"Unsupported reference_scf_backend={reference_scf_backend!r}; "
-            "expected 'pyscf' or 'gpu4pyscf_rks'."
+            "expected 'pyscf' or 'jax_rks'."
         )
     ao = np.asarray(reference.ao, dtype=np.float64)
     weights = np.asarray(reference.grid.weights, dtype=np.float64)
@@ -769,6 +754,22 @@ def train_functional(
         include_pt2_channel=bool(args.include_pt2_channel),
         name=f"neural_xc_h2_fci_{str(args.training_mode)}",
     )
+    coefficient_prior = neural_xc.resolve_coefficient_prior_values(
+        tuple(str(name) for name in args.semilocal_xc)
+    )
+    if coefficient_prior is not None and bool(args.include_pt2_channel):
+        n_semilocal = len(tuple(str(name) for name in args.semilocal_xc))
+        if len(coefficient_prior) == n_semilocal + 1:
+            coefficient_prior = (
+                tuple(coefficient_prior[:n_semilocal])
+                + (0.0,)
+                + tuple(coefficient_prior[n_semilocal:])
+            )
+    logger.log(
+        "[init] coefficient_prior="
+        f"{None if coefficient_prior is None else tuple(float(x) for x in coefficient_prior)} "
+        f"include_pt2_channel={bool(args.include_pt2_channel)}"
+    )
     gs_training = GroundStateTrainingConfig.from_parts(
         core=GroundStateCoreTrainingConfig(
             mode=str(args.training_mode),
@@ -782,8 +783,6 @@ def train_functional(
             scf_iterate_selection=str(args.scf_iterate_selection),
             scf_require_convergence=bool(args.scf_require_convergence),
             scf_gradient_mode=str(args.scf_gradient_mode),
-            scf_runtime_forward_backend=str(args.scf_runtime_forward_backend),
-            implicit_response_backend=str(args.implicit_response_backend),
         ),
     )
     if int(args.lr_decay_every) > 0:
@@ -865,8 +864,6 @@ def train_functional(
         f"mode={str(args.training_mode)} "
         f"scf_require_convergence={bool(args.scf_require_convergence)} "
         f"scf_grad_mode={args.scf_gradient_mode} "
-        f"runtime_forward={args.scf_runtime_forward_backend} "
-        f"implicit_response={args.implicit_response_backend} "
         f"train_step_mode={train_step_mode}"
     )
 
@@ -1465,12 +1462,6 @@ def write_summary(
         handle.write(
             f"reference_scf_backend = {getattr(args, 'reference_scf_backend', 'pyscf')}\n"
         )
-        handle.write(
-            f"scf_runtime_forward_backend = {getattr(args, 'scf_runtime_forward_backend', 'auto')}\n"
-        )
-        handle.write(
-            f"implicit_response_backend = {getattr(args, 'implicit_response_backend', 'jax')}\n"
-        )
         handle.write(f"steps = {int(args.steps)}\n")
         handle.write(f"learning_rate = {float(args.learning_rate)}\n")
         handle.write(f"lr_decay_every = {int(args.lr_decay_every)}\n")
@@ -1717,10 +1708,6 @@ def main() -> None:
         "density_constraint_weight": float(args.density_constraint_weight),
         "scf_require_convergence": bool(args.scf_require_convergence),
         "reference_scf_backend": str(getattr(args, "reference_scf_backend", "pyscf")),
-        "scf_runtime_forward_backend": str(
-            getattr(args, "scf_runtime_forward_backend", "auto")
-        ),
-        "implicit_response_backend": str(getattr(args, "implicit_response_backend", "jax")),
         "final_loss": float(training["final_loss"]),
         "min_loss": float(training["min_loss"]),
         "min_loss_step": int(training["min_loss_step"]),
