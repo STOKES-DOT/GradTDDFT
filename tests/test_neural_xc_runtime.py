@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import jax
 import jax.numpy as jnp
@@ -25,6 +25,7 @@ from td_graddft.tddft.response import (
     build_restricted_response_matrices,
     build_restricted_tda_matrix,
 )
+from td_graddft.tddft.cisd import restricted_cisd_second_order_correction
 from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,
@@ -1589,12 +1590,11 @@ class _HFResponsiveChannelModel(nn.Module):
         return coeff.at[..., 1].set(hf_coeff)
 
 
-class _PT2ResponsiveChannelModel(nn.Module):
+class _DensityResponsivePT2ChannelModel(nn.Module):
     @nn.compact
     def __call__(self, inputs):
         coeff = jnp.zeros(inputs.shape[:-1] + (3,), dtype=inputs.dtype)
-        pt2_coeff = 0.25 + jnp.square(inputs[..., -1])
-        return coeff.at[..., 1].set(pt2_coeff)
+        return coeff.at[..., 1].set(jnp.square(inputs[..., 0]))
 
 
 class _ConstantChannelModel(nn.Module):
@@ -1732,7 +1732,28 @@ def test_response_hf_strict_builds_hf_channel_kernel_without_scalar_exchange():
     assert jnp.allclose(matrices.b_matrix, expected_b, atol=1e-10)
 
 
-def test_response_pt2_strict_adds_nonlocal_tda_matrix():
+def test_response_pt2_approx_keeps_pt2_as_frozen_basis_channel():
+    molecule = _make_pt2_toy_molecule()
+    molecule.pt2_local = jnp.asarray([-0.30, 0.40], dtype=jnp.float64)
+    semilocal_zero = lambda features: jnp.zeros_like(features.rho)
+    functional = NeuralXCFunctional(
+        model=_DensityResponsivePT2ChannelModel(),
+        semilocal_energy_density_fn=semilocal_zero,
+        include_pt2_channel=True,
+        pt2_channel_mode="local_exact",
+        response_hf_mode="approx",
+        response_pt2_mode="approx",
+        name="pt2_frozen_basis_response",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(224), molecule)
+
+    bound = functional.bind_to_molecule_for_response(params, molecule)
+    tensor = bound.grid_response_tensor(molecule)
+
+    assert jnp.allclose(tensor[0, 0], 0.5 * molecule.pt2_local, atol=1e-10)
+
+
+def test_response_pt2_strict_uses_no_pt2_response_and_posthoc_correction():
     molecule = _make_pt2_toy_molecule()
     molecule.ao = jnp.asarray([[0.8, 0.3], [0.4, -0.7]], dtype=jnp.float64)
     molecule.ao_deriv1 = jnp.stack(
@@ -1749,46 +1770,79 @@ def test_response_pt2_strict_adds_nonlocal_tda_matrix():
     rep_tensor = rep_tensor.at[0, 1, 1, 0].set(0.5)
     rep_tensor = rep_tensor.at[1, 0, 0, 1].set(0.2)
     molecule.rep_tensor = rep_tensor
+    molecule.mo_energy = jnp.asarray([[0.0, 3.0], [0.0, 3.0]], dtype=jnp.float64)
+    molecule.pt2_local = jnp.asarray([-0.30, 0.40], dtype=jnp.float64)
     semilocal_zero = lambda features: jnp.zeros_like(features.rho)
 
-    pt2_approx = NeuralXCFunctional(
-        model=_PT2ResponsiveChannelModel(),
-        semilocal_energy_density_fn=semilocal_zero,
-        include_pt2_channel=True,
-        response_hf_mode="approx",
-        response_pt2_mode="approx",
-        name="pt2_approx",
-    )
     pt2_strict = NeuralXCFunctional(
-        model=_PT2ResponsiveChannelModel(),
+        model=_DensityResponsivePT2ChannelModel(),
         semilocal_energy_density_fn=semilocal_zero,
         include_pt2_channel=True,
+        pt2_channel_mode="local_exact",
         response_hf_mode="approx",
         response_pt2_mode="strict",
         name="pt2_strict",
     )
-    params_approx = pt2_approx.init_from_molecule(jax.random.PRNGKey(122), molecule)
     params_strict = pt2_strict.init_from_molecule(jax.random.PRNGKey(122), molecule)
 
-    bound = pt2_strict.bind_to_molecule_for_response(params_strict, molecule)
-    pt2_matrix = bound.nonlocal_response_matrix(molecule)
-    _, a_approx = build_restricted_tda_matrix(
-        molecule,
-        pt2_approx,
-        xc_params=params_approx,
-    )
-    _, a_strict = build_restricted_tda_matrix(
+    no_pt2_matrices = build_restricted_response_matrices(molecule, None)
+    strict_matrices = build_restricted_response_matrices(
         molecule,
         pt2_strict,
         xc_params=params_strict,
     )
+    solver = RestrictedCasidaTDDFT(
+        molecule,
+        pt2_strict,
+        xc_params=params_strict,
+        eigensolver="dense",
+    )
+    result = solver.tda(nstates=1)
+    features = restricted_grid_features(molecule)
+    hf_projected, hf_projected_a, hf_projected_b = (
+        pt2_strict.projected_hf_grid_contribution_components(
+            molecule,
+            features=features,
+        )
+    )
+    pt2_projected = pt2_strict.projected_pt2_grid_contribution(
+        molecule,
+        features=features,
+    )
+    coefficients = pt2_strict.channel_coefficients(
+        params_strict,
+        features,
+        molecule=molecule,
+        semilocal_energy_density=semilocal_zero(features),
+        hf_energy_density=hf_projected,
+        pt2_energy_density=pt2_projected,
+        hf_spin_energy_density=(hf_projected_a, hf_projected_b),
+    )
+    pt2_coefficients = coefficients[..., 1]
+    rho = jnp.maximum(features.rho, pt2_strict.density_floor)
+    expected_ac = jnp.tensordot(molecule.grid.weights, rho * pt2_coefficients, axes=(0, 0))
+    expected_ac = expected_ac / jnp.maximum(
+        jnp.tensordot(molecule.grid.weights, rho, axes=(0, 0)),
+        pt2_strict.density_floor,
+    )
+    expected_correction = restricted_cisd_second_order_correction(
+        molecule,
+        replace(
+            result,
+            excitation_energies=no_pt2_matrices.a_matrix.reshape(1),
+            posthoc_correction=None,
+        ),
+        ac=expected_ac,
+    )
 
-    assert bound.response_feature_kind == "MGGA"
-    assert bound.grid_response_tensor(molecule).shape == (5, 5, molecule.grid.weights.shape[0])
-    assert pt2_matrix.shape == (1, 1)
-    assert jnp.all(jnp.isfinite(pt2_matrix))
-    assert not jnp.allclose(pt2_matrix, 0.0, atol=1e-10)
-    assert not jnp.allclose(a_strict, a_approx, atol=1e-10)
+    assert jnp.allclose(strict_matrices.a_matrix, no_pt2_matrices.a_matrix, atol=1e-10)
+    assert jnp.allclose(strict_matrices.b_matrix, no_pt2_matrices.b_matrix, atol=1e-10)
+    assert jnp.allclose(result.posthoc_correction, expected_correction, atol=1e-10)
+    assert jnp.allclose(
+        result.excitation_energies,
+        no_pt2_matrices.a_matrix.reshape(1) + expected_correction,
+        atol=1e-10,
+    )
 
 
 def test_bound_neural_xc_exposes_strict_mgga_response_tensor():

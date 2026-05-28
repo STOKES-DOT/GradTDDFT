@@ -3,10 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import jax
 import jax.numpy as jnp
 from jax.lax import Precision
-from jax.scipy.linalg import expm
 
 from ..data.integrals import eri_pair_matrix_to_mo_eri_slices, rinv_matrices
 from ..data.integrals.jax.packed_eri import _metadata_arrays, _mo_pair_products
@@ -515,92 +513,10 @@ def _local_pt2_feature_from_restricted_orbitals(
     return jnp.nan_to_num(local_energy, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def _rotate_restricted_mo_coeff(
-    mo_coeff: jnp.ndarray,
-    *,
-    nocc: int,
-    kappa_flat: jnp.ndarray,
-) -> jnp.ndarray:
-    nmo = int(mo_coeff.shape[1])
-    nvir = int(nmo - nocc)
-    kappa = jnp.asarray(kappa_flat, dtype=mo_coeff.dtype).reshape(nocc, nvir)
-    generator = jnp.zeros((nmo, nmo), dtype=mo_coeff.dtype)
-    generator = generator.at[:nocc, nocc:].set(kappa)
-    generator = generator.at[nocc:, :nocc].set(-kappa.T)
-    return mo_coeff @ expm(generator)
-
-
-def _strict_pt2_transition_feature_from_restricted_orbitals(
-    ao: Any,
-    mo_coeff: Any,
-    mo_occ: Any,
-    mo_energy: Any,
-    *,
-    rep_tensor: Any | None = None,
-    eri_ovov: Any | None = None,
-    eri_pair_matrix: Any | None = None,
-    df_factors: Any | None = None,
-    nocc: int | None = None,
-    occupation_tolerance: float = 1e-8,
-    density_floor: float = 1e-12,
-) -> jnp.ndarray:
-    """Strict singlet transition feature for the local PT2 field.
-
-    This is intentionally separate from MGGA response features. It differentiates
-    the local MP2 gauge with respect to occupied-virtual orbital rotations and
-    rescales to the restricted singlet transition convention used by TDDFT
-    response contractions.
-    """
-
-    ao_arr = jnp.asarray(ao)
-    mo_coeff_arr = jnp.asarray(mo_coeff)
-    mo_occ_arr = jnp.asarray(mo_occ)
-    mo_energy_arr = jnp.asarray(mo_energy)
-
-    if mo_coeff_arr.ndim == 3:
-        mo_coeff_arr = mo_coeff_arr[0]
-    if mo_occ_arr.ndim == 2:
-        mo_occ_arr = mo_occ_arr[0]
-    if mo_energy_arr.ndim == 2:
-        mo_energy_arr = mo_energy_arr[0]
-
-    nocc_int = int(nocc) if nocc is not None else int(jnp.count_nonzero(mo_occ_arr > occupation_tolerance))
-    nmo = int(mo_coeff_arr.shape[1])
-    nvir = int(nmo - nocc_int)
-    if nocc_int <= 0 or nocc_int >= nmo:
-        raise ValueError("PT2 transition response requires at least one occupied and one virtual orbital.")
-
-    kappa0 = jnp.zeros((nocc_int * nvir,), dtype=mo_coeff_arr.dtype)
-
-    def local_pt2_from_kappa(kappa_flat: jnp.ndarray) -> jnp.ndarray:
-        rotated = _rotate_restricted_mo_coeff(
-            mo_coeff_arr,
-            nocc=nocc_int,
-            kappa_flat=kappa_flat,
-        )
-        return _local_pt2_feature_from_restricted_orbitals(
-            ao_arr,
-            rotated,
-            mo_occ_arr,
-            mo_energy_arr,
-            rep_tensor=rep_tensor,
-            eri_ovov=None,
-            eri_pair_matrix=eri_pair_matrix,
-            df_factors=df_factors,
-            nocc=nocc_int,
-            occupation_tolerance=occupation_tolerance,
-            density_floor=density_floor,
-        )
-
-    jacobian = jax.jacfwd(local_pt2_from_kappa)(kappa0)
-    response = jacobian.reshape(ao_arr.shape[0], nocc_int, nvir) / 4.0
-    return jnp.nan_to_num(response, nan=0.0, posinf=0.0, neginf=0.0)
-
 __all__ = [
     "canonical_input_features",
     "enhanced_input_features",
     "_local_hfx_features_from_basis_dm",
     "_local_hfx_features_from_dm",
     "_local_pt2_feature_from_restricted_orbitals",
-    "_strict_pt2_transition_feature_from_restricted_orbitals",
 ]

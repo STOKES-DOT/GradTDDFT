@@ -30,7 +30,6 @@ from .inputs import (
     assemble_basis_channels,
     build_coefficient_inputs,
     resolve_canonical_hfx_feature_channels,
-    _strict_pt2_transition_feature_from_restricted_orbitals,
 )
 from .projection import NeuralXCProjectionMixin
 from .binding import NeuralXCBindingMixin
@@ -662,9 +661,12 @@ class ResponseMixin:
         if pt2_point is None:
             pt2_point = jnp.zeros_like(hf_point)
         if self.include_pt2_channel:
-            if pt2_mode in {"approx", "strict"}:
+            if pt2_mode == "approx":
                 pt2_input = jax.lax.stop_gradient(pt2_point)
-                pt2_basis = jnp.zeros_like(pt2_input)
+                pt2_basis = pt2_input
+            elif pt2_mode == "strict":
+                pt2_input = jnp.zeros_like(hf_point)
+                pt2_basis = jnp.zeros_like(hf_point)
             else:
                 raise ValueError(
                     f"Unsupported response_pt2_mode={pt2_mode!r}. "
@@ -989,152 +991,6 @@ class ResponseMixin:
             matrix_a.reshape(int(nocc * nvir), int(nocc * nvir)),
             matrix_b.reshape(int(nocc * nvir), int(nocc * nvir)),
         )
-
-    def _total_point_local_energy_from_semilocal_pt2_variables(
-        self,
-        params: PyTree,
-        variables: Array,
-        hf_point: Array,
-        hf_point_a: Array,
-        hf_point_b: Array,
-    ) -> Array:
-        response_floor = self._effective_response_density_floor()
-        rho_point = jnp.maximum(variables[0], response_floor)
-        grad_point = variables[1:4]
-        tau_point = jnp.maximum(variables[4], 0.0)
-        pt2_point = variables[5]
-        point_features = restricted_feature_bundle_from_response_variables(
-            rho_point,
-            grad_point,
-            tau_point,
-            density_floor=response_floor,
-        )
-        semilocal_channels = self.semilocal_energy_density_channels(point_features)
-        semilocal_local_channels = self._semilocal_local_contribution_channels(
-            point_features,
-            semilocal_channels,
-        )
-        semilocal_total = jnp.sum(semilocal_channels, axis=-1)
-        coefficients = self.channel_coefficients(
-            params,
-            point_features,
-            semilocal_energy_density=semilocal_total,
-            hf_energy_density=jax.lax.stop_gradient(hf_point),
-            pt2_energy_density=pt2_point,
-            hf_spin_energy_density=(
-                jax.lax.stop_gradient(hf_point_a),
-                jax.lax.stop_gradient(hf_point_b),
-            ),
-        )
-        basis = self._assemble_basis_channels(
-            semilocal_local_channels,
-            hf_projected=jnp.zeros_like(hf_point),
-            pt2_projected=pt2_point,
-        )
-        channels = self._assemble_channel_contributions(coefficients, basis)
-        return jnp.sum(channels, axis=-1)
-
-    def _strict_pt2_nonlocal_response_matrix(
-        self,
-        params: PyTree,
-        molecule: Any,
-        features: RestrictedFeatureBundle,
-        total_gradient: Array,
-        hf_projected: Array,
-        pt2_projected: Array,
-        *,
-        hf_spin_energy_density: tuple[Array, Array],
-        occupation_tolerance: float = 1e-8,
-    ) -> Array:
-        if not self.include_pt2_channel or self.response_pt2_mode != "strict":
-            mo_coeff = jnp.asarray(molecule.mo_coeff)
-            mo_occ = jnp.asarray(molecule.mo_occ)
-            if mo_coeff.ndim == 3:
-                mo_coeff = mo_coeff[0]
-                mo_occ = mo_occ[0]
-            nocc = getattr(molecule, "nocc", None)
-            if nocc is None:
-                nocc = int(jnp.count_nonzero(mo_occ > occupation_tolerance))
-            nvir = int(mo_coeff.shape[1]) - int(nocc)
-            return jnp.zeros((int(nocc * nvir), int(nocc * nvir)), dtype=features.rho.dtype)
-
-        response_floor = self._effective_response_density_floor()
-        rho0 = jnp.maximum(features.rho, response_floor)
-        tau0 = jnp.maximum(features.tau_a + features.tau_b, 0.0)
-        response_variables = jnp.concatenate(
-            [rho0[..., None], jnp.asarray(total_gradient), tau0[..., None], pt2_projected[..., None]],
-            axis=-1,
-        )
-        active = rho0 > response_floor
-        point_hessian_fn = jax.hessian(
-            self._total_point_local_energy_from_semilocal_pt2_variables,
-            argnums=1,
-        )
-        hf_feature_a, hf_feature_b = hf_spin_energy_density
-
-        def point_tensor(
-            variables: Array,
-            hf_point: Array,
-            hf_point_a: Array,
-            hf_point_b: Array,
-        ) -> Array:
-            return point_hessian_fn(
-                params,
-                variables,
-                hf_point,
-                hf_point_a,
-                hf_point_b,
-            )
-
-        tensor = jax.vmap(point_tensor)(
-            response_variables,
-            hf_projected,
-            hf_feature_a,
-            hf_feature_b,
-        )
-        tensor = jnp.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
-        tensor = self._maybe_clip_response(tensor)
-        tensor = tensor * active[:, None, None].astype(tensor.dtype)
-        tensor = jnp.asarray(tensor).transpose(1, 2, 0)
-
-        semilocal_response_features = restricted_transition_response_features(
-            molecule,
-            feature_kind="MGGA",
-            occupation_tolerance=occupation_tolerance,
-        )
-        pt2_response_feature = _strict_pt2_transition_feature_from_restricted_orbitals(
-            molecule.ao,
-            molecule.mo_coeff,
-            molecule.mo_occ,
-            molecule.mo_energy,
-            rep_tensor=getattr(molecule, "rep_tensor", None),
-            eri_pair_matrix=getattr(molecule, "eri_pair_matrix", None),
-            df_factors=getattr(molecule, "df_factors", None),
-            nocc=getattr(molecule, "nocc", None),
-            occupation_tolerance=occupation_tolerance,
-            density_floor=self.density_floor,
-        )
-        response_features = jnp.concatenate(
-            [semilocal_response_features, pt2_response_feature[None, ...]],
-            axis=0,
-        )
-        mask = jnp.zeros((6, 6), dtype=tensor.dtype)
-        mask = mask.at[5, :].set(1.0)
-        mask = mask.at[:, 5].set(1.0)
-        weighted_tensor = (
-            tensor
-            * mask[:, :, None]
-            * jnp.asarray(molecule.grid.weights, dtype=tensor.dtype)[None, None, :]
-        )
-        matrix = 2.0 * jnp.einsum(
-            "xyr,xria,yrjb->iajb",
-            weighted_tensor,
-            response_features,
-            response_features,
-            precision=Precision.HIGHEST,
-        )
-        nocc, nvir = matrix.shape[:2]
-        return matrix.reshape(int(nocc * nvir), int(nocc * nvir))
 
     def _strict_total_potential_components(
         self,
