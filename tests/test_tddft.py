@@ -9,7 +9,9 @@ import td_graddft.features as features_module
 import td_graddft.tddft.casida as casida_module
 import td_graddft.tddft.response as response_module
 from td_graddft.tddft import RestrictedCasidaTDDFT, build_restricted_response_matrices
+from td_graddft.tddft.cisd import restricted_cisd_second_order_correction
 from td_graddft.tddft.response import build_restricted_tda_operator
+from td_graddft.tddft.types import TDAResult
 
 
 @dataclass(frozen=True)
@@ -355,6 +357,84 @@ def test_restricted_casida_tddft_returns_expected_toy_excitation():
     assert jnp.allclose(result.excitation_energies, jnp.array([jnp.sqrt(3.0)]))
     assert result.x_amplitudes.shape == (1, 1, 1)
     assert result.y_amplitudes.shape == (1, 1, 1)
+
+
+def test_restricted_solver_applies_posthoc_second_order_corrections():
+    molecule = _make_toy_molecule()
+
+    class _PostHocDoubleHybridXC:
+        exact_exchange_fraction = 0.0
+
+        def local_kernel(self, density):
+            return jnp.zeros_like(density)
+
+        def post_tda_correction(self, mol, result, *, occupation_tolerance=1e-8):
+            del mol, occupation_tolerance
+            return jnp.full_like(result.excitation_energies, 0.25)
+
+        def post_tddft_correction(self, mol, result, *, occupation_tolerance=1e-8):
+            del mol, occupation_tolerance
+            return jnp.full_like(result.excitation_energies, -0.125)
+
+    solver = RestrictedCasidaTDDFT(molecule, _PostHocDoubleHybridXC(), eigensolver="dense")
+    tda = solver.tda(nstates=1)
+    casida = solver.kernel(nstates=1)
+
+    assert jnp.allclose(tda.excitation_energies, jnp.array([1.25]), atol=1e-10)
+    assert jnp.allclose(
+        casida.excitation_energies,
+        jnp.array([1.0 - 0.125]),
+        atol=1e-10,
+    )
+    assert jnp.allclose(tda.posthoc_correction, jnp.array([0.25]))
+    assert jnp.allclose(casida.posthoc_correction, jnp.array([-0.125]))
+
+
+def test_restricted_cisd_correction_is_root_specific_and_scaled_by_ac():
+    nmo = 3
+    ao = jnp.eye(nmo, dtype=jnp.float64)
+    raw_eri = jnp.arange(nmo**4, dtype=jnp.float64).reshape(nmo, nmo, nmo, nmo) / 100.0
+    rep_tensor = 0.25 * (
+        raw_eri
+        + jnp.transpose(raw_eri, (1, 0, 2, 3))
+        + jnp.transpose(raw_eri, (0, 1, 3, 2))
+        + jnp.transpose(raw_eri, (2, 3, 0, 1))
+    )
+    molecule = _ToyMolecule(
+        ao=ao,
+        ao_deriv1=jnp.stack([ao, jnp.zeros_like(ao), jnp.zeros_like(ao), jnp.zeros_like(ao)]),
+        grid=_Grid(weights=jnp.ones((nmo,), dtype=jnp.float64)),
+        rep_tensor=rep_tensor,
+        mo_coeff=jnp.stack([jnp.eye(nmo, dtype=jnp.float64), jnp.eye(nmo, dtype=jnp.float64)]),
+        mo_occ=jnp.asarray([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=jnp.float64),
+        mo_energy=jnp.asarray([[0.0, 1.4, 1.9], [0.0, 1.4, 1.9]], dtype=jnp.float64),
+        rdm1=jnp.stack(
+            [
+                jnp.diag(jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)),
+                jnp.diag(jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)),
+            ]
+        ),
+    )
+    amplitudes = jnp.asarray(
+        [
+            [[1.0 / jnp.sqrt(2.0), 0.0]],
+            [[1.0 / jnp.sqrt(2.0), 0.0]],
+        ],
+        dtype=jnp.float64,
+    )
+    result = TDAResult(
+        excitation_energies=jnp.asarray([0.45, 0.80], dtype=jnp.float64),
+        amplitudes=amplitudes,
+        a_matrix=None,
+    )
+
+    unscaled = restricted_cisd_second_order_correction(molecule, result)
+    scaled = restricted_cisd_second_order_correction(molecule, result, ac=0.37)
+
+    assert unscaled.shape == (2,)
+    assert jnp.all(jnp.isfinite(unscaled))
+    assert not jnp.allclose(unscaled[0], unscaled[1], atol=1e-12)
+    assert jnp.allclose(scaled, 0.37 * unscaled, atol=1e-12)
 
 
 def test_matrix_free_tda_vind_matches_materialized_matrix_action():

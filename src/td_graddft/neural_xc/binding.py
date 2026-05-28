@@ -12,6 +12,7 @@ from ..features import (
     restricted_grid_features,
     restricted_grid_features_with_gradients,
 )
+from ..tddft.cisd import restricted_cisd_second_order_correction
 from ..xc_backend.jax_libxc import RestrictedFeatureBundle
 
 @dataclass(frozen=True)
@@ -30,6 +31,8 @@ class BoundNeuralXCFunctional:
     grid_hfx_feature_gradients_fn: Callable[[], tuple[Array, Array]] | None = None
     nonlocal_response_matrix_fn: Callable[..., Array] | None = None
     nonlocal_response_matrices_fn: Callable[..., tuple[Array, Array]] | None = None
+    post_tda_correction_fn: Callable[..., Array] | None = None
+    post_tddft_correction_fn: Callable[..., Array] | None = None
 
     def local_kernel(self, density: Array) -> Array:
         del density
@@ -136,6 +139,36 @@ class BoundNeuralXCFunctional:
             return matrix, matrix
         return self.nonlocal_response_matrices_fn(
             molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+
+    def post_tda_correction(
+        self,
+        molecule: Any,
+        result: Any,
+        *,
+        occupation_tolerance: float = 1e-8,
+    ) -> Array:
+        if self.post_tda_correction_fn is None:
+            raise AttributeError("This bound functional does not expose a post-TDA correction.")
+        return self.post_tda_correction_fn(
+            molecule,
+            result,
+            occupation_tolerance=occupation_tolerance,
+        )
+
+    def post_tddft_correction(
+        self,
+        molecule: Any,
+        result: Any,
+        *,
+        occupation_tolerance: float = 1e-8,
+    ) -> Array:
+        if self.post_tddft_correction_fn is None:
+            raise AttributeError("This bound functional does not expose a post-TDDFT correction.")
+        return self.post_tddft_correction_fn(
+            molecule,
+            result,
             occupation_tolerance=occupation_tolerance,
         )
 
@@ -390,34 +423,6 @@ class NeuralXCBindingMixin:
             response_pt2,
         )
 
-    def _strict_pt2_nonlocal_response_matrix_from_molecule(
-        self,
-        params: PyTree,
-        response_molecule: Any,
-        *,
-        occupation_tolerance: float,
-    ) -> Array:
-        (
-            response_features,
-            response_total_gradient,
-            response_hf,
-            response_hfx_a,
-            response_hfx_b,
-            response_pt2,
-        ) = self._nonlocal_response_components(response_molecule)
-        if response_pt2 is None:
-            raise AttributeError("PT2 nonlocal response requires include_pt2_channel=True.")
-        return self._strict_pt2_nonlocal_response_matrix(
-            params,
-            response_molecule,
-            response_features,
-            response_total_gradient,
-            response_hf,
-            response_pt2,
-            hf_spin_energy_density=(response_hfx_a, response_hfx_b),
-            occupation_tolerance=occupation_tolerance,
-        )
-
     def _strict_nonlocal_response_matrices_from_molecule(
         self,
         params: PyTree,
@@ -443,38 +448,12 @@ class NeuralXCBindingMixin:
             pt2_projected=response_pt2,
             occupation_tolerance=occupation_tolerance,
         )
-        if self.include_pt2_channel and self.response_pt2_mode == "strict":
-            if response_pt2 is None:
-                raise AttributeError("PT2 nonlocal response requires include_pt2_channel=True.")
-            pt2_matrix = self._strict_pt2_nonlocal_response_matrix(
-                params,
-                response_molecule,
-                response_features,
-                response_total_gradient,
-                response_hf,
-                response_pt2,
-                hf_spin_energy_density=(response_hfx_a, response_hfx_b),
-                occupation_tolerance=occupation_tolerance,
-            )
-            matrix_a = matrix_a + pt2_matrix
-            matrix_b = matrix_b + pt2_matrix
         return matrix_a, matrix_b
 
     def _nonlocal_response_callbacks(
         self,
         params: PyTree,
-    ) -> tuple[Callable[..., Array], Callable[..., tuple[Array, Array]]]:
-        def nonlocal_response_matrix_fn(
-            response_molecule: Any,
-            *,
-            occupation_tolerance: float = 1e-8,
-        ) -> Array:
-            return self._strict_pt2_nonlocal_response_matrix_from_molecule(
-                params,
-                response_molecule,
-                occupation_tolerance=occupation_tolerance,
-            )
-
+    ) -> tuple[None, Callable[..., tuple[Array, Array]]]:
         def nonlocal_response_matrices_fn(
             response_molecule: Any,
             *,
@@ -486,7 +465,47 @@ class NeuralXCBindingMixin:
                 occupation_tolerance=occupation_tolerance,
             )
 
-        return nonlocal_response_matrix_fn, nonlocal_response_matrices_fn
+        return None, nonlocal_response_matrices_fn
+
+    def _strict_pt2_posthoc_correction_callbacks(
+        self,
+        rho: Array,
+        semilocal_channels: Array,
+        coefficients: Array,
+        pt2_projected: Array | None,
+        grid_weights: Array,
+    ) -> tuple[Callable[..., Array] | None, Callable[..., Array] | None]:
+        if (
+            not self.include_pt2_channel
+            or self.response_pt2_mode != "strict"
+            or pt2_projected is None
+        ):
+            return None, None
+
+        n_semilocal = int(jnp.asarray(semilocal_channels).shape[-1])
+        pt2_coefficients = jnp.asarray(coefficients)[..., n_semilocal]
+        weights = jnp.asarray(grid_weights)
+        density = jnp.maximum(jnp.asarray(rho), self.density_floor)
+        numerator = jnp.tensordot(weights, density * pt2_coefficients, axes=(0, 0))
+        denominator = jnp.tensordot(weights, density, axes=(0, 0))
+        ac = numerator / jnp.maximum(denominator, self.density_floor)
+        ac = jnp.nan_to_num(ac, nan=0.0, posinf=1.0, neginf=0.0)
+        ac = jnp.clip(ac, 0.0, 1.0)
+
+        def post_correction(
+            molecule: Any,
+            result: Any,
+            *,
+            occupation_tolerance: float = 1e-8,
+        ) -> Array:
+            return restricted_cisd_second_order_correction(
+                molecule,
+                result,
+                ac=ac,
+                occupation_tolerance=occupation_tolerance,
+            )
+
+        return post_correction, post_correction
 
     def _alpha_for_scf_fock(
         self,
@@ -607,6 +626,7 @@ class NeuralXCBindingMixin:
             pt2_projected=pt2_projected,
             hf_spin_energy_density=(hfx_feature_a, hfx_feature_b),
             response_hf_mode=self.response_hf_mode,
+            response_pt2_mode=self.response_pt2_mode,
             strict_payload=strict_payload,
         )
         projected_kernel = projected_tensor[0, 0]
@@ -647,8 +667,17 @@ class NeuralXCBindingMixin:
                 grid_weights=molecule.grid.weights,
             )
 
-        nonlocal_response_matrix_fn, nonlocal_response_matrices_fn = self._nonlocal_response_callbacks(
+        _, nonlocal_response_matrices_fn = self._nonlocal_response_callbacks(
             params
+        )
+        post_tda_correction_fn, post_tddft_correction_fn = (
+            self._strict_pt2_posthoc_correction_callbacks(
+                features.rho,
+                semilocal_channels,
+                coefficients,
+                pt2_projected,
+                molecule.grid.weights,
+            )
         )
         response_alpha = (
             jnp.zeros_like(jnp.asarray(alpha))
@@ -668,20 +697,14 @@ class NeuralXCBindingMixin:
             response_feature_kind=self._response_feature_kind_label(),
             grid_response_tensor_fn=grid_response_tensor_fn,
             grid_hfx_feature_gradients_fn=grid_hfx_feature_gradients_fn,
-            nonlocal_response_matrix_fn=(
-                nonlocal_response_matrix_fn
-                if (
-                    self.response_hf_mode != "strict"
-                    and self.include_pt2_channel
-                    and self.response_pt2_mode == "strict"
-                )
-                else None
-            ),
+            nonlocal_response_matrix_fn=None,
             nonlocal_response_matrices_fn=(
                 nonlocal_response_matrices_fn
                 if self.response_hf_mode == "strict"
                 else None
             ),
+            post_tda_correction_fn=post_tda_correction_fn,
+            post_tddft_correction_fn=post_tddft_correction_fn,
         )
 
     def bind_to_molecule_for_response(
@@ -740,6 +763,7 @@ class NeuralXCBindingMixin:
             pt2_projected=pt2_projected,
             hf_spin_energy_density=(hfx_feature_a, hfx_feature_b),
             response_hf_mode=self.response_hf_mode,
+            response_pt2_mode=self.response_pt2_mode,
             strict_payload=strict_payload,
         )
         rho = jnp.maximum(features.rho, self.density_floor)
@@ -753,8 +777,17 @@ class NeuralXCBindingMixin:
         def grid_response_tensor_fn() -> Array:
             return projected_tensor
 
-        nonlocal_response_matrix_fn, nonlocal_response_matrices_fn = self._nonlocal_response_callbacks(
+        _, nonlocal_response_matrices_fn = self._nonlocal_response_callbacks(
             params
+        )
+        post_tda_correction_fn, post_tddft_correction_fn = (
+            self._strict_pt2_posthoc_correction_callbacks(
+                features.rho,
+                semilocal_channels,
+                coefficients,
+                pt2_projected,
+                molecule.grid.weights,
+            )
         )
         # TD response uses the configured response tensor and avoids strict
         # potential/energy assembly.
@@ -776,20 +809,14 @@ class NeuralXCBindingMixin:
             response_feature_kind=self._response_feature_kind_label(),
             grid_response_tensor_fn=grid_response_tensor_fn,
             grid_hfx_feature_gradients_fn=None,
-            nonlocal_response_matrix_fn=(
-                nonlocal_response_matrix_fn
-                if (
-                    self.response_hf_mode != "strict"
-                    and self.include_pt2_channel
-                    and self.response_pt2_mode == "strict"
-                )
-                else None
-            ),
+            nonlocal_response_matrix_fn=None,
             nonlocal_response_matrices_fn=(
                 nonlocal_response_matrices_fn
                 if self.response_hf_mode == "strict"
                 else None
             ),
+            post_tda_correction_fn=post_tda_correction_fn,
+            post_tddft_correction_fn=post_tddft_correction_fn,
         )
 
     def _scf_binding_payload(

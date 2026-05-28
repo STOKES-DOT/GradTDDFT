@@ -40,6 +40,7 @@ class TDAResult:
     excitation_energies: Array
     amplitudes: Array
     a_matrix: Optional[Array]
+    posthoc_correction: Optional[Array] = None
 
 
 @_pytree_dataclass
@@ -53,3 +54,4 @@ class TDDFTResult:
     a_matrix: Optional[Array]
     b_matrix: Optional[Array]
     casida_matrix: Optional[Array]
+    posthoc_correction: Optional[Array] = None
