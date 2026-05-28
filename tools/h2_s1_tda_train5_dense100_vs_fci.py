@@ -14,6 +14,7 @@ from typing import Any
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("MPLCONFIGDIR", str(Path("outputs") / ".mplconfig"))
 
+import h5py
 import jax
 
 jax.config.update("jax_enable_x64", True)
@@ -24,12 +25,14 @@ import optax
 from pyscf import ao2mo, fci, gto, scf
 
 from td_graddft import neural_xc
+from td_graddft.data.hdf5_cache import read_restricted_molecule, write_restricted_molecule
 from td_graddft.neural_xc import (
     DEFAULT_INPUT_FEATURE_MODE,
     DEFAULT_NETWORK_ARCHITECTURE,
     DEFAULT_NETWORK_HIDDEN_DIMS,
 )
 from td_graddft.spectra import HARTREE_TO_EV
+from td_graddft.tddft import refresh_restricted_response_eri_slices
 from td_graddft.training import (
     ExcitedStateDatum,
     GroundStateCoreDatum,
@@ -117,6 +120,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--dense-points", type=int, default=100)
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument(
+        "--reference-cache",
+        default=None,
+        help="Optional HDF5 file used to cache reference molecules, grids, and integrals.",
+    )
+    p.add_argument(
+        "--rebuild-reference-cache",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Rebuild cached reference groups even when they already exist.",
+    )
+    p.add_argument(
+        "--stream-train",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Train from per-geometry dynamic inputs instead of capturing the full "
+            "training set inside one JIT graph."
+        ),
+    )
+    p.add_argument(
+        "--skip-initial-eval",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="In streaming mode, enter the first train step without a pre-train loss evaluation.",
+    )
+    p.add_argument(
+        "--defer-dense-eval",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Build dense references only after training, reducing peak pre-train memory.",
+    )
+    p.add_argument(
         "--init-checkpoint",
         default=None,
         help="Optional Flax msgpack checkpoint used to initialize the Neural_xc params.",
@@ -135,7 +170,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--training-mode",
         choices=("fixed_density", "self_consistent"),
-        default="fixed_density",
+        default="self_consistent",
     )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
@@ -171,11 +206,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("approx", "strict"),
         default="approx",
         help=(
-            "Choose how the PT2 channel enters strict TD response. "
-            "strict builds a separate nonlocal PT2 response matrix; "
-            "PT2 is not treated as an MGGA variable."
+            "PT2 response mode. 'approx' keeps PT2 as a frozen energy-density "
+            "channel in the response kernel; 'strict' solves the no-PT2 response "
+            "and adds a post-hoc second-order correction."
         ),
     )
+    p.add_argument("--response-grid-chunk-size", type=int, default=1024)
     p.add_argument(
         "--semilocal-xc",
         nargs="+",
@@ -218,7 +254,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.0,
         help="Density-matching weight. Keep at 0 for pure S1 training.",
     )
-    p.add_argument("--grids-level", type=int, default=0)
+    p.add_argument("--grids-level", type=int, default=2)
     p.add_argument("--max-l", type=int, default=3)
     p.add_argument(
         "--grid-ao-backend",
@@ -248,8 +284,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="pyscf",
         help="SCF backend used to build the training/evaluation reference molecules.",
     )
-    p.add_argument("--train-scf-max-cycle", type=int, default=16)
+    p.add_argument(
+        "--train-scf-max-cycle",
+        type=int,
+        default=16,
+        help=(
+            "SCF scan safety cap during training. Use 0 only for the helper "
+            "default high cap when debugging convergence."
+        ),
+    )
     p.add_argument("--train-scf-damping", type=float, default=0.25)
+    p.add_argument("--train-scf-conv-tol-energy", type=float, default=None)
+    p.add_argument(
+        "--train-scf-convergence-metric",
+        choices=("energy_and_residual", "energy"),
+        default="energy_and_residual",
+    )
     p.add_argument("--train-scf-conv-tol-density", type=float, default=1e-8)
     p.add_argument("--train-scf-vxc-clip", type=float, default=20.0)
     p.add_argument(
@@ -425,6 +475,7 @@ def _make_s1_functional(args: argparse.Namespace) -> Any:
         pt2_channel_mode=str(args.pt2_channel_mode),
         response_hf_mode="approx",
         response_pt2_mode=str(args.response_pt2_mode),
+        response_grid_chunk_size=int(args.response_grid_chunk_size),
         name=f"neural_xc_h2_s1_tda_{str(args.training_mode)}",
     )
 
@@ -459,13 +510,142 @@ def build_s1_training_data(
     return tuple(data)
 
 
+def _write_reference_point(group: Any, point: Any) -> None:
+    group.attrs["r_angstrom"] = float(point.r_angstrom)
+    group.attrs["atom"] = str(point.atom)
+    group.attrs["fci_energy_h"] = float(point.fci_energy_h)
+    group.attrs["fci_electron_count"] = float(point.fci_electron_count)
+    for name in (
+        "fci_total_energies_h",
+        "fci_excitation_energies_h",
+        "fci_dm_ao",
+        "fci_density_grid",
+    ):
+        if name in group:
+            del group[name]
+        group.create_dataset(name, data=np.asarray(getattr(point, name)), compression="gzip")
+    write_restricted_molecule(group.require_group("molecule"), point.molecule)
+
+
+def _read_reference_point(group: Any) -> Any:
+    return _HELPERS.ReferencePoint(
+        r_angstrom=float(group.attrs["r_angstrom"]),
+        atom=str(group.attrs["atom"]),
+        molecule=read_restricted_molecule(group["molecule"]),
+        fci_energy_h=float(group.attrs["fci_energy_h"]),
+        fci_total_energies_h=np.asarray(group["fci_total_energies_h"][()], dtype=np.float64),
+        fci_excitation_energies_h=np.asarray(
+            group["fci_excitation_energies_h"][()],
+            dtype=np.float64,
+        ),
+        fci_dm_ao=np.asarray(group["fci_dm_ao"][()], dtype=np.float64),
+        fci_density_grid=np.asarray(group["fci_density_grid"][()], dtype=np.float64),
+        fci_electron_count=float(group.attrs["fci_electron_count"]),
+    )
+
+
+def _cache_group_name(label: str, args: argparse.Namespace) -> str:
+    pt2 = "pt2" if bool(args.include_pt2_channel) else "nopt2"
+    npoints = int(args.train_points if label == "train" else args.dense_points)
+    return (
+        f"{label}/basis={str(args.basis).replace('/', '_')}/"
+        f"grid={int(args.grids_level)}/"
+        f"r={float(args.r_min):.8g}-{float(args.r_max):.8g}/"
+        f"n={npoints}/{pt2}/"
+        f"pt2mode={str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else 'none'}"
+    )
+
+
+def _save_reference_points_hdf5(path: Path, group_name: str, points: list[Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "a") as handle:
+        if group_name in handle:
+            del handle[group_name]
+        group = handle.create_group(group_name)
+        group.attrs["count"] = int(len(points))
+        for idx, point in enumerate(points):
+            _write_reference_point(group.create_group(f"point_{idx:04d}"), point)
+
+
+def _load_reference_points_hdf5(path: Path, group_name: str) -> list[Any]:
+    with h5py.File(path, "r") as handle:
+        group = handle[group_name]
+        count = int(group.attrs["count"])
+        return [_read_reference_point(group[f"point_{idx:04d}"]) for idx in range(count)]
+
+
+def _has_hdf5_group(path: Path, group_name: str) -> bool:
+    if not path.exists():
+        return False
+    with h5py.File(path, "r") as handle:
+        return group_name in handle
+
+
+def _get_or_build_reference_curve(
+    r_values: np.ndarray,
+    *,
+    args: argparse.Namespace,
+    logger: RunLogger,
+    label: str,
+) -> list[Any]:
+    cache_arg = getattr(args, "reference_cache", None)
+    cache_label = "train" if label.startswith("train") else "dense"
+    if cache_arg is None:
+        return build_reference_curve(r_values, args=args, logger=logger, label=label)
+    cache_path = Path(str(cache_arg))
+    group_name = _cache_group_name(cache_label, args)
+    if _has_hdf5_group(cache_path, group_name) and not bool(args.rebuild_reference_cache):
+        logger.log(f"[{label}] loading cached references from {cache_path}:{group_name}")
+        points = _load_reference_points_hdf5(cache_path, group_name)
+        logger.log(f"[{label}] loaded {len(points)} cached references")
+        return points
+    points = build_reference_curve(r_values, args=args, logger=logger, label=label)
+    logger.log(f"[{label}] writing cached references to {cache_path}:{group_name}")
+    _save_reference_points_hdf5(cache_path, group_name, points)
+    return points
+
+
+def _tree_add(left: Any | None, right: Any) -> Any:
+    if left is None:
+        return right
+    return jax.tree_util.tree_map(lambda a, b: a + b, left, right)
+
+
+def _tree_scale(tree: Any, scale: float) -> Any:
+    return jax.tree_util.tree_map(lambda value: value * scale, tree)
+
+
+def _streaming_average_eval(
+    params: Any,
+    data: tuple[GroundStateDatum, ...],
+    eval_kernel: Any,
+) -> tuple[float, dict[str, float]]:
+    losses: list[float] = []
+    s1_penalties: list[float] = []
+    s1_maes: list[float] = []
+    s1_mses: list[float] = []
+    for datum in data:
+        loss, metrics = eval_kernel(params, datum)
+        losses.append(float(loss))
+        s1_penalties.append(_metric_mean(metrics, "s1_penalty", 0.0))
+        s1_maes.append(_metric_mean(metrics, "s1_mae", 0.0))
+        s1_mses.append(_metric_mean(metrics, "s1_mse", 0.0))
+    return float(np.mean(losses)), {
+        "s1_penalty": float(np.mean(s1_penalties)),
+        "s1_mae": float(np.mean(s1_maes)),
+        "s1_mse": float(np.mean(s1_mses)),
+    }
+
+
 def _self_consistent_prediction_config(args: argparse.Namespace) -> GroundStateTrainingConfig:
     return GroundStateTrainingConfig(
         mode="self_consistent",
         energy_mse_weight=0.0,
         energy_mae_weight=0.0,
-        scf_max_cycle=int(args.train_scf_max_cycle),
+        scf_max_cycle=_HELPERS._resolve_train_scf_max_cycle(args.train_scf_max_cycle),
         scf_damping=float(args.train_scf_damping),
+        scf_conv_tol_energy=args.train_scf_conv_tol_energy,
+        scf_convergence_metric=str(args.train_scf_convergence_metric),
         scf_conv_tol_density=float(args.train_scf_conv_tol_density),
         scf_vxc_clip=float(args.train_scf_vxc_clip),
         scf_iterate_selection=str(args.scf_iterate_selection),
@@ -509,14 +689,221 @@ def _rebuild_points_with_fixed_density_checkpoint(
             point.molecule,
             training_config=prediction_config,
         )
+        predicted_molecule = refresh_restricted_response_eri_slices(predicted_molecule)
         rebuilt.append(replace(point, molecule=predicted_molecule))
         logger.log(
             f"[{label}] {idx:3d}/{len(points):3d} "
             f"R={float(point.r_angstrom):.4f} A "
-            "fixed density rebuilt"
+            "fixed density rebuilt; response ERI cached"
         )
     logger.log(f"[{label}] done in {time.perf_counter() - t0:.2f} s")
     return rebuilt
+
+
+def _train_functional_streaming(
+    train_points: list[Any],
+    training_data: tuple[GroundStateDatum, ...],
+    *,
+    args: argparse.Namespace,
+    logger: RunLogger,
+    functional: Any,
+    gs_training: GroundStateTrainingConfig,
+    optimizer: optax.GradientTransformation,
+) -> dict[str, Any]:
+    state = create_train_state_from_molecule(
+        functional,
+        jax.random.PRNGKey(int(args.seed)),
+        train_points[0].molecule,
+        optimizer,
+    )
+    if args.init_checkpoint:
+        init_checkpoint = Path(str(args.init_checkpoint))
+        state = state.replace(
+            params=load_params_checkpoint(init_checkpoint, template=state.params)
+        )
+        logger.log(f"[train_init] loaded params from checkpoint: {init_checkpoint}")
+
+    loss_and_grad_kernel = make_ground_state_loss_and_grad(
+        functional,
+        training_config=gs_training,
+    )
+    eval_kernel = lambda params, datum: ground_state_mse_loss(  # noqa: E731
+        params,
+        functional,
+        datum,
+        training_config=gs_training,
+    )
+    if bool(args.jit_train):
+        loss_and_grad_kernel = jax.jit(loss_and_grad_kernel)
+    if bool(args.jit_eval):
+        eval_kernel = jax.jit(eval_kernel)
+
+    lr_schedule = (
+        optax.exponential_decay(
+            init_value=float(args.learning_rate),
+            transition_steps=int(args.lr_decay_every),
+            decay_rate=float(args.lr_decay_factor),
+            staircase=True,
+        )
+        if int(args.lr_decay_every) > 0
+        else None
+    )
+    logger.log("[train_init] streaming mode: one geometry per JIT call; averaging grads")
+    if bool(args.skip_initial_eval):
+        initial_loss_val = float("nan")
+        initial_metrics = {"s1_penalty": 0.0, "s1_mae": 0.0, "s1_mse": 0.0}
+        min_loss = float("inf")
+        logger.log("[train_init] skipped initial eval")
+    else:
+        initial_loss_val, initial_metrics = _streaming_average_eval(
+            state.params,
+            training_data,
+            eval_kernel,
+        )
+        min_loss = initial_loss_val
+    min_loss_step = 0
+    best_params = state.params
+    history_steps = [0]
+    loss_history = [initial_loss_val]
+    s1_penalty_history = [initial_metrics["s1_penalty"]]
+    s1_mae_history = [initial_metrics["s1_mae"]]
+    s1_mse_history = [initial_metrics["s1_mse"]]
+    grad_norm_history = [float("nan")]
+    grad_abs_max_history = [float("nan")]
+    param_update_norm_history = [float("nan")]
+    nonfinite_grad_fraction_history = [0.0]
+    eval_steps = [0]
+    eval_loss_history = [initial_loss_val]
+    eval_s1_mae_history = [initial_metrics["s1_mae"]]
+    logger.log(
+        "[train] "
+        f"steps={int(args.steps)} "
+        f"lr={float(args.learning_rate):.6g} "
+        f"mode={str(args.training_mode)} "
+        f"objective=s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'} "
+        f"s1_weight={float(args.s1_weight):.6g} "
+        "train_step_mode=stream_single_geometry"
+    )
+
+    t0 = time.perf_counter()
+    for step in range(1, int(args.steps) + 1):
+        params_for_loss = state.params
+        grad_sum = None
+        losses: list[float] = []
+        s1_penalties: list[float] = []
+        s1_maes: list[float] = []
+        s1_mses: list[float] = []
+        grad_norms: list[float] = []
+        grad_abs_maxes: list[float] = []
+        nonfinite_fracs: list[float] = []
+        for datum in training_data:
+            loss, metrics, grads = loss_and_grad_kernel(params_for_loss, datum)
+            losses.append(float(loss))
+            s1_penalties.append(_metric_mean(metrics, "s1_penalty", 0.0))
+            s1_maes.append(_metric_mean(metrics, "s1_mae", 0.0))
+            s1_mses.append(_metric_mean(metrics, "s1_mse", 0.0))
+            grad_norms.append(_metric_scalar(metrics, "grad_norm"))
+            grad_abs_maxes.append(_metric_scalar(metrics, "grad_abs_max"))
+            nonfinite_fracs.append(_metric_scalar(metrics, "nonfinite_grad_fraction", 0.0))
+            grad_sum = _tree_add(grad_sum, grads)
+        grads_avg = _tree_scale(grad_sum, 1.0 / max(1, len(training_data)))
+        train_loss_val = float(np.mean(losses))
+        train_s1_penalty_val = float(np.mean(s1_penalties))
+        train_s1_mae_val = float(np.mean(s1_maes))
+        train_s1_mse_val = float(np.mean(s1_mses))
+        grad_norm_val = float(np.mean(grad_norms))
+        grad_abs_max_val = float(np.max(grad_abs_maxes))
+        nonfinite_grad_fraction_val = float(np.mean(nonfinite_fracs))
+        if train_loss_val < min_loss:
+            min_loss = train_loss_val
+            min_loss_step = step
+            best_params = params_for_loss
+
+        prev_state = state
+        state = state.apply_gradients(grads=grads_avg)
+        param_delta = jax.tree_util.tree_map(
+            lambda new, old: new - old,
+            state.params,
+            prev_state.params,
+        )
+        reverted_step = False
+        if not _tree_all_finite(state.params):
+            state = prev_state
+            reverted_step = True
+            logger.log(f"[train] non-finite params detected at step {step}; reverted update")
+
+        param_update_norm_val = 0.0 if reverted_step else float(_tree_l2_norm(param_delta))
+
+        history_steps.append(step)
+        loss_history.append(train_loss_val)
+        s1_penalty_history.append(train_s1_penalty_val)
+        s1_mae_history.append(train_s1_mae_val)
+        s1_mse_history.append(train_s1_mse_val)
+        grad_norm_history.append(grad_norm_val)
+        grad_abs_max_history.append(grad_abs_max_val)
+        param_update_norm_history.append(param_update_norm_val)
+        nonfinite_grad_fraction_history.append(nonfinite_grad_fraction_val)
+        if step == 1 or step % 10 == 0 or step == int(args.steps):
+            eval_steps.append(step)
+            eval_loss_history.append(train_loss_val)
+            eval_s1_mae_history.append(train_s1_mae_val)
+            current_lr = (
+                float(lr_schedule(step - 1))
+                if lr_schedule is not None
+                else float(args.learning_rate)
+            )
+            logger.log(
+                "[train] "
+                f"step={step:4d}/{int(args.steps):4d} "
+                f"loss={train_loss_val:.8e} "
+                f"s1_mae={train_s1_mae_val:.8e} "
+                f"grad_norm={grad_norm_val:.8e} "
+                f"grad_abs_max={grad_abs_max_val:.8e} "
+                f"update_norm={param_update_norm_val:.8e} "
+                f"lr={current_lr:.8e}"
+            )
+
+    elapsed_s = time.perf_counter() - t0
+    final_loss_val, final_metrics = _streaming_average_eval(
+        state.params,
+        training_data,
+        eval_kernel,
+    )
+    if final_loss_val < min_loss:
+        min_loss = final_loss_val
+        min_loss_step = int(args.steps)
+        best_params = state.params
+    loss_history[-1] = final_loss_val
+    s1_penalty_history[-1] = final_metrics["s1_penalty"]
+    s1_mae_history[-1] = final_metrics["s1_mae"]
+    s1_mse_history[-1] = final_metrics["s1_mse"]
+    logger.log(
+        "[train] done "
+        f"final_loss={final_loss_val:.8e} "
+        f"min_loss={min_loss:.8e}@{min_loss_step} "
+        f"elapsed_s={elapsed_s:.2f}"
+    )
+    return {
+        "functional": functional,
+        "training_config": gs_training,
+        "best_params": best_params,
+        "final_loss": final_loss_val,
+        "min_loss": min_loss,
+        "min_loss_step": min_loss_step,
+        "elapsed_s": elapsed_s,
+        "history_steps": history_steps,
+        "loss_history": loss_history,
+        "s1_penalty_history": s1_penalty_history,
+        "s1_mae_history": s1_mae_history,
+        "s1_mse_history": s1_mse_history,
+        "grad_norm_history": grad_norm_history,
+        "grad_abs_max_history": grad_abs_max_history,
+        "param_update_norm_history": param_update_norm_history,
+        "nonfinite_grad_fraction_history": nonfinite_grad_fraction_history,
+        "eval_steps": eval_steps,
+        "eval_loss_history": eval_loss_history,
+        "eval_s1_mae_history": eval_s1_mae_history,
+    }
 
 
 def train_functional(
@@ -555,8 +942,10 @@ def train_functional(
         energy_mse_weight=float(args.energy_mse_weight),
         energy_mae_weight=float(args.energy_mae_weight),
         s1_constraint_use_tda=bool(args.s1_use_tda),
-        scf_max_cycle=int(args.train_scf_max_cycle),
+        scf_max_cycle=_HELPERS._resolve_train_scf_max_cycle(args.train_scf_max_cycle),
         scf_damping=float(args.train_scf_damping),
+        scf_conv_tol_energy=args.train_scf_conv_tol_energy,
+        scf_convergence_metric=str(args.train_scf_convergence_metric),
         scf_conv_tol_density=float(args.train_scf_conv_tol_density),
         scf_vxc_clip=float(args.train_scf_vxc_clip),
         scf_iterate_selection=str(args.scf_iterate_selection),
@@ -588,6 +977,17 @@ def train_functional(
         )
     else:
         optimizer = base_optimizer
+
+    if bool(args.stream_train):
+        return _train_functional_streaming(
+            train_points,
+            training_data,
+            args=args,
+            logger=logger,
+            functional=functional,
+            gs_training=gs_training,
+            optimizer=optimizer,
+        )
 
     state = create_train_state_from_molecule(
         functional,
@@ -1188,6 +1588,71 @@ def _lorentzian_spectrum(
     return curve
 
 
+def write_equilibrium_spectrum_csv(
+    sticks_path: Path,
+    broadened_path: Path,
+    *,
+    r_angstrom: float,
+    solver_label: str,
+    eta_ev: float,
+    series: list[tuple[str, list[dict[str, float]], str]],
+    grid_ev: np.ndarray,
+    broadened: dict[str, np.ndarray],
+) -> None:
+    with sticks_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "series",
+                "state_index",
+                "r_angstrom",
+                "evaluation_solver",
+                "excitation_h",
+                "excitation_ev",
+                "oscillator_strength",
+            ]
+        )
+        for label, lines, _ in series:
+            for line in lines:
+                writer.writerow(
+                    [
+                        label,
+                        int(line["state_index"]),
+                        float(r_angstrom),
+                        solver_label.lower(),
+                        float(line["excitation_h"]),
+                        float(line["excitation_ev"]),
+                        float(line["oscillator_strength"]),
+                    ]
+                )
+
+    with broadened_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "series",
+                "r_angstrom",
+                "evaluation_solver",
+                "eta_ev",
+                "energy_ev",
+                "intensity",
+            ]
+        )
+        for label, _, _ in series:
+            curve = np.asarray(broadened[label], dtype=np.float64)
+            for energy_ev, intensity in zip(grid_ev, curve, strict=True):
+                writer.writerow(
+                    [
+                        label,
+                        float(r_angstrom),
+                        solver_label.lower(),
+                        float(eta_ev),
+                        float(energy_ev),
+                        float(intensity),
+                    ]
+                )
+
+
 def plot_equilibrium_spectrum(
     fig_path: Path,
     json_path: Path,
@@ -1199,7 +1664,7 @@ def plot_equilibrium_spectrum(
     training_config: GroundStateTrainingConfig,
     nstates: int,
     use_tda: bool,
-) -> None:
+) -> tuple[Path, Path]:
     plt = _get_plt()
     predicted_molecule = predict_ground_state_molecule(
         params,
@@ -1252,7 +1717,6 @@ def plot_equilibrium_spectrum(
         "neural_tda_lines": neural_lines,
         "evaluation_solver": solver_label.lower(),
     }
-    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     series = [
         ("FCI", fci_lines, "#111111"),
@@ -1262,6 +1726,30 @@ def plot_equilibrium_spectrum(
     emax = max(line["excitation_ev"] for _, lines, _ in series for line in lines) + 2.0
     grid_ev = np.linspace(emin, emax, 2000)
     eta_ev = 0.35
+    broadened = {
+        label: _lorentzian_spectrum(grid_ev, lines, eta_ev=eta_ev)
+        for label, lines, _ in series
+    }
+    sticks_csv = json_path.with_name(f"{json_path.stem}_sticks.csv")
+    broadened_csv = json_path.with_name(f"{json_path.stem}_broadened.csv")
+    write_equilibrium_spectrum_csv(
+        sticks_csv,
+        broadened_csv,
+        r_angstrom=float(point.r_angstrom),
+        solver_label=solver_label,
+        eta_ev=eta_ev,
+        series=series,
+        grid_ev=grid_ev,
+        broadened=broadened,
+    )
+    payload.update(
+        {
+            "eta_ev": float(eta_ev),
+            "spectrum_sticks_csv": str(sticks_csv),
+            "spectrum_broadened_csv": str(broadened_csv),
+        }
+    )
+    json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     fig, (ax0, ax1) = plt.subplots(
         2,
@@ -1299,7 +1787,7 @@ def plot_equilibrium_spectrum(
         )
         ax1.plot(
             grid_ev,
-            _lorentzian_spectrum(grid_ev, lines, eta_ev=eta_ev),
+            broadened[label],
             color=color,
             linewidth=2.2,
             label=label,
@@ -1320,6 +1808,7 @@ def plot_equilibrium_spectrum(
     fig.tight_layout()
     fig.savefig(fig_path, dpi=220, bbox_inches="tight")
     plt.close(fig)
+    return sticks_csv, broadened_csv
 
 
 def plot_training_loss(path: Path, training: dict[str, Any], *, title: str) -> None:
@@ -1533,19 +2022,21 @@ def main() -> None:
     dense_r_values = np.linspace(float(args.r_min), float(args.r_max), int(args.dense_points))
 
     logger.log(f"Building {int(args.train_points)}-point training references (FCI + strict-JAX reference)...")
-    train_points = build_reference_curve(
+    train_points = _get_or_build_reference_curve(
         train_r_values,
         args=args,
         logger=logger,
         label="train_ref",
     )
-    logger.log(f"Building {int(args.dense_points)}-point dense references (FCI + strict-JAX reference)...")
-    dense_points = build_reference_curve(
-        dense_r_values,
-        args=args,
-        logger=logger,
-        label="dense_ref",
-    )
+    dense_points = None
+    if not bool(args.defer_dense_eval):
+        logger.log(f"Building {int(args.dense_points)}-point dense references (FCI + strict-JAX reference)...")
+        dense_points = _get_or_build_reference_curve(
+            dense_r_values,
+            args=args,
+            logger=logger,
+            label="dense_ref",
+        )
 
     fixed_density_reference_checkpoint = None
     if str(args.training_mode) == "fixed_density":
@@ -1562,13 +2053,14 @@ def main() -> None:
                 label="train_fixed_density_ref",
                 checkpoint_path=fixed_density_reference_checkpoint,
             )
-            dense_points = _rebuild_points_with_fixed_density_checkpoint(
-                dense_points,
-                args=args,
-                logger=logger,
-                label="dense_fixed_density_ref",
-                checkpoint_path=fixed_density_reference_checkpoint,
-            )
+            if dense_points is not None:
+                dense_points = _rebuild_points_with_fixed_density_checkpoint(
+                    dense_points,
+                    args=args,
+                    logger=logger,
+                    label="dense_fixed_density_ref",
+                    checkpoint_path=fixed_density_reference_checkpoint,
+                )
 
     training = train_functional(
         train_points,
@@ -1578,6 +2070,23 @@ def main() -> None:
     params = training["best_params"]
     functional = training["functional"]
     gs_training = training["training_config"]
+
+    if dense_points is None:
+        logger.log(f"Building {int(args.dense_points)}-point dense references after training...")
+        dense_points = _get_or_build_reference_curve(
+            dense_r_values,
+            args=args,
+            logger=logger,
+            label="dense_ref",
+        )
+        if fixed_density_reference_checkpoint is not None:
+            dense_points = _rebuild_points_with_fixed_density_checkpoint(
+                dense_points,
+                args=args,
+                logger=logger,
+                label="dense_fixed_density_ref",
+                checkpoint_path=fixed_density_reference_checkpoint,
+            )
 
     eval_use_tda = bool(args.s1_use_tda) if args.eval_use_tda is None else bool(args.eval_use_tda)
     eval_solver_label = "TDA" if eval_use_tda else "Casida"
@@ -1612,7 +2121,7 @@ def main() -> None:
     equilibrium_point = min(dense_points, key=lambda point: float(point.fci_energy_h))
     spectrum_png = outdir / "h2_equilibrium_tda_spectrum_vs_fci.png"
     spectrum_json = outdir / "h2_equilibrium_tda_spectrum_vs_fci.json"
-    plot_equilibrium_spectrum(
+    spectrum_sticks_csv, spectrum_broadened_csv = plot_equilibrium_spectrum(
         spectrum_png,
         spectrum_json,
         point=equilibrium_point,
@@ -1690,16 +2199,64 @@ def main() -> None:
             "curve_png": str(curve_png),
             "spectrum_png": str(spectrum_png),
             "spectrum_json": str(spectrum_json),
+            "spectrum_sticks_csv": str(spectrum_sticks_csv),
+            "spectrum_broadened_csv": str(spectrum_broadened_csv),
             "training_curve_png": str(training_png),
             "summary_txt": str(summary_txt),
+            "visualization_manifest": str(outdir / "visualization_manifest.json"),
         }
     )
     summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    visualization_manifest = {
+        "paper_experiment": "Bond-Scan S0/S1 Benchmarks",
+        "description": "Data files needed to reproduce H2 S1-only TDA training visualizations.",
+        "figures": [
+            {
+                "figure": str(curve_png),
+                "data_files": [str(dense_csv), str(excited_csv)],
+                "x": "r_angstrom",
+                "y": [
+                    "fci_energy_h",
+                    "predicted_energy_h",
+                    "fci_s1_h",
+                    "predicted_s1_h",
+                    "energy_abs_err_ev",
+                    "s1_gap_abs_err_ev",
+                    "density_l2",
+                ],
+            },
+            {
+                "figure": str(spectrum_png),
+                "data_files": [str(spectrum_sticks_csv), str(spectrum_broadened_csv)],
+                "x": "excitation_ev / energy_ev",
+                "y": ["oscillator_strength", "intensity"],
+            },
+            {
+                "figure": str(training_png),
+                "data_files": [str(training_history_csv)],
+                "x": "step",
+                "y": [
+                    "loss_pre_update",
+                    "s1_penalty_pre_update",
+                    "s1_mae_pre_update",
+                    "s1_mse_pre_update",
+                    "grad_norm",
+                    "grad_abs_max",
+                    "param_update_norm",
+                ],
+            },
+        ],
+    }
+    (outdir / "visualization_manifest.json").write_text(
+        json.dumps(visualization_manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
     logger.log(f"Wrote dense csv : {dense_csv}")
     logger.log(f"Wrote excited csv: {excited_csv}")
     logger.log(f"Wrote curve png : {curve_png}")
     logger.log(f"Wrote spectrum  : {spectrum_png}")
+    logger.log(f"Wrote spectrum csv: {spectrum_sticks_csv}, {spectrum_broadened_csv}")
     logger.log(f"Wrote summary   : {summary_txt}")
     logger.log(f"Wrote params    : {checkpoint_path}")
 

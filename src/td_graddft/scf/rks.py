@@ -62,6 +62,7 @@ class RKSConfig:
     df_tol: float = 1e-10
     df_max_rank: int | None = None
     direct_scf_tol: float = 0.0
+    convergence_metric: Literal["energy_and_residual", "energy"] = "energy_and_residual"
 
 
 @dataclass(frozen=True)
@@ -168,6 +169,15 @@ def _orthonormal_diis_error(fock: Array, density: Array, overlap: Array, corth: 
 
 def _scf_residual_norm(fock: Array, density: Array, overlap: Array) -> Array:
     return jnp.linalg.norm(_commutator_error(fock, density, overlap))
+
+
+def _orbital_gradient_norm(fock: Array, mo_coeff: Array, mo_occ: Array) -> Array:
+    occ = jnp.asarray(mo_occ) > jnp.asarray(1e-12, dtype=mo_occ.dtype)
+    vir = jnp.logical_not(occ)
+    c_occ = jnp.where(occ[None, :], mo_coeff, jnp.zeros_like(mo_coeff))
+    c_vir = jnp.where(vir[None, :], mo_coeff, jnp.zeros_like(mo_coeff))
+    grad = 2.0 * (c_vir.T @ fock @ c_occ)
+    return jnp.linalg.norm(grad)
 
 
 def _apply_fock_damping(fock: Array, fock_prev: Array, factor: Array) -> Array:
@@ -825,7 +835,7 @@ def _maybe_run_extra_final_cycle(
         grad_tol = jnp.sqrt(jnp.asarray(cfg.conv_tol, dtype=h.dtype)) * jnp.asarray(3.0, dtype=h.dtype)
         converged_final = jnp.logical_or(
             jnp.abs(total_final - energy) < tol_e,
-            _scf_residual_norm(raw_fock_final, density_final, s) < grad_tol,
+            _orbital_gradient_norm(raw_fock_final, mo_coeff_final, mo_occ_fixed) < grad_tol,
         )
         return (
             density_final,
@@ -883,6 +893,7 @@ def _advance_scf_iteration_with_fock_builder(
     use_density_damping: Any,
     tol_e: Any,
     grad_tol: Any,
+    energy_only_convergence: Any = False,
     eigenvalue_jitter: float = 0.0,
 ) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]:
     mo_energy_new, mo_coeff_new = _diagonalize_fock(
@@ -906,9 +917,12 @@ def _advance_scf_iteration_with_fock_builder(
         j_mat,
         k_mat,
     )
-    converged_step = jnp.logical_and(
-        jnp.abs(total_new - energy) < tol_e,
-        _scf_residual_norm(raw_fock_new, density_new, s) < grad_tol,
+    energy_converged = jnp.abs(total_new - energy) < tol_e
+    residual_converged = _orbital_gradient_norm(raw_fock_new, mo_coeff_new, mo_occ_fixed) < grad_tol
+    converged_step = jnp.where(
+        jnp.asarray(energy_only_convergence),
+        energy_converged,
+        jnp.logical_and(energy_converged, residual_converged),
     )
     return (
         converged_step,
@@ -968,6 +982,7 @@ def _run_scf_iterations_lax_core(
     use_pyscf_like_damping = jnp.finfo(h.dtype).bits >= 64 and not bool(force_density_damping)
     level_shift = jnp.asarray(cfg.level_shift, dtype=h.dtype)
     has_level_shift = cfg.level_shift != 0.0
+    energy_only_convergence = cfg.convergence_metric == "energy"
 
     def body_fn(carry: RKSIterationCarry) -> RKSIterationCarry:
         cycle = carry.cycle
@@ -1059,7 +1074,12 @@ def _run_scf_iterations_lax_core(
             use_density_damping=use_density_damping,
             tol_e=tol_e,
             grad_tol=grad_tol,
+            energy_only_convergence=energy_only_convergence,
             eigenvalue_jitter=eigenvalue_jitter,
+        )
+        converged_step = jnp.logical_and(
+            converged_step,
+            cycle > jnp.asarray(0, dtype=cycle.dtype),
         )
 
         converged_new = jnp.logical_or(

@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import jax
 import jax.numpy as jnp
@@ -7,9 +7,12 @@ import pytest
 
 import td_graddft.features as features_module
 import td_graddft.tddft.casida as casida_module
+import td_graddft.tddft._semilocal_response as semilocal_response_module
 import td_graddft.tddft.response as response_module
 from td_graddft.tddft import RestrictedCasidaTDDFT, build_restricted_response_matrices
+from td_graddft.tddft.cisd import restricted_cisd_second_order_correction
 from td_graddft.tddft.response import build_restricted_tda_operator
+from td_graddft.tddft.types import TDAResult
 
 
 @dataclass(frozen=True)
@@ -236,7 +239,12 @@ def test_packed_eri_pair_matrix_response_matches_full_tensor_path():
     base_molecule = _ToyMolecule(
         ao=jnp.eye(nmo),
         ao_deriv1=jnp.stack(
-            [jnp.eye(nmo), jnp.zeros((nmo, nmo)), jnp.zeros((nmo, nmo)), jnp.zeros((nmo, nmo))]
+            [
+                jnp.eye(nmo),
+                jnp.zeros((nmo, nmo)),
+                jnp.zeros((nmo, nmo)),
+                jnp.zeros((nmo, nmo)),
+            ]
         ),
         grid=_Grid(weights=jnp.ones((nmo,))),
         rep_tensor=rep_tensor,
@@ -269,6 +277,65 @@ def test_packed_eri_pair_matrix_response_matches_full_tensor_path():
 
     assert jnp.allclose(packed.a_matrix, full.a_matrix, atol=1e-10)
     assert jnp.allclose(packed.b_matrix, full.b_matrix, atol=1e-10)
+
+
+def test_refresh_response_eri_slices_reprojects_current_orbitals_and_reuses_cache(monkeypatch):
+    nmo = 4
+    rep_tensor = jnp.arange(nmo**4, dtype=jnp.float64).reshape(nmo, nmo, nmo, nmo) / 100.0
+    c = 1.0 / jnp.sqrt(2.0)
+    mo_single = jnp.array(
+        [
+            [c, 0.0, c, 0.0],
+            [0.0, c, 0.0, c],
+            [c, 0.0, -c, 0.0],
+            [0.0, c, 0.0, -c],
+        ],
+        dtype=jnp.float64,
+    )
+    occ_single = jnp.array([1.0, 1.0, 0.0, 0.0])
+    molecule = _ToyMolecule(
+        ao=jnp.eye(nmo),
+        ao_deriv1=jnp.stack(
+            [jnp.eye(nmo), jnp.zeros((nmo, nmo)), jnp.zeros((nmo, nmo)), jnp.zeros((nmo, nmo))]
+        ),
+        grid=_Grid(weights=jnp.ones((nmo,))),
+        rep_tensor=rep_tensor,
+        mo_coeff=jnp.stack([mo_single, mo_single], axis=0),
+        mo_occ=jnp.stack([occ_single, occ_single], axis=0),
+        mo_energy=jnp.stack([jnp.array([-1.0, -0.5, 0.3, 0.8])] * 2, axis=0),
+        rdm1=jnp.stack([jnp.diag(occ_single), jnp.diag(occ_single)], axis=0),
+    )
+    molecule.nocc = 2
+    molecule.eri_ovov = jnp.zeros((2, 2, 2, 2))
+    molecule.eri_ovvo = jnp.zeros((2, 2, 2, 2))
+    molecule.eri_oovv = jnp.zeros((2, 2, 2, 2))
+
+    refreshed = response_module.refresh_restricted_response_eri_slices(molecule)
+
+    orbo, orbv, _, _ = response_module._restricted_orbital_data(
+        refreshed,
+        occupation_tolerance=1e-8,
+    )
+    expected = response_module._rep_tensor_to_mo_eri_slices(rep_tensor, orbo, orbv)
+    assert jnp.allclose(refreshed.eri_ovov, expected[0], atol=1e-10)
+    assert jnp.allclose(refreshed.eri_ovvo, expected[1], atol=1e-10)
+    assert jnp.allclose(refreshed.eri_oovv, expected[2], atol=1e-10)
+    assert jnp.allclose(molecule.eri_ovov, 0.0)
+
+    def fail_if_reprojected(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("response ERI slices should be reused after fixed-density rebuild")
+
+    monkeypatch.setattr(response_module, "_rep_tensor_to_mo_eri_slices", fail_if_reprojected)
+    xc = _ToyAdiabaticFunctional(
+        name="hybrid_only",
+        energy_density_fn=lambda rho: jnp.zeros_like(rho),
+        exact_exchange_fraction=0.25,
+    )
+    matrices = build_restricted_response_matrices(refreshed, xc)
+
+    assert matrices.a_matrix.shape == (2, 2, 2, 2)
+    assert matrices.b_matrix.shape == (2, 2, 2, 2)
 
 
 def test_matrix_free_tdhf_matches_materialized_matrix_for_multi_virtual_hybrid():
@@ -355,6 +422,84 @@ def test_restricted_casida_tddft_returns_expected_toy_excitation():
     assert jnp.allclose(result.excitation_energies, jnp.array([jnp.sqrt(3.0)]))
     assert result.x_amplitudes.shape == (1, 1, 1)
     assert result.y_amplitudes.shape == (1, 1, 1)
+
+
+def test_restricted_solver_applies_posthoc_second_order_corrections():
+    molecule = _make_toy_molecule()
+
+    class _PostHocDoubleHybridXC:
+        exact_exchange_fraction = 0.0
+
+        def local_kernel(self, density):
+            return jnp.zeros_like(density)
+
+        def post_tda_correction(self, mol, result, *, occupation_tolerance=1e-8):
+            del mol, occupation_tolerance
+            return jnp.full_like(result.excitation_energies, 0.25)
+
+        def post_tddft_correction(self, mol, result, *, occupation_tolerance=1e-8):
+            del mol, occupation_tolerance
+            return jnp.full_like(result.excitation_energies, -0.125)
+
+    solver = RestrictedCasidaTDDFT(molecule, _PostHocDoubleHybridXC(), eigensolver="dense")
+    tda = solver.tda(nstates=1)
+    casida = solver.kernel(nstates=1)
+
+    assert jnp.allclose(tda.excitation_energies, jnp.array([1.25]), atol=1e-10)
+    assert jnp.allclose(
+        casida.excitation_energies,
+        jnp.array([1.0 - 0.125]),
+        atol=1e-10,
+    )
+    assert jnp.allclose(tda.posthoc_correction, jnp.array([0.25]))
+    assert jnp.allclose(casida.posthoc_correction, jnp.array([-0.125]))
+
+
+def test_restricted_cisd_correction_is_root_specific_and_scaled_by_ac():
+    nmo = 3
+    ao = jnp.eye(nmo, dtype=jnp.float64)
+    raw_eri = jnp.arange(nmo**4, dtype=jnp.float64).reshape(nmo, nmo, nmo, nmo) / 100.0
+    rep_tensor = 0.25 * (
+        raw_eri
+        + jnp.transpose(raw_eri, (1, 0, 2, 3))
+        + jnp.transpose(raw_eri, (0, 1, 3, 2))
+        + jnp.transpose(raw_eri, (2, 3, 0, 1))
+    )
+    molecule = _ToyMolecule(
+        ao=ao,
+        ao_deriv1=jnp.stack([ao, jnp.zeros_like(ao), jnp.zeros_like(ao), jnp.zeros_like(ao)]),
+        grid=_Grid(weights=jnp.ones((nmo,), dtype=jnp.float64)),
+        rep_tensor=rep_tensor,
+        mo_coeff=jnp.stack([jnp.eye(nmo, dtype=jnp.float64), jnp.eye(nmo, dtype=jnp.float64)]),
+        mo_occ=jnp.asarray([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=jnp.float64),
+        mo_energy=jnp.asarray([[0.0, 1.4, 1.9], [0.0, 1.4, 1.9]], dtype=jnp.float64),
+        rdm1=jnp.stack(
+            [
+                jnp.diag(jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)),
+                jnp.diag(jnp.asarray([1.0, 0.0, 0.0], dtype=jnp.float64)),
+            ]
+        ),
+    )
+    amplitudes = jnp.asarray(
+        [
+            [[1.0 / jnp.sqrt(2.0), 0.0]],
+            [[1.0 / jnp.sqrt(2.0), 0.0]],
+        ],
+        dtype=jnp.float64,
+    )
+    result = TDAResult(
+        excitation_energies=jnp.asarray([0.45, 0.80], dtype=jnp.float64),
+        amplitudes=amplitudes,
+        a_matrix=None,
+    )
+
+    unscaled = restricted_cisd_second_order_correction(molecule, result)
+    scaled = restricted_cisd_second_order_correction(molecule, result, ac=0.37)
+
+    assert unscaled.shape == (2,)
+    assert jnp.all(jnp.isfinite(unscaled))
+    assert not jnp.allclose(unscaled[0], unscaled[1], atol=1e-12)
+    assert jnp.allclose(scaled, 0.37 * unscaled, atol=1e-12)
 
 
 def test_matrix_free_tda_vind_matches_materialized_matrix_action():
@@ -472,6 +617,44 @@ def test_jitted_strict_gga_tda_does_not_cache_transition_feature_tracer():
     assert features_module._TRANSITION_RESPONSE_FEATURE_CACHE == {}
 
 
+def test_jitted_semilocal_response_does_not_cache_traced_tensor(monkeypatch):
+    semilocal_response_module._GRID_RESPONSE_TENSOR_CACHE.clear()
+    monkeypatch.setattr(semilocal_response_module, "hybrid_coeff", lambda _spec: 0.0)
+    monkeypatch.setattr(semilocal_response_module, "xc_type", lambda _spec: "LDA")
+
+    def fake_grid_response_variables(molecule, *, feature_kind):
+        del feature_kind
+        rho = jnp.sum(jnp.asarray(molecule.ao), axis=1)
+        return rho, None, None, None
+
+    def fake_eval_xc_response_tensor(_spec, rho, *, grad=None, tau=None):
+        del grad, tau
+        return None, rho[None, None, :]
+
+    monkeypatch.setattr(
+        semilocal_response_module,
+        "restricted_grid_response_variables",
+        fake_grid_response_variables,
+    )
+    monkeypatch.setattr(
+        semilocal_response_module,
+        "eval_xc_response_tensor",
+        fake_eval_xc_response_tensor,
+    )
+    molecule = _make_toy_molecule()
+    xc = semilocal_response_module.SemilocalResponseFunctional("toy")
+
+    def evaluate(scale):
+        traced_molecule = replace(molecule, ao=molecule.ao * scale)
+        return jnp.sum(xc.grid_response_tensor(traced_molecule))
+
+    with jax.checking_leaks():
+        value = jax.jit(evaluate)(jnp.asarray(1.0))
+
+    assert jnp.allclose(value, jnp.sum(molecule.ao))
+    assert semilocal_response_module._GRID_RESPONSE_TENSOR_CACHE == {}
+
+
 def test_transition_response_feature_cache_is_bounded():
     features_module._TRANSITION_RESPONSE_FEATURE_CACHE.clear()
     molecules = []
@@ -565,6 +748,30 @@ def test_nonlocal_response_action_contributes_to_dense_and_operator_paths():
     assert jnp.allclose(matrices.b_matrix[0, 0, 0, 0], 0.5, atol=1e-8)
     assert jnp.allclose(diagonal, jnp.array([1.5]), atol=1e-8)
     assert jnp.allclose(vind(x), x * 1.5, atol=1e-8)
+
+
+def test_nonlocal_response_matrix_pair_contributes_to_casida_a_minus_b_metric():
+    molecule = _make_toy_molecule()
+
+    class _NonlocalPairXC:
+        exact_exchange_fraction = 0.0
+        nonlocal_response_matrices_fn = True
+
+        def local_kernel(self, density):
+            return jnp.zeros_like(density)
+
+        def nonlocal_response_matrices(self, mol, *, occupation_tolerance=1e-8):
+            del mol, occupation_tolerance
+            return jnp.asarray([[0.3]]), jnp.asarray([[0.1]])
+
+    matrices = build_restricted_response_matrices(molecule, _NonlocalPairXC())
+    a_minus_b, _ = response_module.build_restricted_a_minus_b_matrix(
+        molecule,
+        _NonlocalPairXC(),
+    )
+
+    expected = matrices.a_matrix.reshape(1, 1) - matrices.b_matrix.reshape(1, 1)
+    assert jnp.allclose(a_minus_b, expected, atol=1e-8)
 
 
 def test_small_dense_tda_skips_operator_builder(monkeypatch):

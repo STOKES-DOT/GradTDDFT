@@ -9,8 +9,10 @@ import jax.numpy as jnp
 from jax.lax import Precision
 from jaxtyping import Array, PyTree
 
+from ..data.integrals import eri_pair_matrix_to_mo_eri_slices
+from ..data.integrals.jax.packed_eri import _metadata_arrays, _mo_pair_products
 from ..features import (
-    restricted_grid_features,
+    grid_features_for_molecule,
 )
 from ..xc_backend.jax_libxc import RestrictedFeatureBundle
 
@@ -138,7 +140,7 @@ class NeuralXCProjectionMixin:
         """
 
         if features is None:
-            features = restricted_grid_features(molecule)
+            features = grid_features_for_molecule(molecule)
         e_hf, e_hf_a, e_hf_b = self.projected_hf_grid_contribution_components(
             molecule,
             features=features,
@@ -173,8 +175,10 @@ class NeuralXCProjectionMixin:
     ) -> tuple[Array, Array]:
         """Restricted closed-shell MP2 local pair gauge and canonical total energy."""
         del features
-        if getattr(molecule, "rep_tensor", None) is None:
-            raise AttributeError("Molecule-like object must define rep_tensor.")
+        rep_tensor = getattr(molecule, "rep_tensor", None)
+        eri_pair_matrix = getattr(molecule, "eri_pair_matrix", None)
+        if rep_tensor is None and eri_pair_matrix is None:
+            raise AttributeError("Molecule-like object must define rep_tensor or eri_pair_matrix.")
         if getattr(molecule, "mo_coeff", None) is None:
             raise AttributeError("Molecule-like object must define mo_coeff.")
         if getattr(molecule, "mo_occ", None) is None:
@@ -186,7 +190,9 @@ class NeuralXCProjectionMixin:
         if getattr(molecule, "grid", None) is None:
             raise AttributeError("Molecule-like object must define grid.weights.")
 
-        rep_tensor = jnp.asarray(molecule.rep_tensor)
+        rep_tensor = None if rep_tensor is None else jnp.asarray(rep_tensor)
+        eri_pair_matrix = None if eri_pair_matrix is None else jnp.asarray(eri_pair_matrix)
+        has_pair_matrix = eri_pair_matrix is not None and eri_pair_matrix.size != 0
         ao = jnp.asarray(molecule.ao)
         mo_coeff = jnp.asarray(molecule.mo_coeff)
         mo_occ = jnp.asarray(molecule.mo_occ)
@@ -215,15 +221,23 @@ class NeuralXCProjectionMixin:
 
         eri_ovov = getattr(molecule, "eri_ovov", None)
         if eri_ovov is None:
-            eri_ovov = jnp.einsum(
-                "pqrs,pi,qa,rj,sb->iajb",
-                rep_tensor,
-                orbo,
-                orbv,
-                orbo,
-                orbv,
-                precision=Precision.HIGHEST,
-            )
+            if has_pair_matrix:
+                eri_ovov, _, _ = eri_pair_matrix_to_mo_eri_slices(
+                    eri_pair_matrix,
+                    mo_coeff,
+                    nocc=nocc,
+                    include_oovv=False,
+                )
+            else:
+                eri_ovov = jnp.einsum(
+                    "pqrs,pi,qa,rj,sb->iajb",
+                    rep_tensor,
+                    orbo,
+                    orbv,
+                    orbo,
+                    orbv,
+                    precision=Precision.HIGHEST,
+                )
         else:
             eri_ovov = jnp.asarray(eri_ovov)
 
@@ -242,15 +256,27 @@ class NeuralXCProjectionMixin:
             rho_o = jnp.einsum("rp,pi->ri", ao, orbo, precision=Precision.HIGHEST)
             rho_v = jnp.einsum("rp,pa->ra", ao, orbv, precision=Precision.HIGHEST)
             rho_ov = jnp.einsum("ri,ra->ria", rho_o, rho_v, precision=Precision.HIGHEST)
-            pair_potential = jnp.einsum(
-                "gp,gq,pqrs,rj,sb->gjb",
-                ao,
-                ao,
-                rep_tensor,
-                orbo,
-                orbv,
-                precision=Precision.HIGHEST,
-            )
+            if has_pair_matrix:
+                rows, cols, _, multiplicity = _metadata_arrays(int(mo_coeff.shape[0]), ao.dtype)
+                grid_pair = ao[:, rows] * ao[:, cols] * multiplicity[None, :]
+                ov = _mo_pair_products(orbo, orbv, rows, cols)
+                pair_potential = jnp.einsum(
+                    "gP,PQ,jbQ->gjb",
+                    grid_pair,
+                    eri_pair_matrix,
+                    ov,
+                    precision=Precision.HIGHEST,
+                )
+            else:
+                pair_potential = jnp.einsum(
+                    "gp,gq,pqrs,rj,sb->gjb",
+                    ao,
+                    ao,
+                    rep_tensor,
+                    orbo,
+                    orbv,
+                    precision=Precision.HIGHEST,
+                )
             local_energy = jnp.einsum(
                 "ria,rjb,iajb->r",
                 rho_ov,
@@ -428,7 +454,7 @@ class NeuralXCProjectionMixin:
         pt2_energy_density: Array | None = None,
     ) -> tuple[RestrictedFeatureBundle, Array, Array]:
         if features is None:
-            features = restricted_grid_features(molecule)
+            features = grid_features_for_molecule(molecule)
         semilocal_channels = self.semilocal_energy_density_channels(features)
         semilocal_total = (
             jnp.sum(semilocal_channels, axis=-1)

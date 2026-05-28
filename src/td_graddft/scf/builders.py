@@ -268,6 +268,7 @@ def restricted_molecule_from_spec_with_jax_rks(
             mo_energy,
             rep_tensor=rep_tensor,
             eri_ovov=eri_ovov,
+            eri_pair_matrix=eri_pair_matrix,
             df_factors=df_factors,
             nocc=nocc,
             density_floor=cfg.density_floor,

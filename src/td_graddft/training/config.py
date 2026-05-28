@@ -53,6 +53,7 @@ class GroundStateCoreDatum:
     target_xc_potential: Array | None = None
     target_xc_kernel: Array | None = None
     density_constraint_weight: float = 0.0
+    density_matrix_constraint_weight: float = 0.0
     xc_potential_constraint_weight: float = 0.0
     xc_kernel_constraint_weight: float = 0.0
     xc_kernel_normalization_scale: float | None = None
@@ -88,6 +89,7 @@ class ExcitedStateDatum:
 @_pytree_dataclass(
     static_fields=(
         "density_constraint_weight",
+        "density_matrix_constraint_weight",
         "xc_potential_constraint_weight",
         "xc_kernel_constraint_weight",
         "xc_kernel_normalization_scale",
@@ -123,6 +125,7 @@ class GroundStateDatum:
     target_xc_kernel: Array | None = None
     weight: float = 1.0
     density_constraint_weight: float = 0.0
+    density_matrix_constraint_weight: float = 0.0
     xc_potential_constraint_weight: float = 0.0
     xc_kernel_constraint_weight: float = 0.0
     xc_kernel_normalization_scale: float | None = None
@@ -199,6 +202,7 @@ class GroundStateDatum:
             target_xc_kernel=core.target_xc_kernel,
             weight=weight,
             density_constraint_weight=core.density_constraint_weight,
+            density_matrix_constraint_weight=core.density_matrix_constraint_weight,
             xc_potential_constraint_weight=core.xc_potential_constraint_weight,
             xc_kernel_constraint_weight=core.xc_kernel_constraint_weight,
             xc_kernel_normalization_scale=core.xc_kernel_normalization_scale,
@@ -238,6 +242,7 @@ class GroundStateDatum:
             target_xc_potential=self.target_xc_potential,
             target_xc_kernel=self.target_xc_kernel,
             density_constraint_weight=self.density_constraint_weight,
+            density_matrix_constraint_weight=self.density_matrix_constraint_weight,
             xc_potential_constraint_weight=self.xc_potential_constraint_weight,
             xc_kernel_constraint_weight=self.xc_kernel_constraint_weight,
             xc_kernel_normalization_scale=self.xc_kernel_normalization_scale,
@@ -303,6 +308,8 @@ class GroundStateCoreTrainingConfig:
     scf_max_cycle: int = 12
     scf_damping: float = 0.25
     scf_level_shift: float = 0.0
+    scf_conv_tol_energy: float | None = None
+    scf_convergence_metric: Literal["energy_and_residual", "energy"] = "energy_and_residual"
     scf_conv_tol_density: float = 1e-8
     scf_orthogonalization_eps: float = 1e-10
     scf_eigenvalue_jitter: float = 1e-8
@@ -387,6 +394,8 @@ class GroundStateTrainingConfig:
     scf_max_cycle: int = 12
     scf_damping: float = 0.25
     scf_level_shift: float = 0.0
+    scf_conv_tol_energy: float | None = None
+    scf_convergence_metric: Literal["energy_and_residual", "energy"] = "energy_and_residual"
     scf_conv_tol_density: float = 1e-8
     scf_orthogonalization_eps: float = 1e-10
     scf_eigenvalue_jitter: float = 1e-8
@@ -454,6 +463,8 @@ class GroundStateTrainingConfig:
             scf_max_cycle=core.scf_max_cycle,
             scf_damping=core.scf_damping,
             scf_level_shift=core.scf_level_shift,
+            scf_conv_tol_energy=core.scf_conv_tol_energy,
+            scf_convergence_metric=core.scf_convergence_metric,
             scf_conv_tol_density=core.scf_conv_tol_density,
             scf_orthogonalization_eps=core.scf_orthogonalization_eps,
             scf_eigenvalue_jitter=core.scf_eigenvalue_jitter,
@@ -502,6 +513,8 @@ class GroundStateTrainingConfig:
             scf_max_cycle=self.scf_max_cycle,
             scf_damping=self.scf_damping,
             scf_level_shift=self.scf_level_shift,
+            scf_conv_tol_energy=self.scf_conv_tol_energy,
+            scf_convergence_metric=self.scf_convergence_metric,
             scf_conv_tol_density=self.scf_conv_tol_density,
             scf_orthogonalization_eps=self.scf_orthogonalization_eps,
             scf_eigenvalue_jitter=self.scf_eigenvalue_jitter,

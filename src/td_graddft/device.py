@@ -62,6 +62,9 @@ def put_restricted_molecule_on_device(
         df_factors=(
             None if getattr(molecule, "df_factors", None) is None else jax.device_put(molecule.df_factors, device)
         ),
+        eri_pair_matrix=(
+            None if getattr(molecule, "eri_pair_matrix", None) is None else jax.device_put(molecule.eri_pair_matrix, device)
+        ),
         eri_ovov=(
             None if molecule.eri_ovov is None else jax.device_put(molecule.eri_ovov, device)
         ),
@@ -137,6 +140,7 @@ def put_molecule_on_device(
         "overlap_matrix",
         "pt2_local",
         "df_factors",
+        "eri_pair_matrix",
         "eri_ovov",
         "eri_ovvo",
         "eri_oovv",

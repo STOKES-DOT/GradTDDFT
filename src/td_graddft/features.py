@@ -264,13 +264,13 @@ def _spin_laplacian(
 
 
 @jax.jit
-def _restricted_spin_channels_kernel(
+def _spin_resolved_channels_kernel(
     ao: Array,
     ao_deriv1: Array,
     rdm1: Array,
     mo_coeff: Array,
     mo_occ: Array,
-) -> tuple[RestrictedFeatureBundle, Array]:
+) -> tuple[RestrictedFeatureBundle, Array, Array]:
     rho_a, grad_a = _spin_density_and_gradient(ao, ao_deriv1, rdm1[0])
     rho_b, grad_b = _spin_density_and_gradient(ao, ao_deriv1, rdm1[1])
     tau_a = _spin_tau(ao_deriv1, mo_coeff[0], mo_occ[0])
@@ -284,6 +284,24 @@ def _restricted_spin_channels_kernel(
         sigma_bb=jnp.einsum("rx,rx->r", grad_b, grad_b, precision=Precision.HIGHEST),
         tau_a=tau_a,
         tau_b=tau_b,
+    )
+    return bundle, grad_a, grad_b
+
+
+@jax.jit
+def _restricted_spin_channels_kernel(
+    ao: Array,
+    ao_deriv1: Array,
+    rdm1: Array,
+    mo_coeff: Array,
+    mo_occ: Array,
+) -> tuple[RestrictedFeatureBundle, Array]:
+    bundle, grad_a, grad_b = _spin_resolved_channels_kernel(
+        ao,
+        ao_deriv1,
+        rdm1,
+        mo_coeff,
+        mo_occ,
     )
     return bundle, grad_a + grad_b
 
@@ -345,17 +363,72 @@ def _restricted_spin_inputs(
 
 
 
-def restricted_grid_features(molecule: Any) -> RestrictedFeatureBundle:
+def _spin_resolved_grid_features(molecule: Any) -> RestrictedFeatureBundle:
     ao, ao_deriv1, rdm1, mo_coeff, mo_occ = _restricted_spin_inputs(molecule)
     bundle, _ = _restricted_spin_channels_kernel(ao, ao_deriv1, rdm1, mo_coeff, mo_occ)
     return bundle
 
 
-def restricted_grid_features_with_gradients(
+def _spin_resolved_grid_features_with_gradients(
     molecule: Any,
 ) -> tuple[RestrictedFeatureBundle, Array]:
     ao, ao_deriv1, rdm1, mo_coeff, mo_occ = _restricted_spin_inputs(molecule)
     return _restricted_spin_channels_kernel(ao, ao_deriv1, rdm1, mo_coeff, mo_occ)
+
+
+def restricted_grid_features(molecule: Any) -> RestrictedFeatureBundle:
+    return _spin_resolved_grid_features(molecule)
+
+
+def restricted_grid_features_with_gradients(
+    molecule: Any,
+) -> tuple[RestrictedFeatureBundle, Array]:
+    return _spin_resolved_grid_features_with_gradients(molecule)
+
+
+def unrestricted_grid_features(molecule: Any) -> RestrictedFeatureBundle:
+    return _spin_resolved_grid_features(molecule)
+
+
+def unrestricted_grid_features_with_gradients(
+    molecule: Any,
+) -> tuple[RestrictedFeatureBundle, Array]:
+    return _spin_resolved_grid_features_with_gradients(molecule)
+
+
+def has_explicit_spin_axis(molecule: Any) -> bool:
+    for name in ("rdm1", "mo_occ", "mo_coeff"):
+        value = getattr(molecule, name, None)
+        if value is None:
+            continue
+        shape = getattr(value, "shape", None)
+        if shape is not None and len(shape) >= 1 and int(shape[0]) == 2:
+            return True
+    return False
+
+
+_has_explicit_spin_axis = has_explicit_spin_axis
+
+
+def grid_features_with_spin_gradients_for_molecule(
+    molecule: Any,
+) -> tuple[RestrictedFeatureBundle, Array, Array]:
+    ao, ao_deriv1, rdm1, mo_coeff, mo_occ = _restricted_spin_inputs(molecule)
+    return _spin_resolved_channels_kernel(ao, ao_deriv1, rdm1, mo_coeff, mo_occ)
+
+
+def grid_features_for_molecule(molecule: Any) -> RestrictedFeatureBundle:
+    if has_explicit_spin_axis(molecule):
+        return unrestricted_grid_features(molecule)
+    return restricted_grid_features(molecule)
+
+
+def grid_features_with_gradients_for_molecule(
+    molecule: Any,
+) -> tuple[RestrictedFeatureBundle, Array]:
+    if has_explicit_spin_axis(molecule):
+        return unrestricted_grid_features_with_gradients(molecule)
+    return restricted_grid_features_with_gradients(molecule)
 
 
 def restricted_grid_response_variables(

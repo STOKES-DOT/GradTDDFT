@@ -18,7 +18,7 @@ from td_graddft import gto, scf, dft, tdscf, neural_xc, training, workflows
 - Restricted and unrestricted SCF paths with differentiable JAX components.
 - Restricted and unrestricted TDA and Casida TDDFT response solvers.
 - Neural XC functionals with semilocal, HF, and optional PT2 local channels.
-- Strict and approximate response-kernel paths for HF/PT2 Neural XC channels.
+- Strict and approximate HF response paths plus ORCA-style post-hoc CIS(D) doubles correction for PT2 channels.
 - GPU4PySCF-backed reference and training workflows for GPU SCF work.
 - Research scripts for H2 dissociation, S1 training, QH9-style benchmarks, and
   closed-shell excited-state training.
@@ -236,7 +236,11 @@ Important construction fields:
 - `include_pt2_channel`: adds a PT2 local channel before the HF channel.
 - `pt2_channel_mode`: currently `scaled_projected` or `local_exact`.
 - `response_hf_mode`: `approx` or `strict`.
-- `response_pt2_mode`: `approx` or `strict`.
+- `response_pt2_mode`: `approx` keeps PT2 as a frozen basis channel in the
+  response kernel; `strict` solves the no-PT2 TDDFT/TDA response and adds a
+  post-hoc CIS(D)-type doubles correction scaled by a density-weighted global
+  average of the PT2 channel coefficient. The strict path currently uses the
+  unscaled CIS(D) correction; SCS/SOS spin-component scaling is not included.
 - `input_feature_mode`: `canonical` or `enhanced`.
 - `architecture`: `residual`/`graddft_residual` or `simple_mlp`.
 - `allow_experimental_jax_xc`: opt in to unvalidated installed `jax_xc`

@@ -37,6 +37,8 @@ def _functional_kwargs_from_config(config: Config) -> dict[str, Any]:
         "sigmoid_scale_factor": float(config.network.sigmoid_scale_factor),
         "density_floor": float(config.density_floor),
         "response_density_floor": config.response_density_floor,
+        "response_grid_chunk_size": config.response_grid_chunk_size,
+        "strict_hfx_response_mode": config.strict_hfx_response_mode,
         "kernel_clip": float(config.kernel_clip),
         "response_kernel_clip": config.response_kernel_clip,
         "hfx_channels": int(config.channels.hfx_channels),
