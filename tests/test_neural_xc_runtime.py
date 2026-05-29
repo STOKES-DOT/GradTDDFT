@@ -29,6 +29,7 @@ from td_graddft.tddft.response import (
     build_restricted_response_matrices,
     build_restricted_tda_matrix,
 )
+from td_graddft.tddft.cisd import restricted_cisd_second_order_correction
 from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,
@@ -1680,12 +1681,11 @@ class _HFResponsiveChannelModel(nn.Module):
         return coeff.at[..., 1].set(hf_coeff)
 
 
-class _PT2ResponsiveChannelModel(nn.Module):
+class _DensityResponsivePT2ChannelModel(nn.Module):
     @nn.compact
     def __call__(self, inputs):
         coeff = jnp.zeros(inputs.shape[:-1] + (3,), dtype=inputs.dtype)
-        pt2_coeff = 0.25 + jnp.square(inputs[..., -1])
-        return coeff.at[..., 1].set(pt2_coeff)
+        return coeff.at[..., 1].set(jnp.square(inputs[..., 0]))
 
 
 class _DensityResponsivePT2ChannelModel(nn.Module):
@@ -2084,7 +2084,6 @@ def test_tda_builder_uses_low_memory_strict_tda_matrix_callback(monkeypatch):
     )
 
     assert jnp.all(jnp.isfinite(matrix))
-
 
 def test_response_pt2_approx_keeps_pt2_as_frozen_basis_channel():
     molecule = _make_pt2_toy_molecule()

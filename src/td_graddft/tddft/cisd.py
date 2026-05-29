@@ -172,7 +172,7 @@ def restricted_cisd_second_order_correction(
 
     This follows the Head-Gordon CIS(D) form used by ORCA double hybrids:
     solve the singles-only state first, then add a root-specific second-order
-    doubles correction.  No SCS/SOS spin-component factors or damping are used.
+    doubles correction. No SCS/SOS spin-component factors or damping are used.
     The caller supplies the double-hybrid PT2 coefficient ``ac``.
     """
 

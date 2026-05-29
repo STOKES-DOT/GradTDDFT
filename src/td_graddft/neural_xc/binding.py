@@ -551,7 +551,6 @@ class NeuralXCBindingMixin:
             )
 
         return post_correction, post_correction
-
     def _effective_response_grid_chunk_size(self, ngrids: int) -> int:
         chunk_size = getattr(self, "response_grid_chunk_size", None)
         if chunk_size is None or int(chunk_size) <= 0:
@@ -1005,6 +1004,7 @@ class NeuralXCBindingMixin:
             pt2_projected=pt2_projected,
             hf_spin_energy_density=(hfx_feature_a, hfx_feature_b),
             response_hf_mode=self.response_hf_mode,
+            response_pt2_mode=self.response_pt2_mode,
             strict_payload=strict_payload,
         )
         projected_kernel = projected_tensor[0, 0]

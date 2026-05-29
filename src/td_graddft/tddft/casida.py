@@ -10,6 +10,7 @@ from typing import Literal
 import jax
 import jax.numpy as jnp
 from jax import core as jax_core
+from jaxtyping import Array
 
 from .eigensolvers import davidson_lowest_symmetric, _matmul, _solver_dtype
 from ._utils import (

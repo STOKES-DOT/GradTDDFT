@@ -1,6 +1,6 @@
-# TD-GradDFT
+# TD-GradDFT/GradTDDFT
 
-TD-GradDFT is a JAX research codebase for differentiable ground-state DFT,
+TD-GradDFT/GradTDDFT is a JAX research codebase for differentiable ground-state DFT,
 TDDFT/TDA response calculations, and Neural XC training. The Python package
 name is `td-graddft`; the import namespace is `td_graddft`.
 
@@ -18,7 +18,8 @@ from td_graddft import gto, scf, dft, tdscf, neural_xc, training, workflows
 - Restricted and unrestricted SCF paths with differentiable JAX components.
 - Restricted and unrestricted TDA and Casida TDDFT response solvers.
 - Neural XC functionals with semilocal, HF, and optional PT2 local channels.
-- Strict and approximate HF response paths plus ORCA-style post-hoc CIS(D) doubles correction for PT2 channels.
+- Strict and approximate HF response paths plus ORCA-style post-hoc CIS(D)
+  doubles correction for PT2 channels.
 - GPU4PySCF-backed reference and training workflows for GPU SCF work.
 - Research scripts for H2 dissociation, S1 training, QH9-style benchmarks, and
   closed-shell excited-state training.
