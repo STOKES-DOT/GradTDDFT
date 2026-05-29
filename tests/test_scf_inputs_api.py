@@ -277,6 +277,99 @@ def test_build_rks_integral_inputs_gpu_full_uses_gpu4pyscf_eri(monkeypatch):
     assert calls["eri"] == 1
 
 
+def test_build_uks_integral_inputs_gpu_full_skips_jax_backbone(monkeypatch):
+    import td_graddft.scf.inputs as inputs_mod
+
+    fake_cpu_eri = jnp.zeros((1, 1, 1, 1), dtype=jnp.float64)
+    fake_gpu_eri = jnp.ones((1, 1, 1, 1), dtype=jnp.float64)
+    calls = {"cpu": 0, "gpu": 0}
+
+    def fake_cpu_backbone(**kwargs):
+        calls["cpu"] += 1
+        return UKSIntegralInputs(
+            basis=object(),
+            overlap=jnp.eye(1),
+            hcore=jnp.eye(1),
+            eri=fake_cpu_eri,
+            nalpha=1,
+            nbeta=0,
+            nuclear_repulsion=0.0,
+            coords=jnp.zeros((1, 3)),
+            grid_weights=jnp.ones((1,)),
+            ao=jnp.ones((1, 1)),
+            ao_deriv1=jnp.zeros((4, 1, 1)),
+            ao_laplacian=None,
+            dipole_integrals=jnp.zeros((3, 1, 1)),
+            integral_backend=kwargs["integral_backend_mode"],
+        )
+
+    def fail_jax_backbone(**kwargs):
+        raise AssertionError("UKS gpu integral backend should not build JAX ERIs first.")
+
+    def fake_gpu_tensor(*, atom, basis, unit, charge, spin, cart, verbose, mol_kwargs):
+        del atom, basis, unit, charge, spin, cart, verbose, mol_kwargs
+        calls["gpu"] += 1
+        return fake_gpu_eri
+
+    monkeypatch.setattr(inputs_mod, "_build_uks_inputs_from_cpu_backbone", fake_cpu_backbone)
+    monkeypatch.setattr(inputs_mod, "_build_uks_inputs_from_jax_backbone", fail_jax_backbone)
+    monkeypatch.setattr(inputs_mod, "_gpu4pyscf_eri_tensor", fake_gpu_tensor)
+
+    inputs = build_uks_integral_inputs(
+        atom="H 0 0 0",
+        basis="sto-3g",
+        config=UKSConfig(xc_spec="hf"),
+        integral_backend="gpu",
+        grid_ao_backend="jax",
+        grids_level=0,
+        max_l=0,
+        spin=1,
+    )
+
+    assert inputs.integral_backend == "gpu"
+    assert inputs.eri is fake_gpu_eri
+    assert calls == {"cpu": 1, "gpu": 1}
+
+
+def test_build_uks_integral_inputs_gpu_full_skips_cpu_eri(monkeypatch):
+    import td_graddft.scf.inputs as inputs_mod
+
+    fake_gpu_eri = jnp.ones((1, 1, 1, 1), dtype=jnp.float64)
+    original_cached_integral = inputs_mod._cached_libcint_host_integral
+
+    def fail_cpu_eri(*, mol, integral_name, geometry_anchor, geometry_grad_policy, loader):
+        if "int2e" in str(integral_name):
+            raise AssertionError("UKS gpu integral backend should not build CPU ERIs first.")
+        return original_cached_integral(
+            mol=mol,
+            integral_name=integral_name,
+            geometry_anchor=geometry_anchor,
+            geometry_grad_policy=geometry_grad_policy,
+            loader=loader,
+        )
+
+    def fake_gpu_tensor(*, atom, basis, unit, charge, spin, cart, verbose, mol_kwargs):
+        del atom, basis, unit, charge, spin, cart, verbose, mol_kwargs
+        return fake_gpu_eri
+
+    monkeypatch.setattr(inputs_mod, "_cached_libcint_host_integral", fail_cpu_eri)
+    monkeypatch.setattr(inputs_mod, "_gpu4pyscf_eri_tensor", fake_gpu_tensor)
+
+    inputs = build_uks_integral_inputs(
+        atom="H 0 0 0",
+        basis="sto-3g",
+        config=UKSConfig(xc_spec="hf"),
+        integral_backend="gpu",
+        grid_ao_backend="jax",
+        grids_level=0,
+        max_l=0,
+        spin=1,
+    )
+
+    assert inputs.integral_backend == "gpu"
+    assert inputs.eri is fake_gpu_eri
+
+
 def test_restricted_chk_init_guess_uses_bound_pyscf_chkfile_api(monkeypatch):
     class FakeMF:
         def __init__(self):

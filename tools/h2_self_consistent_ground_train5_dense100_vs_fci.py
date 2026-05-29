@@ -32,6 +32,7 @@ GRADDFT_DEFAULT_DM21_HIDDEN_DIMS = DEFAULT_NETWORK_HIDDEN_DIMS
 GRADDFT_DEFAULT_INPUT_FEATURE_MODE = DEFAULT_INPUT_FEATURE_MODE
 GRADDFT_DEFAULT_NETWORK_ARCHITECTURE = DEFAULT_NETWORK_ARCHITECTURE
 _DEFAULT_SEMILOCAL_XC = ("lda_x", "gga_x_b88", "lda_c_vwn_rpa", "gga_c_lyp")
+_DEFAULT_TRAIN_SCF_SAFETY_MAX_CYCLE = 512
 
 basis_from_spec = None
 evaluate_cartesian_ao = None
@@ -55,6 +56,10 @@ predict_ground_state_total_energy = None
 make_ground_state_predictor = None
 
 _RUNTIME_DEPENDENCIES_LOADED = False
+
+
+def _resolve_train_scf_max_cycle(value: int) -> int:
+    return _DEFAULT_TRAIN_SCF_SAFETY_MAX_CYCLE if int(value) <= 0 else int(value)
 
 
 def _load_runtime_dependencies(logger: "RunLogger | None" = None) -> None:
@@ -254,8 +259,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("none", "per_electron", "per_atom"),
         default="none",
     )
-    p.add_argument("--train-scf-max-cycle", type=int, default=16)
+    p.add_argument(
+        "--train-scf-max-cycle",
+        type=int,
+        default=0,
+        help=(
+            "SCF scan safety cap during training. Use 0 to let the energy "
+            f"threshold decide convergence up to {_DEFAULT_TRAIN_SCF_SAFETY_MAX_CYCLE} cycles."
+        ),
+    )
     p.add_argument("--train-scf-damping", type=float, default=0.25)
+    p.add_argument("--train-scf-conv-tol-energy", type=float, default=None)
+    p.add_argument(
+        "--train-scf-convergence-metric",
+        choices=("energy_and_residual", "energy"),
+        default="energy_and_residual",
+    )
     p.add_argument("--train-scf-conv-tol-density", type=float, default=1e-8)
     p.add_argument("--train-scf-vxc-clip", type=float, default=20.0)
     p.add_argument(
@@ -337,8 +356,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--density-constraint-weight",
         type=float,
-        default=1000.0,
-        help="Weight for the self-consistent ground-state density matching loss.",
+        default=0.0,
+        help="Optional weight for the self-consistent ground-state density matching loss.",
+    )
+    p.add_argument(
+        "--density-matrix-constraint-weight",
+        type=float,
+        default=0.0,
+        help="Optional weight for the self-consistent AO density-matrix matching loss.",
     )
     return _normalize_args(p.parse_args(argv))
 
@@ -719,6 +744,7 @@ def build_training_data(
     points: list[ReferencePoint],
     *,
     density_constraint_weight: float,
+    density_matrix_constraint_weight: float,
 ) -> tuple[GroundStateDatum, ...]:
     return tuple(
         GroundStateDatum.from_parts(
@@ -727,6 +753,7 @@ def build_training_data(
                 target_total_energy=jnp.asarray(point.fci_energy_h, dtype=jnp.float64),
                 target_density_matrix=jnp.asarray(point.fci_dm_ao, dtype=jnp.float64),
                 density_constraint_weight=float(density_constraint_weight),
+                density_matrix_constraint_weight=float(density_matrix_constraint_weight),
             ),
         )
         for point in points
@@ -745,6 +772,7 @@ def train_functional(
     training_data = build_training_data(
         train_points,
         density_constraint_weight=float(args.density_constraint_weight),
+        density_matrix_constraint_weight=float(args.density_matrix_constraint_weight),
     )
     functional = neural_xc.Functional(
         semilocal_xc=tuple(str(name) for name in args.semilocal_xc),
@@ -776,8 +804,10 @@ def train_functional(
             energy_mse_weight=float(args.energy_mse_weight),
             energy_mae_weight=float(args.energy_mae_weight),
             energy_normalization=str(args.energy_normalization),
-            scf_max_cycle=int(args.train_scf_max_cycle),
+            scf_max_cycle=_resolve_train_scf_max_cycle(args.train_scf_max_cycle),
             scf_damping=float(args.train_scf_damping),
+            scf_conv_tol_energy=args.train_scf_conv_tol_energy,
+            scf_convergence_metric=str(args.train_scf_convergence_metric),
             scf_conv_tol_density=float(args.train_scf_conv_tol_density),
             scf_vxc_clip=float(args.train_scf_vxc_clip),
             scf_iterate_selection=str(args.scf_iterate_selection),
@@ -847,9 +877,9 @@ def train_functional(
     initial_scf_cycles_max = _metric_scalar(initial_metrics, "scf_cycles_max")
     initial_scf_selected_rms_max = _metric_scalar(initial_metrics, "scf_selected_rms_max")
     initial_scf_final_rms_max = _metric_scalar(initial_metrics, "scf_final_rms_max")
-
     loss_history = [initial_loss_val]
     density_penalty_history = [float(initial_metrics["density_penalty"][0])]
+    density_matrix_penalty_history = [float(initial_metrics["density_matrix_penalty"][0])]
     stationarity_penalty_history = [float(initial_metrics["stationarity_penalty"][0])]
     coefficient_prior_penalty_history = [float(initial_metrics["coefficient_prior_penalty"][0])]
     grad_norm_history = [float("nan")]
@@ -874,13 +904,17 @@ def train_functional(
         if not _tree_all_finite(state.params):
             state = prev_state
             logger.log(f"[train] non-finite params detected at step {step}; reverted update")
-
         grad_norm_val = _metric_scalar(train_metrics, "grad_norm")
         grad_abs_max_val = _metric_scalar(train_metrics, "grad_abs_max")
         param_update_norm_val = _metric_scalar(train_metrics, "param_update_norm")
         nonfinite_grad_fraction_val = _metric_scalar(train_metrics, "nonfinite_grad_fraction", 0.0)
         train_loss_val = _metric_scalar(train_metrics, "loss")
         train_density_penalty_val = _metric_scalar(train_metrics, "density_penalty", 0.0)
+        train_density_matrix_penalty_val = _metric_scalar(
+            train_metrics,
+            "density_matrix_penalty",
+            0.0,
+        )
         train_stationarity_penalty_val = _metric_scalar(train_metrics, "stationarity_penalty", 0.0)
         train_coefficient_prior_penalty_val = _metric_scalar(
             train_metrics,
@@ -897,6 +931,7 @@ def train_functional(
             tracked_step = step - 1
             loss_history.append(train_loss_val)
             density_penalty_history.append(train_density_penalty_val)
+            density_matrix_penalty_history.append(train_density_matrix_penalty_val)
             stationarity_penalty_history.append(train_stationarity_penalty_val)
             coefficient_prior_penalty_history.append(train_coefficient_prior_penalty_val)
             if train_loss_val < min_loss:
@@ -916,6 +951,7 @@ def train_functional(
                 f"loss={train_loss_val:.8e} "
                 f"energy_mae={float(train_metrics['energy_mae'][0]):.8e} "
                 f"density_penalty={float(train_metrics['density_penalty'][0]):.8e} "
+                f"dm_penalty={float(train_metrics['density_matrix_penalty'][0]):.8e} "
                 f"scf_conv_frac={scf_converged_fraction_val:.6f} "
                 f"scf_cycles_mean={scf_cycles_mean_val:.6f} "
                 f"scf_cycles_max={scf_cycles_max_val:.6f} "
@@ -936,6 +972,7 @@ def train_functional(
     final_scf_final_rms_max = _metric_scalar(final_metrics, "scf_final_rms_max")
     loss_history.append(final_loss_val)
     density_penalty_history.append(float(final_metrics["density_penalty"][0]))
+    density_matrix_penalty_history.append(float(final_metrics["density_matrix_penalty"][0]))
     stationarity_penalty_history.append(float(final_metrics["stationarity_penalty"][0]))
     coefficient_prior_penalty_history.append(float(final_metrics["coefficient_prior_penalty"][0]))
     if final_loss_val < min_loss:
@@ -970,6 +1007,7 @@ def train_functional(
         "final_scf_final_rms_max": final_scf_final_rms_max,
         "loss_history": loss_history,
         "density_penalty_history": density_penalty_history,
+        "density_matrix_penalty_history": density_matrix_penalty_history,
         "stationarity_penalty_history": stationarity_penalty_history,
         "coefficient_prior_penalty_history": coefficient_prior_penalty_history,
         "grad_norm_history": grad_norm_history,
@@ -1019,26 +1057,30 @@ def evaluate_dense_curve(
             predicted_density,
             point.fci_density_grid,
         )
-        predicted_tda = np.asarray(
-            predict_excitation_energies(
-                params,
-                functional,
-                predicted_molecule,
-                nstates=int(excited_nstates),
-                use_tda=True,
-            ),
-            dtype=np.float64,
-        )
-        predicted_casida = np.asarray(
-            predict_excitation_energies(
-                params,
-                functional,
-                predicted_molecule,
-                nstates=int(excited_nstates),
-                use_tda=False,
-            ),
-            dtype=np.float64,
-        )
+        if int(excited_nstates) > 0:
+            predicted_tda = np.asarray(
+                predict_excitation_energies(
+                    params,
+                    functional,
+                    predicted_molecule,
+                    nstates=int(excited_nstates),
+                    use_tda=True,
+                ),
+                dtype=np.float64,
+            )
+            predicted_casida = np.asarray(
+                predict_excitation_energies(
+                    params,
+                    functional,
+                    predicted_molecule,
+                    nstates=int(excited_nstates),
+                    use_tda=False,
+                ),
+                dtype=np.float64,
+            )
+        else:
+            predicted_tda = np.asarray([], dtype=np.float64)
+            predicted_casida = np.asarray([], dtype=np.float64)
         ncompare_tda = min(
             int(excited_nstates),
             int(point.fci_excitation_energies_h.size),
@@ -1278,14 +1320,15 @@ def plot_selected_density_profiles(
     max_l: int,
     profile_r_values: list[float],
     line_profile_points: int,
-) -> None:
+) -> list[dict[str, float]]:
     plt = _get_plt()
     selected_indices = _selected_profile_indices(dense_points, profile_r_values)
+    profile_rows: list[dict[str, float]] = []
     fig, axes = plt.subplots(1, len(selected_indices), figsize=(4.4 * len(selected_indices), 3.8))
     if len(selected_indices) == 1:
         axes = [axes]
 
-    for ax, idx in zip(axes, selected_indices, strict=True):
+    for profile_index, (ax, idx) in enumerate(zip(axes, selected_indices, strict=True)):
         point = dense_points[idx]
         predicted_molecule = predict_ground_state_molecule(
             params,
@@ -1308,7 +1351,24 @@ def plot_selected_density_profiles(
             max_l=max_l,
             npoints=line_profile_points,
         )
+        density_diff = pred_density_line - fci_density_line
         row = rows[idx]
+        for sample_index, (z_value, fci_value, pred_value, diff_value) in enumerate(
+            zip(z_line, fci_density_line, pred_density_line, density_diff, strict=True)
+        ):
+            profile_rows.append(
+                {
+                    "profile_index": float(profile_index),
+                    "sample_index": float(sample_index),
+                    "r_angstrom": float(point.r_angstrom),
+                    "z_angstrom": float(z_value),
+                    "fci_density": float(fci_value),
+                    "predicted_density": float(pred_value),
+                    "density_error": float(diff_value),
+                    "density_abs_error": float(abs(diff_value)),
+                    "density_l2": float(row["density_l2"]),
+                }
+            )
         ax.plot(z_line, fci_density_line, lw=2.0, label="FCI")
         ax.plot(z_line, pred_density_line, lw=2.0, label="Neural_xc")
         ax.set_xlabel("z (Angstrom)")
@@ -1324,6 +1384,7 @@ def plot_selected_density_profiles(
     fig.tight_layout()
     fig.savefig(path, dpi=220)
     plt.close(fig)
+    return profile_rows
 
 
 def _solver_state_table(
@@ -1458,6 +1519,10 @@ def write_summary(
         handle.write(f"semilocal_xc = {tuple(str(name) for name in args.semilocal_xc)}\n")
         handle.write(f"hidden_dims = {list(int(value) for value in args.hidden_dims)}\n")
         handle.write(f"density_constraint_weight = {float(args.density_constraint_weight)}\n")
+        handle.write(
+            "density_matrix_constraint_weight = "
+            f"{float(args.density_matrix_constraint_weight)}\n"
+        )
         handle.write(f"scf_require_convergence = {bool(args.scf_require_convergence)}\n")
         handle.write(
             f"reference_scf_backend = {getattr(args, 'reference_scf_backend', 'pyscf')}\n"
@@ -1540,6 +1605,7 @@ def main() -> None:
         f"training_mode={args.training_mode}, "
         f"include_pt2_channel={bool(args.include_pt2_channel)}, "
         f"density_constraint_weight={args.density_constraint_weight}, "
+        f"density_matrix_constraint_weight={args.density_matrix_constraint_weight}, "
         f"grid_ao_backend={args.grid_ao_backend}, integral_backend={args.integral_backend}, "
         f"jk_backend={args.jk_backend}"
     )
@@ -1603,6 +1669,7 @@ def main() -> None:
     curve_png = outdir / "h2_fci_ground_vs_neural_dense_curve.png"
     excited_png = outdir / "h2_fci_excited_vs_neural_dense_curve.png"
     profile_png = outdir / "h2_fci_ground_density_profiles.png"
+    profile_csv = outdir / "h2_fci_ground_density_profiles.csv"
     summary_path = outdir / "summary.txt"
     checkpoint_path = outdir / "neural_xc_params.msgpack"
 
@@ -1612,6 +1679,7 @@ def main() -> None:
         {
             "loss_history": training["loss_history"],
             "density_penalty_history": training["density_penalty_history"],
+            "density_matrix_penalty_history": training["density_matrix_penalty_history"],
             "stationarity_penalty_history": training["stationarity_penalty_history"],
             "coefficient_prior_penalty_history": training["coefficient_prior_penalty_history"],
             "grad_norm_history": training["grad_norm_history"],
@@ -1645,7 +1713,7 @@ def main() -> None:
             basis=str(args.basis),
             xc=str(args.xc),
         )
-    plot_selected_density_profiles(
+    profile_rows = plot_selected_density_profiles(
         profile_png,
         dense_points,
         dense_rows,
@@ -1657,6 +1725,7 @@ def main() -> None:
         profile_r_values=[float(value) for value in args.profile_r_values],
         line_profile_points=int(args.line_profile_points),
     )
+    write_dense_csv(profile_csv, profile_rows)
 
     checkpoint_path, checkpoint_meta_path = save_params_checkpoint(
         checkpoint_path,
@@ -1673,6 +1742,7 @@ def main() -> None:
             "hidden_dims": [int(value) for value in args.hidden_dims],
             "include_pt2_channel": bool(args.include_pt2_channel),
             "density_constraint_weight": float(args.density_constraint_weight),
+            "density_matrix_constraint_weight": float(args.density_matrix_constraint_weight),
         },
     )
     write_summary(
@@ -1706,6 +1776,7 @@ def main() -> None:
         "excited_nstates": int(args.excited_nstates),
         "steps": int(args.steps),
         "density_constraint_weight": float(args.density_constraint_weight),
+        "density_matrix_constraint_weight": float(args.density_matrix_constraint_weight),
         "scf_require_convergence": bool(args.scf_require_convergence),
         "reference_scf_backend": str(getattr(args, "reference_scf_backend", "pyscf")),
         "final_loss": float(training["final_loss"]),
@@ -1730,14 +1801,74 @@ def main() -> None:
         "casida_excited_total_mae_ev": float(np.mean(casida_total_values)) if casida_total_values else float("nan"),
         "dense_csv": str(dense_csv),
         "excited_csv": str(excited_csv) if excited_rows else None,
+        "training_curve_csv": str(training_curve_csv),
+        "profile_csv": str(profile_csv),
         "curve_png": str(curve_png),
         "excited_png": str(excited_png) if excited_rows else None,
         "profile_png": str(profile_png),
         "training_curve_png": str(training_curve_png),
         "summary_txt": str(summary_path),
+        "visualization_manifest": str(outdir / "visualization_manifest.json"),
     }
     (outdir / "summary.json").write_text(
         json.dumps(summary_json, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    visualization_manifest = {
+        "paper_experiment": "Ground-State Potential-Energy Surfaces",
+        "description": "Data files needed to reproduce H2 ground-state PES visualizations.",
+        "figures": [
+            {
+                "figure": str(curve_png),
+                "data_files": [str(dense_csv)],
+                "x": "r_angstrom",
+                "y": [
+                    "fci_energy_h",
+                    "predicted_energy_h",
+                    "energy_abs_err_ev",
+                    "density_l2",
+                    "electron_count_abs_err",
+                ],
+            },
+            {
+                "figure": str(training_curve_png),
+                "data_files": [str(training_curve_csv)],
+                "x": "step",
+                "y": [
+                    "loss",
+                    "density_penalty",
+                    "density_matrix_penalty",
+                    "stationarity_penalty",
+                    "coefficient_prior_penalty",
+                    "grad_norm",
+                    "param_update_norm",
+                ],
+            },
+            {
+                "figure": str(profile_png),
+                "data_files": [str(profile_csv)],
+                "x": "z_angstrom",
+                "y": ["fci_density", "predicted_density", "density_error"],
+                "group_by": ["profile_index", "r_angstrom"],
+            },
+            {
+                "figure": str(excited_png) if excited_rows else None,
+                "data_files": [str(excited_csv)] if excited_rows else [],
+                "x": "r_angstrom",
+                "y": [
+                    "fci_total_energy_h",
+                    "predicted_total_energy_h",
+                    "gap_abs_err_ev",
+                    "total_abs_err_ev",
+                ],
+                "group_by": ["solver", "state_index"],
+            },
+        ],
+        "metadata_files": [str(summary_path), str(outdir / "summary.json")],
+    }
+    visualization_manifest_path = outdir / "visualization_manifest.json"
+    visualization_manifest_path.write_text(
+        json.dumps(visualization_manifest, indent=2, sort_keys=True),
         encoding="utf-8",
     )
 
@@ -1747,8 +1878,10 @@ def main() -> None:
         logger.log(f"Wrote excited csv: {excited_csv}")
         logger.log(f"Wrote excited png: {excited_png}")
     logger.log(f"Wrote profile png: {profile_png}")
+    logger.log(f"Wrote profile csv: {profile_csv}")
     logger.log(f"Wrote loss png  : {training_curve_png}")
     logger.log(f"Wrote summary   : {summary_path}")
+    logger.log(f"Wrote vis data  : {visualization_manifest_path}")
     logger.log(f"Wrote params    : {checkpoint_path}")
 
 

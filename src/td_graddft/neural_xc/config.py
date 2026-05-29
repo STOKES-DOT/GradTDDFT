@@ -18,6 +18,7 @@ HFChannelMode = Literal["total_only", "spin_resolved"]
 PT2ChannelMode = Literal["off", "scaled_projected", "local_exact"]
 ResponseHFMode = Literal["approx", "strict"]
 ResponsePT2Mode = Literal["approx", "strict"]
+StrictHFXResponseMode = Literal["dense", "low_memory"]
 InputFeatureMode = Literal["enhanced", "canonical"]
 
 
@@ -64,6 +65,8 @@ class Config:
     allow_experimental_jax_xc: bool = False
     density_floor: float = 1e-12
     response_density_floor: float | None = 1e-5
+    response_grid_chunk_size: int | None = 1024
+    strict_hfx_response_mode: StrictHFXResponseMode = "dense"
     kernel_clip: float = 5.0
     response_kernel_clip: float | None = 5.0
     name: str = "neural_xc"
@@ -80,4 +83,5 @@ __all__ = [
     "ResponseHFMode",
     "ResponsePT2Mode",
     "SemilocalBackend",
+    "StrictHFXResponseMode",
 ]

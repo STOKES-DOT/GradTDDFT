@@ -12,7 +12,7 @@ import jax.numpy as jnp
 from jax import core as jax_core
 from jaxtyping import Array
 
-from .eigensolvers import davidson_lowest_symmetric
+from .eigensolvers import davidson_lowest_symmetric, _matmul, _solver_dtype
 from ._utils import (
     _casida_metric_factor,
     _matrix_power_symmetric,
@@ -94,7 +94,7 @@ def _finalize_casida_result(
     w = jnp.where(keep_mask, w, 0.0)
     f_vectors = vecs[:, keep]
     f_vectors = f_vectors * keep_mask[jnp.newaxis, :]
-    x_plus_y = metric_factor @ f_vectors
+    x_plus_y = _matmul(metric_factor, f_vectors)
     safe_w = jnp.where(keep_mask, w, 1.0)
     x_minus_y = a_plus_b_vind_rows(x_plus_y.T).T / safe_w[jnp.newaxis, :]
 
@@ -184,6 +184,9 @@ def solve_casida(
 
     a_plus_b = _symmetrize(flat_a + flat_b)
     a_minus_b = _symmetrize(flat_a - flat_b)
+    work_dtype = _solver_dtype(jnp.result_type(a_plus_b.dtype, a_minus_b.dtype))
+    a_plus_b = a_plus_b.astype(work_dtype)
+    a_minus_b = a_minus_b.astype(work_dtype)
     dim = int(a_plus_b.shape[0])
     nroots = dim if nstates is None else min(int(nstates), dim)
 
@@ -210,11 +213,11 @@ def solve_casida(
         metric_factor = _casida_metric_factor(a_minus_b, matrix_eps)
 
         def casida_matvec(vectors):
-            transformed = metric_factor @ vectors
-            coupled = a_plus_b @ transformed
-            return metric_factor.T.conj() @ coupled
+            transformed = _matmul(metric_factor, vectors)
+            coupled = _matmul(a_plus_b, transformed)
+            return _matmul(metric_factor.T.conj(), coupled)
 
-        projected = a_plus_b @ metric_factor
+        projected = _matmul(a_plus_b, metric_factor)
         casida_diag = jnp.einsum("ki,ki->i", metric_factor, projected)
         davidson_w2, davidson_vecs, converged = davidson_lowest_symmetric(
             casida_matvec,
@@ -226,7 +229,9 @@ def solve_casida(
             max_subspace=davidson_max_subspace,
         )
         if mode == "auto":
-            dense_casida_matrix = _symmetrize(metric_factor.T.conj() @ a_plus_b @ metric_factor)
+            dense_casida_matrix = _symmetrize(
+                _matmul(_matmul(metric_factor.T.conj(), a_plus_b), metric_factor)
+            )
             if _is_traced_convergence_flag(converged):
                 w2, vecs = jax.lax.cond(
                     converged,
@@ -246,7 +251,9 @@ def solve_casida(
                 raise RuntimeError("Davidson Casida solver did not converge.")
     else:
         metric_factor = _matrix_power_symmetric(a_minus_b, 0.5, matrix_eps)
-        casida_matrix = _symmetrize(metric_factor.T.conj() @ a_plus_b @ metric_factor)
+        casida_matrix = _symmetrize(
+            _matmul(_matmul(metric_factor.T.conj(), a_plus_b), metric_factor)
+        )
         w2, vecs = jnp.linalg.eigh(casida_matrix)
 
     return _finalize_casida_result(
@@ -258,7 +265,7 @@ def solve_casida(
         nocc=nocc,
         nvir=nvir,
         metric_factor=metric_factor,
-        a_plus_b_vind_rows=lambda rows: rows @ a_plus_b.T,
+        a_plus_b_vind_rows=lambda rows: _matmul(rows, a_plus_b.T),
         a_matrix=matrices.a_matrix,
         b_matrix=matrices.b_matrix,
         casida_matrix=casida_matrix,
@@ -490,9 +497,9 @@ class RestrictedCasidaTDDFT:
 
             def casida_vind_rows(rows):
                 rows = jnp.asarray(rows).reshape(-1, dim)
-                transformed = rows @ metric_factor.T.conj()
+                transformed = _matmul(rows, metric_factor.T.conj())
                 coupled = a_plus_b_vind_rows(transformed)
-                return coupled @ metric_factor
+                return _matmul(coupled, metric_factor)
 
             projected = a_plus_b_vind_rows(metric_factor.T).T
             diagonal = jnp.einsum("ki,ki->i", metric_factor, projected)

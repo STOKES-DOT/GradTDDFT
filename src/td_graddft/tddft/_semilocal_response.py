@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import weakref
 
-from td_graddft.features import restricted_grid_response_variables
+from td_graddft.features import _contains_tracer, restricted_grid_response_variables
 from td_graddft.xc_backend.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
 
 
@@ -27,8 +27,9 @@ class SemilocalResponseFunctional:
         cached = _GRID_RESPONSE_TENSOR_CACHE.get(cache_key)
         if cached is not None:
             cached_ref, cached_tensor = cached
-            if cached_ref() is molecule:
+            if cached_ref() is molecule and not _contains_tracer(cached_tensor):
                 return cached_tensor
+            _GRID_RESPONSE_TENSOR_CACHE.pop(cache_key, None)
         rho, grad_rho, tau, _ = restricted_grid_response_variables(
             molecule,
             feature_kind=self.response_feature_kind,
@@ -39,5 +40,6 @@ class SemilocalResponseFunctional:
             grad=grad_rho,
             tau=tau,
         )
-        _GRID_RESPONSE_TENSOR_CACHE[cache_key] = (weakref.ref(molecule), tensor)
+        if not _contains_tracer(tensor):
+            _GRID_RESPONSE_TENSOR_CACHE[cache_key] = (weakref.ref(molecule), tensor)
         return tensor

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -35,6 +36,12 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=Path,
         default=Path("outputs/h2_s1_tda_pt2localresp_mae_ablation/h2_equilibrium_s1_only_zoom_b3lyp_vs_fci.png"),
+    )
+    parser.add_argument(
+        "--output-csv",
+        type=Path,
+        default=None,
+        help="CSV table containing the S1 stick-spectrum values used by the plot.",
     )
     parser.add_argument(
         "--margin-ev",
@@ -107,6 +114,33 @@ def main() -> None:
     fig.tight_layout()
     fig.savefig(args.output, dpi=220, bbox_inches="tight")
     plt.close(fig)
+    output_csv = args.output_csv if args.output_csv is not None else args.output.with_suffix(".csv")
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    with output_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "series_key",
+                "label",
+                "r_angstrom",
+                "excitation_ev",
+                "oscillator_strength",
+            ]
+        )
+        for label, key, _ in SERIES:
+            if key == "fci":
+                point = data["fci"][0]
+            else:
+                point = data[key]
+            writer.writerow(
+                [
+                    key,
+                    label,
+                    float(data["r_angstrom"]),
+                    float(point["excitation_ev"]),
+                    float(point["oscillator_strength"]),
+                ]
+            )
 
 
 if __name__ == "__main__":

@@ -8,6 +8,24 @@ from collections.abc import Callable
 from ._utils import _symmetrize
 
 
+_MATMUL_PRECISION = jax.lax.Precision.HIGHEST
+_DEFAULT_MATMUL_PRECISION = "highest"
+
+
+def _solver_dtype(dtype: jnp.dtype) -> jnp.dtype:
+    dtype = jnp.dtype(dtype)
+    if bool(jax.config.jax_enable_x64):
+        if dtype == jnp.dtype(jnp.float32):
+            return jnp.dtype(jnp.float64)
+        if dtype == jnp.dtype(jnp.complex64):
+            return jnp.dtype(jnp.complex128)
+    return dtype
+
+
+def _matmul(lhs: Array, rhs: Array) -> Array:
+    return jnp.matmul(lhs, rhs, precision=_MATMUL_PRECISION)
+
+
 def _safe_preconditioner_denominator(values: Array, floor: float, level_shift: float) -> Array:
     values = jnp.asarray(values)
     values = values - jnp.asarray(level_shift, dtype=values.dtype)
@@ -28,26 +46,29 @@ def _resolve_symmetric_linear_operator(
             raise ValueError("diag is required when davidson_lowest_symmetric receives a matvec.")
         op_diag = jnp.asarray(diag)
         dim = int(size)
-        dtype = op_diag.dtype
+        dtype = _solver_dtype(op_diag.dtype)
+        op_diag = op_diag.astype(dtype)
 
         def apply(vectors: Array) -> Array:
             arr = jnp.asarray(vectors, dtype=dtype)
             squeeze = arr.ndim == 1
             arr = arr.reshape(dim, -1)
-            out = jnp.asarray(matrix_or_matvec(arr), dtype=dtype).reshape(dim, -1)
+            with jax.default_matmul_precision(_DEFAULT_MATMUL_PRECISION):
+                out = jnp.asarray(matrix_or_matvec(arr), dtype=dtype).reshape(dim, -1)
             return out[:, 0] if squeeze else out
 
         return apply, op_diag.reshape(dim), dim, dtype
 
     matrix = _symmetrize(jnp.asarray(matrix_or_matvec))
     dim = int(matrix.shape[0])
-    dtype = matrix.dtype
+    dtype = _solver_dtype(matrix.dtype)
+    matrix = matrix.astype(dtype)
 
     def apply(vectors: Array) -> Array:
         arr = jnp.asarray(vectors, dtype=dtype)
         squeeze = arr.ndim == 1
         arr = arr.reshape(dim, -1)
-        out = matrix @ arr
+        out = _matmul(matrix, arr)
         return out[:, 0] if squeeze else out
 
     return apply, jnp.diag(matrix), dim, dtype
@@ -103,7 +124,7 @@ def davidson_lowest_symmetric(
     abasis = jnp.zeros((dim, max_subspace), dtype=dtype)
     basis = jax.lax.dynamic_update_slice(basis, guess_basis, (0, 0))
     abasis = jax.lax.dynamic_update_slice(abasis, guess_abasis, (0, 0))
-    heff0 = _symmetrize(basis.T.conj() @ abasis)
+    heff0 = _symmetrize(_matmul(basis.T.conj(), abasis))
 
     active_mask = jnp.zeros((max_subspace,), dtype=bool)
     active_mask = jax.lax.dynamic_update_slice(
@@ -125,7 +146,7 @@ def davidson_lowest_symmetric(
     done0 = jnp.asarray(False)
 
     def _orthogonalize_against(vector: Array, columns: Array) -> Array:
-        return vector - columns @ (columns.T.conj() @ vector)
+        return vector - _matmul(columns, _matmul(columns.T.conj(), vector))
 
     def _append_new_columns(
         basis_in: Array,
@@ -218,7 +239,7 @@ def davidson_lowest_symmetric(
             scatter_body,
             (basis_in, abasis_in, active_mask_in, jnp.asarray(0, dtype=index_dtype)),
         )
-        projected = basis_out.T.conj() @ appended_abasis
+        projected = _matmul(basis_out.T.conj(), appended_abasis)
 
         def heff_body(col_idx: int, carry):
             heff_cur, offset = carry
@@ -253,7 +274,7 @@ def davidson_lowest_symmetric(
         eigvecs_in: Array,
     ) -> tuple[Array, Array, Array, Array, Array]:
         restart_coeff = eigvecs_in[:, :collapse_subspace]
-        restarted_basis = basis_in @ restart_coeff
+        restarted_basis = _matmul(basis_in, restart_coeff)
         restarted_basis, _ = jnp.linalg.qr(restarted_basis, mode="reduced")
         restarted_abasis = apply(restarted_basis)
 
@@ -261,7 +282,7 @@ def davidson_lowest_symmetric(
         abasis_out = jnp.zeros((dim, max_subspace), dtype=dtype)
         basis_out = jax.lax.dynamic_update_slice(basis_out, restarted_basis, (0, 0))
         abasis_out = jax.lax.dynamic_update_slice(abasis_out, restarted_abasis, (0, 0))
-        heff_out = _symmetrize(basis_out.T.conj() @ abasis_out)
+        heff_out = _symmetrize(_matmul(basis_out.T.conj(), abasis_out))
 
         active_mask_out = jnp.zeros((max_subspace,), dtype=bool)
         active_mask_out = jax.lax.dynamic_update_slice(
@@ -321,8 +342,8 @@ def davidson_lowest_symmetric(
 
             theta = sub_eigvals[:nroots]
             coeff = sub_eigvecs[:, :nroots]
-            vecs = basis_it @ coeff
-            avecs = abasis_it @ coeff
+            vecs = _matmul(basis_it, coeff)
+            avecs = _matmul(abasis_it, coeff)
             residuals = avecs - vecs * theta[None, :]
             residual_norms = jnp.linalg.norm(residuals, axis=0)
             max_residual = jnp.max(residual_norms)

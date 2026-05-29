@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, PyTree
 
-from ..features import restricted_grid_features
+from ..features import grid_features_for_molecule
 from ..scf import (
     DifferentiableSCF,
     DifferentiableSCFConfig,
@@ -110,7 +110,9 @@ def _excited_state_extension_terms(
         s1_error = terms["s1_predicted"] - terms["s1_target"]
         terms["s1_mse"] = s1_error**2
         terms["s1_mae"] = jnp.abs(s1_error)
-        terms["s1_penalty"] = excited_datum.s1_constraint_weight * terms["s1_mae"]
+        terms["s1_penalty"] = excited_datum.s1_constraint_weight * (
+            terms["s1_mse"] + terms["s1_mae"]
+        )
 
     if excited_datum.first_excited_total_energy_constraint_weight != 0.0:
         if excited_datum.target_first_excited_total_energy is None:
@@ -2510,6 +2512,26 @@ def density_matching_penalty(
     return jnp.sum(weights * residual) / normalization
 
 
+def density_matrix_matching_penalty(
+    molecule: Any,
+    *,
+    self_consistent_molecule: Any | None = None,
+    target_density_matrix: Array | None = None,
+) -> Array:
+    """Mean-squared AO density-matrix error using spin-summed matrices."""
+
+    reference = (
+        _spin_summed_density_matrix(molecule)
+        if target_density_matrix is None
+        else jnp.asarray(target_density_matrix)
+    )
+    if reference.ndim == 3:
+        reference = reference.sum(axis=0)
+    model_molecule = molecule if self_consistent_molecule is None else self_consistent_molecule
+    model = _spin_summed_density_matrix(model_molecule)
+    return jnp.mean((model - reference) ** 2)
+
+
 def xc_potential_matching_penalty(
     params: PyTree,
     functional: Any,
@@ -2622,7 +2644,7 @@ def coefficient_prior_penalty(
             "XC functional must expose projected_hf_energy_density_components(...) for a coefficient prior."
         )
 
-    features = restricted_grid_features(molecule)
+    features = grid_features_for_molecule(molecule)
     coefficient_inputs = functional.compute_coefficient_inputs(
         molecule,
         features=features,
@@ -2762,6 +2784,8 @@ def _make_differentiable_scf(
             max_cycle=cfg.scf_max_cycle,
             damping=cfg.scf_damping,
             level_shift=cfg.scf_level_shift,
+            conv_tol_energy=cfg.scf_conv_tol_energy,
+            convergence_metric=cfg.scf_convergence_metric,
             occupation_tolerance=cfg.occupation_tolerance,
             conv_tol_density=cfg.scf_conv_tol_density,
             orthogonalization_eps=cfg.scf_orthogonalization_eps,
@@ -2835,11 +2859,62 @@ def _stack_pytree_batch(items: Sequence[Any]) -> Any:
     )
 
 
-def _pytree_shape_signature(tree: Any) -> tuple[tuple[tuple[int, ...], str], ...]:
-    return tuple(
+def _pytree_batch_signature(tree: Any) -> tuple[Any, tuple[tuple[tuple[int, ...], str], ...]]:
+    leaves, treedef = jax.tree_util.tree_flatten(tree)
+    leaf_signature = tuple(
         (tuple(int(dim) for dim in jnp.asarray(leaf).shape), str(jnp.asarray(leaf).dtype))
-        for leaf in jax.tree_util.tree_leaves(tree)
+        for leaf in leaves
     )
+    return treedef, leaf_signature
+
+
+def _molecule_attr(molecule: Any, name: str) -> Any:
+    try:
+        return getattr(molecule, name)
+    except (AttributeError, KeyError):
+        if isinstance(molecule, dict):
+            return molecule.get(name)
+        return None
+
+
+def _host_array_or_none(value: Any) -> np.ndarray | None:
+    if value is None:
+        return None
+    try:
+        return np.asarray(jax.device_get(jnp.asarray(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_unrestricted_batch_reference(molecule: Any) -> bool:
+    if (
+        _molecule_attr(molecule, "nocc_alpha") is not None
+        or _molecule_attr(molecule, "nocc_beta") is not None
+    ):
+        return True
+    for name in ("mo_occ", "rdm1", "mo_coeff"):
+        value = _host_array_or_none(_molecule_attr(molecule, name))
+        if value is not None and value.ndim >= 1 and int(value.shape[0]) == 2:
+            if not np.allclose(value[0], value[1]):
+                return True
+    return False
+
+
+def _is_open_shell_unrestricted_batch_reference(molecule: Any) -> bool:
+    nocc_alpha = _molecule_attr(molecule, "nocc_alpha")
+    nocc_beta = _molecule_attr(molecule, "nocc_beta")
+    if nocc_alpha is not None and nocc_beta is not None:
+        try:
+            if int(nocc_alpha) != int(nocc_beta):
+                return True
+        except (TypeError, ValueError):
+            pass
+    for name in ("mo_occ", "rdm1"):
+        value = _host_array_or_none(_molecule_attr(molecule, name))
+        if value is not None and value.ndim >= 1 and int(value.shape[0]) == 2:
+            if not np.allclose(value[0], value[1]):
+                return True
+    return False
 
 
 def _can_use_batched_self_consistent_ground_state_path(
@@ -2871,15 +2946,21 @@ def _can_use_batched_self_consistent_ground_state_path(
             any(float(datum.density_constraint_weight) != 0.0 for datum in dataset)
             and any(datum.target_density_matrix is None for datum in dataset)
         )
-    ):
+        or (
+            any(float(datum.density_matrix_constraint_weight) != 0.0 for datum in dataset)
+            and any(datum.target_density_matrix is None for datum in dataset)
+        )
+        ):
         return False
-    molecule_signature = _pytree_shape_signature(dataset[0].molecule)
-    if any(_pytree_shape_signature(datum.molecule) != molecule_signature for datum in dataset[1:]):
+    if any(_is_open_shell_unrestricted_batch_reference(datum.molecule) for datum in dataset):
+        return False
+    molecule_signature = _pytree_batch_signature(dataset[0].molecule)
+    if any(_pytree_batch_signature(datum.molecule) != molecule_signature for datum in dataset[1:]):
         return False
     density_targets = [datum.target_density_matrix for datum in dataset if datum.target_density_matrix is not None]
     if density_targets:
-        density_signature = _pytree_shape_signature(density_targets[0])
-        if any(_pytree_shape_signature(target) != density_signature for target in density_targets[1:]):
+        density_signature = _pytree_batch_signature(density_targets[0])
+        if any(_pytree_batch_signature(target) != density_signature for target in density_targets[1:]):
             return False
     return True
 
@@ -2896,11 +2977,29 @@ def _ground_state_mse_loss_batched_self_consistent(
     targets = jnp.asarray([datum.target_total_energy for datum in dataset])
     weights = jnp.asarray([datum.weight for datum in dataset])
     density_weights = jnp.asarray([datum.density_constraint_weight for datum in dataset])
+    density_matrix_weights = jnp.asarray(
+        [datum.density_matrix_constraint_weight for datum in dataset]
+    )
     use_density_targets = any(float(datum.density_constraint_weight) != 0.0 for datum in dataset)
-    density_targets = _stack_pytree_batch([datum.target_density_matrix for datum in dataset]) if use_density_targets else None
+    use_density_matrix_targets = any(
+        float(datum.density_matrix_constraint_weight) != 0.0 for datum in dataset
+    )
+    use_density_targets_any = use_density_targets or use_density_matrix_targets
+    density_targets = (
+        _stack_pytree_batch([datum.target_density_matrix for datum in dataset])
+        if use_density_targets_any
+        else None
+    )
     scf = _make_differentiable_scf(training_config)
 
-    def _per_datum(molecule, target, weight, density_weight, target_density_matrix):
+    def _per_datum(
+        molecule,
+        target,
+        weight,
+        density_weight,
+        density_matrix_weight,
+        target_density_matrix,
+    ):
         eval_molecule, scf_info = scf.run(molecule, functional, params)
         predicted = _predict_ground_state_total_energy_from_molecule(
             params,
@@ -2934,7 +3033,17 @@ def _ground_state_mse_loss_batched_self_consistent(
         else:
             density_mse = jnp.asarray(0.0, dtype=predicted.dtype)
         density_penalty = density_weight * density_mse
-        loss_contrib = weight * (datum_loss + density_penalty)
+        density_matrix_weight = jnp.asarray(density_matrix_weight, dtype=predicted.dtype)
+        if use_density_matrix_targets:
+            density_matrix_mse = density_matrix_matching_penalty(
+                molecule,
+                self_consistent_molecule=eval_molecule,
+                target_density_matrix=target_density_matrix,
+            )
+        else:
+            density_matrix_mse = jnp.asarray(0.0, dtype=predicted.dtype)
+        density_matrix_penalty = density_matrix_weight * density_matrix_mse
+        loss_contrib = weight * (datum_loss + density_penalty + density_matrix_penalty)
         loss_contrib = _preserve_value_stop_gradient(loss_contrib, stop_gradient_mask)
         return {
             "loss_contrib": loss_contrib,
@@ -2946,6 +3055,8 @@ def _ground_state_mse_loss_batched_self_consistent(
             "normalized_mae": datum_mae,
             "density_penalty": density_penalty,
             "density_mse": density_mse,
+            "density_matrix_penalty": density_matrix_penalty,
+            "density_matrix_mse": density_matrix_mse,
             "scf_stop_gradient_applied": jnp.asarray(
                 stop_gradient_mask,
                 dtype=predicted.dtype,
@@ -2962,9 +3073,42 @@ def _ground_state_mse_loss_batched_self_consistent(
             "scf_best_rms": jnp.asarray(scf_info.best_rms_density, dtype=predicted.dtype),
         }
 
-    batch = jax.vmap(_per_datum, in_axes=(0, 0, 0, 0, 0 if use_density_targets else None))(
-        batched_molecule, targets, weights, density_weights, density_targets
-    )
+    if any(_is_unrestricted_batch_reference(datum.molecule) for datum in dataset):
+        if use_density_targets_any:
+            batch = jax.lax.map(
+                lambda args: _per_datum(*args),
+                (
+                    batched_molecule,
+                    targets,
+                    weights,
+                    density_weights,
+                    density_matrix_weights,
+                    density_targets,
+                ),
+            )
+        else:
+            batch = jax.lax.map(
+                lambda args: _per_datum(*args, None),
+                (
+                    batched_molecule,
+                    targets,
+                    weights,
+                    density_weights,
+                    density_matrix_weights,
+                ),
+            )
+    else:
+        batch = jax.vmap(
+            _per_datum,
+            in_axes=(0, 0, 0, 0, 0, 0 if use_density_targets_any else None),
+        )(
+            batched_molecule,
+            targets,
+            weights,
+            density_weights,
+            density_matrix_weights,
+            density_targets,
+        )
     dtype = batch["predicted"].dtype
     total_weight = jnp.sum(batch["weight"])
     loss = jnp.sum(batch["loss_contrib"]) / jnp.maximum(total_weight, jnp.asarray(1.0, dtype=dtype))
@@ -2981,6 +3125,8 @@ def _ground_state_mse_loss_batched_self_consistent(
         "normalized_energy_mae": batch["normalized_mae"],
         "density_penalty": batch["density_penalty"],
         "density_mse": batch["density_mse"],
+        "density_matrix_penalty": batch["density_matrix_penalty"],
+        "density_matrix_mse": batch["density_matrix_mse"],
         "scf_converged": batch["scf_converged"],
         "scf_stop_gradient_applied": batch["scf_stop_gradient_applied"],
         "scf_cycles": batch["scf_cycles"],
@@ -3024,6 +3170,116 @@ def _ground_state_mse_loss_batched_self_consistent(
     return loss, metrics
 
 
+def ground_state_mse_loss_pointwise_dataset(
+    params: PyTree,
+    functional: Any,
+    data: GroundStateDatum | Sequence[GroundStateDatum],
+    *,
+    training_config: GroundStateTrainingConfig | None = None,
+    predictor: Callable[[PyTree, Any], tuple[Array, Any]] | None = None,
+) -> tuple[Array, dict[str, Array]]:
+    """Evaluate a dataset by aggregating the canonical single-datum loss path."""
+
+    dataset = _as_dataset(data)
+    cfg = GroundStateTrainingConfig() if training_config is None else training_config
+    core_cfg = cfg.ground_state_core_config()
+    per_datum = []
+    weighted_losses = []
+    effective_weights = []
+    for datum in dataset:
+        loss_i, metrics_i = ground_state_mse_loss(
+            params,
+            functional,
+            datum,
+            training_config=cfg,
+            predictor=predictor,
+        )
+        loss_i = jnp.asarray(loss_i)
+        weight_i = jnp.asarray(datum.weight, dtype=loss_i.dtype)
+        if (
+            core_cfg.mode == "self_consistent"
+            and bool(core_cfg.scf_require_convergence)
+            and "scf_converged" in metrics_i
+            and int(jnp.asarray(metrics_i["scf_converged"]).size) > 0
+        ):
+            weight_i = weight_i * jnp.asarray(metrics_i["scf_converged"]).reshape(-1)[0]
+        weighted_losses.append(
+            loss_i * jnp.maximum(weight_i, jnp.asarray(1.0, dtype=loss_i.dtype))
+        )
+        effective_weights.append(weight_i)
+        per_datum.append(metrics_i)
+    if not weighted_losses:
+        loss = jnp.asarray(0.0, dtype=jnp.float32)
+        return loss, {"loss": loss}
+    loss_dtype = jnp.asarray(weighted_losses[0]).dtype
+    total_loss = jnp.sum(
+        jnp.stack([jnp.asarray(value, dtype=loss_dtype) for value in weighted_losses])
+    )
+    total_weight = jnp.sum(
+        jnp.stack([jnp.asarray(value, dtype=loss_dtype) for value in effective_weights])
+    )
+    loss = total_loss / jnp.maximum(total_weight, jnp.asarray(1.0, dtype=loss_dtype))
+    empty = jnp.array([], dtype=loss_dtype)
+    summary_keys = {
+        "loss",
+        "scf_converged_fraction",
+        "scf_stop_gradient_fraction",
+        "scf_cycles_mean",
+        "scf_cycles_max",
+        "scf_selected_cycle_mean",
+        "scf_best_cycle_mean",
+        "scf_final_rms_mean",
+        "scf_final_rms_max",
+        "scf_selected_rms_mean",
+        "scf_selected_rms_max",
+        "scf_best_rms_mean",
+        "scf_best_rms_max",
+    }
+
+    def _concat_metric(key: str) -> Array:
+        values = []
+        for metrics_i in per_datum:
+            if key not in metrics_i:
+                continue
+            arr = jnp.asarray(metrics_i[key])
+            if int(arr.size) > 0:
+                values.append(jnp.ravel(arr).astype(loss_dtype))
+        return jnp.concatenate(values) if values else empty
+
+    metrics = {
+        key: _concat_metric(key)
+        for key in sorted({key for metrics_i in per_datum for key in metrics_i})
+        if key not in summary_keys
+    }
+    metrics["loss"] = loss
+
+    def _mean_or_nan(key: str) -> Array:
+        values = metrics.get(key, empty)
+        if int(values.size) <= 0:
+            return jnp.asarray([jnp.nan], dtype=loss_dtype)
+        return jnp.asarray([jnp.mean(values)], dtype=loss_dtype)
+
+    def _max_or_nan(key: str) -> Array:
+        values = metrics.get(key, empty)
+        if int(values.size) <= 0:
+            return jnp.asarray([jnp.nan], dtype=loss_dtype)
+        return jnp.asarray([jnp.max(values)], dtype=loss_dtype)
+
+    metrics["scf_converged_fraction"] = _mean_or_nan("scf_converged")
+    metrics["scf_stop_gradient_fraction"] = _mean_or_nan("scf_stop_gradient_applied")
+    metrics["scf_cycles_mean"] = _mean_or_nan("scf_cycles")
+    metrics["scf_cycles_max"] = _max_or_nan("scf_cycles")
+    metrics["scf_selected_cycle_mean"] = _mean_or_nan("scf_selected_cycle")
+    metrics["scf_best_cycle_mean"] = _mean_or_nan("scf_best_cycle")
+    metrics["scf_final_rms_mean"] = _mean_or_nan("scf_final_rms_density")
+    metrics["scf_final_rms_max"] = _max_or_nan("scf_final_rms_density")
+    metrics["scf_selected_rms_mean"] = _mean_or_nan("scf_selected_rms_density")
+    metrics["scf_selected_rms_max"] = _max_or_nan("scf_selected_rms_density")
+    metrics["scf_best_rms_mean"] = _mean_or_nan("scf_best_rms_density")
+    metrics["scf_best_rms_max"] = _max_or_nan("scf_best_rms_density")
+    return loss, metrics
+
+
 def ground_state_mse_loss(
     params: PyTree,
     functional: Any,
@@ -3054,6 +3310,8 @@ def ground_state_mse_loss(
     normalized_mae_terms = []
     density_penalties = []
     density_mse_terms = []
+    density_matrix_penalties = []
+    density_matrix_mse_terms = []
     xc_potential_penalties = []
     xc_potential_mse_terms = []
     xc_kernel_penalties = []
@@ -3194,6 +3452,8 @@ def ground_state_mse_loss(
             raw_mae = jnp.abs(error)
         density_penalty = jnp.asarray(0.0)
         density_mse = jnp.asarray(0.0)
+        density_matrix_penalty = jnp.asarray(0.0)
+        density_matrix_mse = jnp.asarray(0.0)
         xc_potential_penalty = jnp.asarray(0.0)
         xc_potential_mse = jnp.asarray(0.0)
         xc_kernel_penalty = jnp.asarray(0.0)
@@ -3202,6 +3462,7 @@ def ground_state_mse_loss(
             self_consistent_molecule = eval_molecule
         elif (
             core_datum.density_constraint_weight != 0.0
+            or core_datum.density_matrix_constraint_weight != 0.0
             or core_cfg.self_consistent_energy_weight != 0.0
             or core_datum.orbital_energy_constraint_weight != 0.0
             or core_datum.janak_frontier_constraint_weight != 0.0
@@ -3225,6 +3486,20 @@ def ground_state_mse_loss(
                 target_density_matrix=core_datum.target_density_matrix,
             )
             density_penalty = core_datum.density_constraint_weight * density_mse
+        if core_datum.density_matrix_constraint_weight != 0.0:
+            if core_datum.target_density_matrix is None:
+                raise ValueError(
+                    "target_density_matrix must be provided when "
+                    "density_matrix_constraint_weight != 0."
+                )
+            density_matrix_mse = density_matrix_matching_penalty(
+                datum.molecule,
+                self_consistent_molecule=self_consistent_molecule,
+                target_density_matrix=core_datum.target_density_matrix,
+            )
+            density_matrix_penalty = (
+                core_datum.density_matrix_constraint_weight * density_matrix_mse
+            )
         if core_datum.xc_potential_constraint_weight != 0.0:
             if core_datum.target_xc_potential is None:
                 raise ValueError(
@@ -3473,6 +3748,7 @@ def ground_state_mse_loss(
         datum_total_penalty = (
             datum_loss
             + density_penalty
+            + density_matrix_penalty
             + xc_potential_penalty
             + xc_kernel_penalty
             + self_consistent_energy_penalty
@@ -3500,6 +3776,8 @@ def ground_state_mse_loss(
         normalized_mae_terms.append(jnp.atleast_1d(datum_mae))
         density_penalties.append(jnp.atleast_1d(density_penalty))
         density_mse_terms.append(jnp.atleast_1d(density_mse))
+        density_matrix_penalties.append(jnp.atleast_1d(density_matrix_penalty))
+        density_matrix_mse_terms.append(jnp.atleast_1d(density_matrix_mse))
         xc_potential_penalties.append(jnp.atleast_1d(xc_potential_penalty))
         xc_potential_mse_terms.append(jnp.atleast_1d(xc_potential_mse))
         xc_kernel_penalties.append(jnp.atleast_1d(xc_kernel_penalty))
@@ -3591,6 +3869,16 @@ def ground_state_mse_loss(
         ),
         "density_mse": (
             jnp.concatenate(density_mse_terms) if density_mse_terms else jnp.array([])
+        ),
+        "density_matrix_penalty": (
+            jnp.concatenate(density_matrix_penalties)
+            if density_matrix_penalties
+            else jnp.array([])
+        ),
+        "density_matrix_mse": (
+            jnp.concatenate(density_matrix_mse_terms)
+            if density_matrix_mse_terms
+            else jnp.array([])
         ),
         "xc_potential_penalty": (
             jnp.concatenate(xc_potential_penalties)

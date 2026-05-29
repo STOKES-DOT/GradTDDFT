@@ -6,6 +6,7 @@ from .response import (
     build_restricted_response_matrices,
     gen_tda_vind,
     gen_tdhf_vind,
+    refresh_restricted_response_eri_slices,
 )
 from .tda import solve_tda
 from .types import TDDFTMatrices, TDDFTResult, TDAResult
@@ -29,6 +30,7 @@ __all__ = [
     "build_restricted_response_matrices",
     "gen_tda_vind",
     "gen_tdhf_vind",
+    "refresh_restricted_response_eri_slices",
     "restricted_cisd_second_order_correction",
     "solve_tda",
     "solve_casida",
