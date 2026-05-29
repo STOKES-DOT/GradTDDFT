@@ -20,6 +20,7 @@ import td_graddft.neural_xc.binding as neural_xc_binding
 import td_graddft.neural_xc.model as neural_xc_model
 from td_graddft.features import restricted_grid_features
 import td_graddft.scf.differentiable as scf_differentiable
+from td_graddft.scf.xc_energy import xc_energy_and_potential_from_density
 from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.spectra import HARTREE_TO_EV, oscillator_strengths
 from td_graddft.tddft import RestrictedCasidaTDDFT
@@ -1962,6 +1963,69 @@ def test_low_memory_strict_hfx_response_does_not_pad_full_hfx_nu(monkeypatch):
 
     assert jnp.all(jnp.isfinite(low_memory_a))
     assert jnp.all(jnp.isfinite(low_memory_b))
+
+
+def test_low_memory_scf_fock_terms_match_value_and_grad_reference():
+    molecule = _make_three_grid_pt2_toy_molecule()
+    molecule.rep_tensor = jnp.zeros_like(molecule.rep_tensor)
+    molecule.hfx_local = jnp.asarray(
+        [
+            [[-0.18, -0.126], [-0.06, -0.042], [-0.12, -0.084]],
+            [[-0.12, -0.084], [-0.03, -0.021], [-0.08, -0.056]],
+        ],
+        dtype=jnp.float64,
+    )
+    molecule.hfx_nu = jnp.asarray(
+        [
+            [
+                [[0.7, 0.2], [0.2, 0.5]],
+                [[0.4, -0.1], [-0.1, 0.6]],
+                [[0.3, 0.0], [0.0, 0.2]],
+            ],
+            [
+                [[0.2, 0.1], [0.1, 0.4]],
+                [[0.1, 0.0], [0.0, 0.3]],
+                [[0.5, -0.2], [-0.2, 0.6]],
+            ],
+        ],
+        dtype=jnp.float64,
+    )
+    semilocal_zero = lambda features: jnp.zeros_like(features.rho)
+    functional = NeuralXCFunctional(
+        model=_HFResponsiveChannelModel(),
+        semilocal_energy_density_fn=semilocal_zero,
+        input_feature_mode="canonical",
+        hf_input_mode="spin_resolved",
+        response_hf_mode="strict",
+        strict_hfx_response_mode="low_memory",
+        response_grid_chunk_size=2,
+        hfx_channels=2,
+        name="hf_strict_low_memory_scf_terms",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(229), molecule)
+    density = molecule.rdm1.sum(axis=0)
+
+    extra_fock = functional.scf_extra_fock_for_density(params, molecule, density)
+    reference = xc_energy_and_potential_from_density(
+        params,
+        molecule=molecule,
+        density=density,
+        xc_energy_fn=functional.scf_xc_energy_and_alpha_for_density,
+        extra_fock_matrix=extra_fock,
+        has_aux=True,
+    )
+    vxc_matrix, alpha, direct_extra_fock, energy = functional.scf_xc_fock_terms(
+        params,
+        functional.scf_molecule_with_density(molecule, density),
+        weights=molecule.grid.weights,
+        functional_dtype=density.dtype,
+        vxc_clip=20.0,
+    )
+
+    assert jnp.allclose(vxc_matrix, reference.vxc_matrix, atol=1e-10)
+    assert jnp.allclose(direct_extra_fock, reference.extra_fock_matrix, atol=1e-10)
+    assert jnp.allclose(energy, reference.xc_energy, atol=1e-10)
+    assert jnp.allclose(alpha, reference.aux, atol=1e-10)
 
 
 def test_low_memory_strict_tda_matrix_builds_transition_features_per_chunk(monkeypatch):

@@ -41,6 +41,436 @@ class NeuralXCProjectionMixin:
             setattr(molecule_out, key, value)
         return molecule_out
 
+    def prefer_direct_scf_fock_terms(self) -> bool:
+        return (
+            getattr(self, "strict_hfx_response_mode", "dense") == "low_memory"
+            and not bool(getattr(self, "include_pt2_channel", False))
+        )
+
+    def _scf_point_local_energy_from_variables(
+        self,
+        params: PyTree,
+        variables: Array,
+        hf_point: Array,
+        hf_point_a: Array,
+        hf_point_b: Array,
+    ) -> Array:
+        point_features = self._feature_bundle_from_restricted_response_variables(variables)
+        semilocal_channels = self.semilocal_energy_density_channels(point_features)
+        semilocal_total = jnp.sum(semilocal_channels, axis=-1)
+        semilocal_local_channels = self._semilocal_local_contribution_channels(
+            point_features,
+            semilocal_channels,
+        )
+        hf_input = jax.lax.stop_gradient(hf_point)
+        hf_spin_inputs = (
+            jax.lax.stop_gradient(hf_point_a),
+            jax.lax.stop_gradient(hf_point_b),
+        )
+        coefficients = self.channel_coefficients(
+            params,
+            point_features,
+            molecule=None,
+            semilocal_energy_density=semilocal_total,
+            hf_energy_density=hf_input,
+            pt2_energy_density=None,
+            hf_spin_energy_density=hf_spin_inputs,
+        )
+        basis = self._assemble_basis_channels(
+            semilocal_local_channels,
+            hf_projected=hf_input,
+            pt2_projected=None,
+        )
+        channels = self._assemble_channel_contributions(coefficients, basis)
+        return jnp.sum(channels, axis=-1)
+
+    def _restricted_feature_chunk(
+        self,
+        molecule: Any,
+        start: Array,
+        chunk_size: int,
+        *,
+        dtype: Any,
+    ) -> tuple[RestrictedFeatureBundle, Array, Array, Array, Array]:
+        ao = self._take_grid_chunk(
+            jnp.asarray(molecule.ao, dtype=dtype),
+            start,
+            chunk_size,
+            axis=0,
+        )
+        ao_deriv1 = getattr(molecule, "ao_deriv1", None)
+        if ao_deriv1 is None:
+            raise AttributeError("Molecule-like object must define ao_deriv1 for low-memory SCF.")
+        ao_deriv1 = self._take_grid_chunk(
+            jnp.asarray(ao_deriv1, dtype=dtype),
+            start,
+            chunk_size,
+            axis=1,
+        )
+        if ao_deriv1.shape[0] < 4:
+            raise ValueError("ao_deriv1 must contain AO values plus first derivatives.")
+
+        rdm1 = jnp.asarray(molecule.rdm1, dtype=dtype)
+        if rdm1.ndim == 2:
+            rdm1 = jnp.stack([0.5 * rdm1, 0.5 * rdm1], axis=0)
+        if rdm1.ndim != 3 or int(rdm1.shape[0]) != 2:
+            raise ValueError("Restricted low-memory SCF expects rdm1 with two spin blocks.")
+
+        mo_coeff = jnp.asarray(molecule.mo_coeff, dtype=dtype)
+        if mo_coeff.ndim == 2:
+            mo_coeff = jnp.stack([mo_coeff, mo_coeff], axis=0)
+        mo_occ = jnp.asarray(molecule.mo_occ, dtype=dtype)
+        if mo_occ.ndim == 1:
+            mo_occ = jnp.stack([0.5 * mo_occ, 0.5 * mo_occ], axis=0)
+
+        def density_grad(dm_spin: Array) -> tuple[Array, Array]:
+            rho = jnp.einsum(
+                "gp,pq,gq->g",
+                ao,
+                dm_spin,
+                ao,
+                precision=Precision.HIGHEST,
+            )
+            grad = 2.0 * jnp.einsum(
+                "xgp,pq,gq->gx",
+                ao_deriv1[1:4],
+                dm_spin,
+                ao,
+                precision=Precision.HIGHEST,
+            )
+            return rho, grad
+
+        def tau_spin(coeff_spin: Array, occ_spin: Array) -> Array:
+            ao_grad_mo = jnp.einsum(
+                "xgp,pi->xgi",
+                ao_deriv1[1:4],
+                coeff_spin,
+                precision=Precision.HIGHEST,
+            )
+            return 0.5 * jnp.einsum(
+                "i,xgi,xgi->g",
+                occ_spin,
+                ao_grad_mo,
+                ao_grad_mo,
+                precision=Precision.HIGHEST,
+            )
+
+        rho_a, grad_a = density_grad(rdm1[0])
+        rho_b, grad_b = density_grad(rdm1[1])
+        tau_a = tau_spin(mo_coeff[0], mo_occ[0])
+        tau_b = tau_spin(mo_coeff[1], mo_occ[1])
+        features = RestrictedFeatureBundle(
+            rho_a=rho_a,
+            rho_b=rho_b,
+            sigma_aa=jnp.einsum("gx,gx->g", grad_a, grad_a, precision=Precision.HIGHEST),
+            sigma_ab=jnp.einsum("gx,gx->g", grad_a, grad_b, precision=Precision.HIGHEST),
+            sigma_bb=jnp.einsum("gx,gx->g", grad_b, grad_b, precision=Precision.HIGHEST),
+            tau_a=tau_a,
+            tau_b=tau_b,
+        )
+        return features, grad_a + grad_b, ao, ao_deriv1, rdm1
+
+    def _hfx_feature_chunk(
+        self,
+        molecule: Any,
+        start: Array,
+        chunk_size: int,
+        *,
+        ao: Array,
+        rdm1: Array,
+        dtype: Any,
+    ) -> tuple[Array, Array, Array]:
+        hfx_local = getattr(molecule, "hfx_local", None)
+        if hfx_local is not None:
+            hfx_local = jnp.asarray(hfx_local, dtype=dtype)
+            if hfx_local.ndim != 3 or int(hfx_local.shape[0]) != 2:
+                raise ValueError(
+                    "molecule.hfx_local must have shape (2, ngrids, n_omega), "
+                    f"got {hfx_local.shape}."
+                )
+            hfx_a = self._take_grid_chunk(hfx_local[0], start, chunk_size, axis=0)
+            hfx_b = self._take_grid_chunk(hfx_local[1], start, chunk_size, axis=0)
+        else:
+            nu = getattr(molecule, "hfx_nu", None)
+            if nu is None:
+                zeros = jnp.zeros((int(chunk_size), 1), dtype=dtype)
+                return zeros[:, 0], zeros[:, 0], zeros[:, 0]
+            nu_chunk = self._take_grid_chunk(
+                jnp.asarray(nu, dtype=dtype),
+                start,
+                chunk_size,
+                axis=1,
+            )
+            e_a = jnp.einsum("gp,pq->gq", ao, rdm1[0], precision=Precision.HIGHEST)
+            e_b = jnp.einsum("gp,pq->gq", ao, rdm1[1], precision=Precision.HIGHEST)
+            fxx_a = jnp.einsum("wgbc,gc->wgb", nu_chunk, e_a, precision=Precision.HIGHEST)
+            fxx_b = jnp.einsum("wgbc,gc->wgb", nu_chunk, e_b, precision=Precision.HIGHEST)
+            exx_a = -0.5 * jnp.einsum("gq,wgq->wg", e_a, fxx_a, precision=Precision.HIGHEST)
+            exx_b = -0.5 * jnp.einsum("gq,wgq->wg", e_b, fxx_b, precision=Precision.HIGHEST)
+            hfx_a = exx_a.T
+            hfx_b = exx_b.T
+
+        if hfx_a.ndim == 1:
+            hfx_a = hfx_a[:, None]
+        if hfx_b.ndim == 1:
+            hfx_b = hfx_b[:, None]
+        target = max(int(getattr(self, "hfx_channels", 1)), 1)
+        if hfx_a.shape[-1] < target and hfx_a.shape[-1] == 1:
+            hfx_a = jnp.repeat(hfx_a, target, axis=-1)
+        if hfx_b.shape[-1] < target and hfx_b.shape[-1] == 1:
+            hfx_b = jnp.repeat(hfx_b, target, axis=-1)
+        hfx_a = hfx_a[:, :target]
+        hfx_b = hfx_b[:, :target]
+        hf_projected = hfx_a[:, 0] + hfx_b[:, 0]
+        if getattr(self, "input_feature_mode", "enhanced") == "canonical":
+            return hf_projected, hfx_a, hfx_b
+        return hf_projected, hfx_a[:, 0], hfx_b[:, 0]
+
+    def _vxc_matrix_chunk(
+        self,
+        *,
+        ao: Array,
+        ao_deriv1: Array,
+        weights: Array,
+        v_rho: Array,
+        v_grad: Array,
+        v_tau: Array,
+        v_lapl: Array,
+        xc_kind: str,
+        clip: float,
+    ) -> Array:
+        del v_tau, v_lapl
+        clip_value = float(clip)
+        v_rho = jnp.nan_to_num(v_rho, nan=0.0, posinf=clip_value, neginf=-clip_value)
+        v_grad = jnp.nan_to_num(v_grad, nan=0.0, posinf=clip_value, neginf=-clip_value)
+        v_rho = jnp.clip(v_rho, -clip_value, clip_value)
+        v_grad = jnp.clip(v_grad, -clip_value, clip_value)
+        matrix = jnp.einsum(
+            "g,gp,gq->pq",
+            weights * v_rho,
+            ao,
+            ao,
+            precision=Precision.HIGHEST,
+        )
+        if xc_kind in {"GGA", "MGGA", "MGGA_LAPL"}:
+            grad_term = jnp.einsum(
+                "gx,xgp,gq->pq",
+                weights[:, None] * v_grad,
+                ao_deriv1[1:4],
+                ao,
+                precision=Precision.HIGHEST,
+            )
+            matrix = matrix + grad_term + grad_term.T
+        # The existing SCF path differentiates E_xc with respect to the AO density
+        # matrix while orbital tau is held fixed, so the density-gradient fallback
+        # intentionally does not add the meta-GGA tau orbital term here.
+        return 0.5 * (matrix + matrix.T)
+
+    def _hfx_extra_fock_chunk(
+        self,
+        molecule: Any,
+        *,
+        start: Array,
+        chunk_size: int,
+        ao: Array,
+        rdm1: Array,
+        grad_a: Array,
+        grad_b: Array,
+        dtype: Any,
+    ) -> Array:
+        nu = getattr(molecule, "hfx_nu", None)
+        if nu is None:
+            return jnp.zeros((ao.shape[1], ao.shape[1]), dtype=dtype)
+        nu_chunk = self._take_grid_chunk(
+            jnp.asarray(nu, dtype=dtype),
+            start,
+            chunk_size,
+            axis=1,
+        )
+        grad_a = jnp.asarray(grad_a, dtype=dtype)
+        grad_b = jnp.asarray(grad_b, dtype=dtype)
+        if grad_a.ndim == 1:
+            grad_a = grad_a[:, None]
+        if grad_b.ndim == 1:
+            grad_b = grad_b[:, None]
+        n_grad = min(int(grad_a.shape[-1]), int(nu_chunk.shape[0]))
+        grad = 0.5 * (grad_a[:, :n_grad] + grad_b[:, :n_grad])
+        density_half = 0.5 * (rdm1[0] + rdm1[1])
+        e = jnp.einsum("gp,pq->gq", ao, density_half, precision=Precision.HIGHEST)
+        fxx = jnp.einsum(
+            "wgbc,gc->wgb",
+            nu_chunk[:n_grad],
+            e,
+            precision=Precision.HIGHEST,
+        )
+        aow = -0.5 * fxx * jnp.transpose(grad, (1, 0))[:, :, None]
+        vmat = jnp.einsum("gp,wgq->pq", ao, aow, precision=Precision.HIGHEST)
+        correction = vmat + vmat.T
+        correction = jnp.nan_to_num(correction, nan=0.0, posinf=0.0, neginf=0.0)
+        return 0.5 * (correction + correction.T)
+
+    def scf_xc_fock_terms(
+        self,
+        params: PyTree,
+        molecule: Any,
+        *,
+        weights: Array,
+        functional_dtype: Any,
+        vxc_clip: float,
+    ) -> tuple[Array, Array, Array, Array]:
+        if not self.prefer_direct_scf_fock_terms():
+            raise AttributeError("Direct low-memory SCF Fock terms are disabled.")
+
+        weights = jnp.asarray(weights, dtype=functional_dtype)
+        ngrids = int(weights.shape[0])
+        chunk_size = self._effective_response_grid_chunk_size(ngrids)
+        n_chunks = (ngrids + chunk_size - 1) // chunk_size
+        nao = int(jnp.asarray(molecule.ao).shape[1])
+        matrix_zero = jnp.zeros((nao, nao), dtype=functional_dtype)
+        scalar_zero = jnp.asarray(0.0, dtype=functional_dtype)
+        xc_kind = self._response_feature_kind_label()
+
+        def chunk_terms(start: Array) -> tuple[Array, Array, Array, Array, Array]:
+            features, total_gradient, ao, ao_deriv1, rdm1 = self._restricted_feature_chunk(
+                molecule,
+                start,
+                chunk_size,
+                dtype=functional_dtype,
+            )
+            weights_chunk = self._take_grid_chunk(weights, start, chunk_size, axis=0)
+            hf_projected, hfx_feature_a, hfx_feature_b = self._hfx_feature_chunk(
+                molecule,
+                start,
+                chunk_size,
+                ao=ao,
+                rdm1=rdm1,
+                dtype=functional_dtype,
+            )
+            semilocal_channels = self.semilocal_energy_density_channels(features)
+            semilocal_total = jnp.sum(semilocal_channels, axis=-1)
+            semilocal_local_channels = self._semilocal_local_contribution_channels(
+                features,
+                semilocal_channels,
+            )
+            coefficients = self.channel_coefficients(
+                params,
+                features,
+                molecule=None,
+                semilocal_energy_density=semilocal_total,
+                hf_energy_density=hf_projected,
+                pt2_energy_density=None,
+                hf_spin_energy_density=(hfx_feature_a, hfx_feature_b),
+            )
+            basis = self._assemble_basis_channels(
+                semilocal_local_channels,
+                hf_projected=hf_projected,
+                pt2_projected=None,
+            )
+            channels = self._assemble_channel_contributions(coefficients, basis)
+            local_xc = jnp.sum(channels, axis=-1)
+            energy = jnp.tensordot(weights_chunk, local_xc, axes=(0, 0))
+
+            hf_field = self._local_hf_fraction_from_coefficients(coefficients)
+            rho = jnp.maximum(features.rho, self.density_floor)
+            alpha_num = jnp.tensordot(weights_chunk, rho * hf_field, axes=(0, 0))
+            alpha_den = jnp.tensordot(weights_chunk, rho, axes=(0, 0))
+
+            strict_payload = self._strict_response_payload(
+                features,
+                total_gradient,
+                hf_projected,
+                pt2_projected=None,
+                hf_spin_energy_density=(hfx_feature_a, hfx_feature_b),
+            )
+            response_variables, active, _, _, _ = strict_payload
+            point_gradient = jax.grad(
+                self._scf_point_local_energy_from_variables,
+                argnums=1,
+            )
+            gradients = jax.vmap(point_gradient, in_axes=(None, 0, 0, 0, 0))(
+                params,
+                response_variables,
+                hf_projected,
+                hfx_feature_a,
+                hfx_feature_b,
+            )
+            gradients = jnp.nan_to_num(gradients, nan=0.0, posinf=0.0, neginf=0.0)
+            v_rho = jnp.where(active, gradients[:, 0], 0.0)
+            v_grad = jnp.where(active[:, None], gradients[:, 1:4], 0.0)
+            v_tau = jnp.zeros_like(v_rho)
+            v_lapl = jnp.zeros_like(v_rho)
+            vxc_matrix = self._vxc_matrix_chunk(
+                ao=ao,
+                ao_deriv1=ao_deriv1,
+                weights=weights_chunk,
+                v_rho=v_rho,
+                v_grad=v_grad,
+                v_tau=v_tau,
+                v_lapl=v_lapl,
+                xc_kind=xc_kind,
+                clip=vxc_clip,
+            )
+            hfx_grad_a, hfx_grad_b = self._grid_hfx_feature_gradients(
+                params,
+                features,
+                semilocal_channels,
+                hf_projected,
+                hfx_feature_a,
+                hfx_feature_b,
+                pt2_projected=None,
+                grid_weights=weights_chunk,
+            )
+            extra_fock = self._hfx_extra_fock_chunk(
+                molecule,
+                start=start,
+                chunk_size=chunk_size,
+                ao=ao,
+                rdm1=rdm1,
+                grad_a=hfx_grad_a,
+                grad_b=hfx_grad_b,
+                dtype=functional_dtype,
+            )
+            return vxc_matrix, extra_fock, energy, alpha_num, alpha_den
+
+        chunk_terms = jax.checkpoint(chunk_terms)
+
+        def body(
+            carry: tuple[Array, Array, Array, Array, Array],
+            chunk_idx: Array,
+        ) -> tuple[tuple[Array, Array, Array, Array, Array], None]:
+            start = chunk_idx * chunk_size
+            vxc_chunk, extra_chunk, energy, alpha_num, alpha_den = chunk_terms(start)
+            vxc_matrix, extra_fock, energy_sum, num_sum, den_sum = carry
+            return (
+                vxc_matrix + vxc_chunk,
+                extra_fock + extra_chunk,
+                energy_sum + energy,
+                num_sum + alpha_num,
+                den_sum + alpha_den,
+            ), None
+
+        (vxc_matrix, extra_fock, energy, alpha_num, alpha_den), _ = jax.lax.scan(
+            body,
+            (matrix_zero, matrix_zero, scalar_zero, scalar_zero, scalar_zero),
+            jnp.arange(n_chunks),
+        )
+        alpha = alpha_num / jnp.maximum(alpha_den, self.density_floor)
+        alpha = jnp.nan_to_num(alpha, nan=0.0, posinf=1.0, neginf=0.0)
+        alpha = jnp.clip(alpha, 0.0, 1.0)
+        alpha = self._alpha_for_scf_fock(
+            alpha,
+            uses_explicit_hfx_fock=getattr(molecule, "hfx_nu", None) is not None,
+        )
+        vxc_matrix = jnp.nan_to_num(vxc_matrix, nan=0.0, posinf=0.0, neginf=0.0)
+        extra_fock = jnp.nan_to_num(extra_fock, nan=0.0, posinf=0.0, neginf=0.0)
+        energy = jnp.nan_to_num(energy, nan=0.0, posinf=0.0, neginf=0.0)
+        return (
+            0.5 * (vxc_matrix + vxc_matrix.T),
+            alpha,
+            0.5 * (extra_fock + extra_fock.T),
+            energy,
+        )
+
     def _restricted_spin_density_blocks(self, molecule: Any) -> Array:
         if getattr(molecule, "rdm1", None) is None:
             raise AttributeError("Molecule-like object must define rdm1.")
