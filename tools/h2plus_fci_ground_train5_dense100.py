@@ -50,7 +50,8 @@ from td_graddft.training import (
 
 HARTREE_TO_EV = 27.211386245988
 _DEFAULT_SEMILOCAL_XC = ("lda_x", "gga_x_b88", "lda_c_vwn_rpa", "gga_c_lyp")
-_TRAIN_SCF_SAFETY_MAX_CYCLE = 512
+_TRAIN_SCF_SAFETY_MAX_CYCLE = 32
+_JAX_UKS_CACHE_VERSION = "spinpolarized-diis-v1"
 
 
 @dataclass(frozen=True)
@@ -216,7 +217,7 @@ def _reference_cache_key(r_angstrom: float, args: argparse.Namespace) -> str:
     return (
         f"h2plus/basis={basis}/xc={xc}/grid={int(args.grids_level)}/"
         f"max_l={int(args.max_l)}/integral={str(args.integral_backend)}/"
-        f"features={feature_mode}/r={float(r_angstrom):.10f}"
+        f"features={feature_mode}/uks={_JAX_UKS_CACHE_VERSION}/r={float(r_angstrom):.10f}"
     )
 
 

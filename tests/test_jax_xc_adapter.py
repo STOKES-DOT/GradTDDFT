@@ -282,6 +282,38 @@ def test_eval_jax_xc_from_restricted_features_passes_runtime_omega(monkeypatch):
     assert jnp.allclose(eps, _features().rho + 0.33)
 
 
+def test_eval_jax_xc_from_unrestricted_features_uses_polarized_density(monkeypatch):
+    import td_graddft.xc_backend.jax_xc_adapter as jax_xc_adapter
+
+    seen = []
+
+    class FakeModule:
+        __version__ = "fake"
+
+        @staticmethod
+        def lda_x(*, polarized=False):
+            seen.append(bool(polarized))
+
+            def functional(rho_fn, r, mo_fn=None):
+                del mo_fn
+                rho_spin = rho_fn(r)
+                return rho_spin[0] + 10.0 * rho_spin[1]
+
+            return functional
+
+    monkeypatch.setattr(
+        jax_xc_adapter,
+        "load_jax_xc",
+        lambda: (jax_xc_adapter._SafeJAXXCModule(FakeModule()), "upstream"),
+    )
+    features = _features()
+
+    eps = jax_xc_adapter.eval_jax_xc_from_unrestricted_features("lda_x", features)
+
+    assert seen == [True]
+    assert jnp.allclose(eps, features.rho_a + 10.0 * features.rho_b)
+
+
 def test_eval_jax_xc_from_restricted_features_requires_experimental_opt_in(monkeypatch):
     import td_graddft.xc_backend.jax_xc_adapter as jax_xc_adapter
 

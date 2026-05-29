@@ -29,6 +29,8 @@ class BoundNeuralXCFunctional:
     projected_local_potential_laplacian_values: Array | None = None
     unrestricted_local_potential_values: tuple[Array, Array] | None = None
     unrestricted_local_potential_gradient_values: tuple[Array, Array] | None = None
+    explicit_hfx_fock_value: Array | None = None
+    unrestricted_explicit_hfx_fock_values: tuple[Array, Array] | None = None
     projected_energy_density_values: Array | None = None
     local_hf_fraction_values: Array | None = None
     response_feature_kind: str | None = None
@@ -88,7 +90,16 @@ class BoundNeuralXCFunctional:
         else:
             grad_a, grad_b = self.unrestricted_local_potential_gradient_values
         nao = int(molecule.ao.shape[1])
-        extra_fock = jnp.zeros((nao, nao), dtype=rho_a.dtype)
+        if self.unrestricted_explicit_hfx_fock_values is None:
+            if self.explicit_hfx_fock_value is None:
+                extra_fock_a = extra_fock_b = jnp.zeros((nao, nao), dtype=rho_a.dtype)
+            else:
+                extra_fock_a = extra_fock_b = jnp.asarray(
+                    self.explicit_hfx_fock_value,
+                    dtype=rho_a.dtype,
+                )
+        else:
+            extra_fock_a, extra_fock_b = self.unrestricted_explicit_hfx_fock_values
         return (
             rho_a,
             rho_b,
@@ -96,8 +107,8 @@ class BoundNeuralXCFunctional:
             grad_b,
             self.response_feature_kind or "LDA",
             self.exact_exchange_fraction,
-            extra_fock,
-            extra_fock,
+            extra_fock_a,
+            extra_fock_b,
         )
 
     def energy_density(self, density: Array) -> Array:
@@ -1389,24 +1400,56 @@ class NeuralXCBindingMixin:
         )
         return projected_vrho, projected_vgrad, projected_vtau, projected_vlapl, self._response_feature_kind_label(), alpha, hfx_fock
 
+    def unrestricted_scf_potential_components_and_alpha(
+        self,
+        params: PyTree,
+        molecule: Any,
+    ) -> tuple[Array, Array, Array, Array, str, Array, Array, Array]:
+        (
+            v_rho_a,
+            v_rho_b,
+            v_grad_a,
+            v_grad_b,
+            alpha,
+            hfx_fock,
+        ) = self._unrestricted_scf_binding_payload(params, molecule)
+        return (
+            v_rho_a,
+            v_rho_b,
+            v_grad_a,
+            v_grad_b,
+            self._response_feature_kind_label(),
+            alpha,
+            hfx_fock,
+            hfx_fock,
+        )
+
     def bind_to_molecule_for_scf(self, params: PyTree, molecule: Any) -> BoundNeuralXCFunctional:
         """SCF-only binding that avoids constructing strict f_xc response terms."""
         spin_values = spin_gradients = None
         if has_explicit_spin_axis(molecule):
-            v_rho_a, v_rho_b, v_grad_a, v_grad_b, alpha, _ = self._unrestricted_scf_binding_payload(
-                params,
-                molecule,
-            )
+            (
+                v_rho_a,
+                v_rho_b,
+                v_grad_a,
+                v_grad_b,
+                alpha,
+                hfx_fock,
+            ) = self._unrestricted_scf_binding_payload(params, molecule)
             projected_vrho = 0.5 * (v_rho_a + v_rho_b)
             projected_vgrad = 0.5 * (v_grad_a + v_grad_b)
             projected_vtau = projected_vlapl = jnp.zeros_like(projected_vrho)
             spin_values = (v_rho_a, v_rho_b)
             spin_gradients = (v_grad_a, v_grad_b)
         else:
-            projected_vrho, projected_vgrad, projected_vtau, projected_vlapl, alpha, _ = self._scf_binding_payload(
-                params,
-                molecule,
-            )
+            (
+                projected_vrho,
+                projected_vgrad,
+                projected_vtau,
+                projected_vlapl,
+                alpha,
+                hfx_fock,
+            ) = self._scf_binding_payload(params, molecule)
         # SCF uses only the local potential components and the effective HF fraction.
         # Keep the bound object minimal and avoid assembling response/energy terms here.
         projected_kernel = jnp.zeros_like(projected_vrho)
@@ -1421,6 +1464,10 @@ class NeuralXCBindingMixin:
             projected_local_potential_laplacian_values=projected_vlapl,
             unrestricted_local_potential_values=spin_values,
             unrestricted_local_potential_gradient_values=spin_gradients,
+            explicit_hfx_fock_value=hfx_fock,
+            unrestricted_explicit_hfx_fock_values=(
+                (hfx_fock, hfx_fock) if spin_values is not None else None
+            ),
             projected_energy_density_values=None,
             local_hf_fraction_values=None,
             response_feature_kind=self._response_feature_kind_label(),

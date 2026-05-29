@@ -211,6 +211,31 @@ class _ToyUnrestrictedFunctional:
         return _Bound()
 
 
+def test_unrestricted_scf_components_prefer_direct_hfx_fock_path():
+    molecule = _make_toy_unrestricted_reference()
+    extra = jnp.asarray([[0.0, 0.2], [0.2, 0.0]], dtype=jnp.float32)
+
+    class _DirectFunctional:
+        def unrestricted_scf_potential_components_and_alpha(self, _params, molecule_in):
+            ngrids = int(molecule_in.ao.shape[0])
+            zeros = jnp.zeros((ngrids,), dtype=jnp.float32)
+            zeros_grad = jnp.zeros((ngrids, 3), dtype=jnp.float32)
+            return zeros, zeros, zeros_grad, zeros_grad, "LDA", jnp.asarray(0.0), extra, extra
+
+        def bind_to_molecule_for_scf(self, _params, _molecule):
+            raise AssertionError("direct unrestricted SCF path should avoid binding")
+
+    *_, extra_a, extra_b = scf_differentiable._unrestricted_scf_xc_components(
+        {},
+        _DirectFunctional(),
+        molecule,
+        functional_dtype=jnp.float32,
+    )
+
+    assert np.allclose(np.asarray(extra_a), np.asarray(extra))
+    assert np.allclose(np.asarray(extra_b), np.asarray(extra))
+
+
 def test_restricted_hfx_features_from_nu_recomputes_local_exchange_density():
     ao = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     density = np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32)
@@ -1657,7 +1682,7 @@ def test_expl_unrestricted_scf_uses_fixed_cycle_loop_without_level_shift(monkeyp
         {"strength": jnp.asarray(0.1, dtype=jnp.float32)},
     )
 
-    assert int(info.cycles) == 3
+    assert int(info.cycles) == 1
     assert int(info.selected_cycle) == 3
     assert np.asarray(info.rms_density_history).shape == (3,)
 

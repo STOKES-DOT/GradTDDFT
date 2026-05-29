@@ -297,14 +297,18 @@ def _unrestricted_scf_xc_components(
     *,
     functional_dtype: Any,
 ) -> tuple[Array, Array, Array, Array, str, Array, Array, Array]:
-    resolved = _resolved_xc_object(params, functional, molecule)
-    contributions_getter = getattr(resolved, "unrestricted_scf_components", None)
-    if not callable(contributions_getter):
-        raise NotImplementedError(
-            "Unrestricted differentiable SCF currently requires the resolved XC object "
-            "to expose unrestricted_scf_components(molecule)."
-        )
-    components = contributions_getter(molecule)
+    direct = getattr(functional, "unrestricted_scf_potential_components_and_alpha", None)
+    if callable(direct):
+        components = direct(params, molecule)
+    else:
+        resolved = _resolved_xc_object(params, functional, molecule)
+        contributions_getter = getattr(resolved, "unrestricted_scf_components", None)
+        if not callable(contributions_getter):
+            raise NotImplementedError(
+                "Unrestricted differentiable SCF currently requires the resolved XC object "
+                "to expose unrestricted_scf_components(molecule)."
+            )
+        components = contributions_getter(molecule)
     if len(components) != 8:
         raise ValueError(
             "unrestricted_scf_components must return "
@@ -624,6 +628,25 @@ def _restricted_xc_fock_terms(
     functional_dtype: Any,
     vxc_clip: float,
 ) -> tuple[Array, Array, Array, Array]:
+    direct_terms_preference = getattr(functional, "prefer_direct_scf_fock_terms", False)
+    if callable(direct_terms_preference):
+        direct_terms_preference = direct_terms_preference()
+    direct_terms_callback = getattr(functional, "scf_xc_fock_terms", None)
+    if bool(direct_terms_preference) and callable(direct_terms_callback):
+        vxc_matrix, alpha, vhf_matrix, xc_energy = direct_terms_callback(
+            params,
+            molecule,
+            weights=weights,
+            functional_dtype=functional_dtype,
+            vxc_clip=vxc_clip,
+        )
+        return (
+            jnp.asarray(vxc_matrix, dtype=functional_dtype),
+            _clip_hybrid_alpha(jnp.asarray(alpha, dtype=functional_dtype)),
+            jnp.asarray(vhf_matrix, dtype=functional_dtype),
+            jnp.asarray(xc_energy, dtype=functional_dtype),
+        )
+
     energy_alpha_callback = getattr(functional, "scf_xc_energy_and_alpha_for_density", None)
     energy_callback = getattr(functional, "scf_xc_energy_for_density", None)
     if callable(energy_alpha_callback) or callable(energy_callback):
