@@ -165,6 +165,16 @@ def _run_scf(mol: gto.Mole, *, xc: str | None, conv_tol: float, max_cycle: int):
     return last_mf
 
 
+def _scf_cycle_count(mf) -> float:
+    cycles = getattr(mf, "cycles", None)
+    if cycles is None:
+        return math.nan
+    try:
+        return float(cycles)
+    except (TypeError, ValueError):
+        return math.nan
+
+
 def _fci_dimension(mol: gto.Mole, norb: int) -> int:
     nalpha, nbeta = mol.nelec
     return int(fci.cistring.num_strings(norb, nalpha) * fci.cistring.num_strings(norb, nbeta))
@@ -273,6 +283,7 @@ def _point_rows(
         "xc": "" if xc is None else str(xc),
         "scf_energy_h": float(mf.e_tot),
         "scf_converged": bool(mf.converged),
+        "scf_cycles": _scf_cycle_count(mf),
         "n_electrons": int(mf.mol.nelectron),
         "n_ao": int(mf.mol.nao_nr()),
         "n_orbitals": result.get("norb", math.nan),
@@ -366,12 +377,16 @@ def main() -> None:
         "nroots": int(args.nroots),
         "max_fci_determinants": int(args.max_fci_determinants),
         "fci_spin_sector": str(args.fci_spin_sector),
-        "created_files": ["points.csv", "states.csv"],
+        "scf_conv_tol": float(args.scf_conv_tol),
+        "scf_max_cycle": int(args.scf_max_cycle),
+        "system_ranges_angstrom": {},
+        "created_files": ["points.csv", "states.csv", "manifest.json", "visualization_manifest.json"],
     }
 
     for spec in specs:
         r_min = float(spec.r_min if args.r_min is None else args.r_min)
         r_max = float(spec.r_max if args.r_max is None else args.r_max)
+        manifest["system_ranges_angstrom"][spec.name] = {"r_min": r_min, "r_max": r_max}
         for r_angstrom in np.linspace(r_min, r_max, int(args.points)):
             t0 = time.perf_counter()
             mol = _build_mol(spec, float(r_angstrom), str(args.basis))
@@ -427,9 +442,35 @@ def main() -> None:
     _write_csv(outdir / "points.csv", point_rows)
     _write_csv(outdir / "states.csv", state_rows)
     (outdir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    visualization_manifest = {
+        "paper_experiment": "Ground-State Potential-Energy Surfaces",
+        "description": "Raw tabular data for diatomic reference PES visualizations.",
+        "figures": [
+            {
+                "name": "ground_and_excited_state_reference_curves",
+                "data_files": ["states.csv"],
+                "x": "r_angstrom",
+                "y": ["total_energy_h", "excitation_energy_ev"],
+                "group_by": ["system", "state_label"],
+            },
+            {
+                "name": "scf_convergence_by_geometry",
+                "data_files": ["points.csv"],
+                "x": "r_angstrom",
+                "y": ["scf_converged", "scf_cycles"],
+                "group_by": ["system"],
+            },
+        ],
+        "metadata_files": ["manifest.json"],
+    }
+    (outdir / "visualization_manifest.json").write_text(
+        json.dumps(visualization_manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     print(f"Wrote {outdir / 'points.csv'}", flush=True)
     print(f"Wrote {outdir / 'states.csv'}", flush=True)
     print(f"Wrote {outdir / 'manifest.json'}", flush=True)
+    print(f"Wrote {outdir / 'visualization_manifest.json'}", flush=True)
 
 
 if __name__ == "__main__":

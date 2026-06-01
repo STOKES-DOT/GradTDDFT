@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
+import hashlib
 import json
 import os
 import time
@@ -28,13 +30,14 @@ import optax
 from pyscf import dft, gto
 
 from td_graddft import neural_xc
+from td_graddft.data.hdf5_cache import read_restricted_molecule, write_restricted_molecule
 from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
 from td_graddft.neural_xc import (
-    GRADDFT_DEFAULT_DM21_HIDDEN_DIMS,
-    GRADDFT_DEFAULT_INPUT_FEATURE_MODE,
-    GRADDFT_DEFAULT_NETWORK_ARCHITECTURE,
+    DEFAULT_INPUT_FEATURE_MODE,
+    DEFAULT_NETWORK_ARCHITECTURE,
+    DEFAULT_NETWORK_HIDDEN_DIMS,
 )
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
 from td_graddft.spectra import HARTREE_TO_EV
 from td_graddft.training import (
     ExcitedStateDatum,
@@ -43,6 +46,7 @@ from td_graddft.training import (
     GroundStateTrainingConfig,
     create_train_state_from_molecule,
     ground_state_mse_loss,
+    make_ground_state_loss_and_grad,
     make_ground_state_train_step,
     predict_excitation_energies,
     predict_ground_state_molecule,
@@ -87,7 +91,7 @@ class PreparedReference:
     molecule: Any
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
             "Train the neural functional on a reusable closed-shell EOM-EE-CCSD S1 CSV, "
@@ -104,22 +108,33 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr-decay-factor", type=float, default=0.5)
     p.add_argument("--training-mode", choices=("fixed_density", "self_consistent"), default="self_consistent")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--hidden-dims", type=int, nargs="+", default=list(GRADDFT_DEFAULT_DM21_HIDDEN_DIMS))
+    p.add_argument("--hidden-dims", type=int, nargs="+", default=list(DEFAULT_NETWORK_HIDDEN_DIMS))
     p.add_argument(
         "--network-architecture",
         choices=("simple_mlp", "graddft_residual"),
-        default=GRADDFT_DEFAULT_NETWORK_ARCHITECTURE,
+        default=DEFAULT_NETWORK_ARCHITECTURE,
     )
     p.add_argument(
         "--input-feature-mode",
-        choices=("enhanced", "dm21_original"),
-        default=GRADDFT_DEFAULT_INPUT_FEATURE_MODE,
+        choices=("enhanced", "canonical", "dm21_original"),
+        default=DEFAULT_INPUT_FEATURE_MODE,
     )
     p.add_argument("--include-pt2-channel", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument(
         "--pt2-channel-mode",
         choices=("scaled_projected", "local_exact"),
         default="scaled_projected",
+    )
+    p.add_argument("--response-grid-chunk-size", type=int, default=1024)
+    p.add_argument(
+        "--strict-hfx-response-mode",
+        choices=("dense", "low_memory"),
+        default="dense",
+        help=(
+            "Implementation mode for strict HFX response. 'low_memory' keeps "
+            "response_hf_mode=strict but accumulates the HFX response matrix "
+            "in grid chunks."
+        ),
     )
     p.add_argument("--semilocal-xc", nargs="+", default=list(b3lyp_component_basis()))
     p.add_argument("--s1-weight", type=float, default=1.0)
@@ -131,6 +146,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--grids-level", type=int, default=0)
     p.add_argument("--reference-scf-max-cycle", type=int, default=100)
     p.add_argument("--reference-scf-conv-tol", type=float, default=1e-10)
+    p.add_argument(
+        "--reference-cache",
+        default="outputs/reference_cache/closed_shell_s1_references.h5",
+        help=(
+            "HDF5 cache for prepared RKS/HFX reference molecules. Pass an empty "
+            "string to disable."
+        ),
+    )
+    p.add_argument("--rebuild-reference-cache", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--train-scf-max-cycle", type=int, default=16)
     p.add_argument("--train-scf-damping", type=float, default=0.25)
     p.add_argument("--train-scf-conv-tol-density", type=float, default=1e-8)
@@ -170,9 +194,39 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--jit-eval", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--jit-train", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument(
+        "--stream-train",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Average one-molecule gradients instead of tracing the whole dataset as one batch.",
+    )
+    p.add_argument(
+        "--host-reference-cache",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Keep prepared reference arrays on host memory. By default this is enabled "
+            "for --stream-train so multiple molecules do not all keep hfx_nu on GPU."
+        ),
+    )
+    p.add_argument(
+        "--skip-initial-eval",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="In streaming mode, start step 1 without a pre-training full-dataset eval.",
+    )
     p.add_argument("--eval-interval", type=int, default=50)
+    p.add_argument(
+        "--skip-final-evaluation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Write training-only artifacts and checkpoint immediately after training, "
+            "skipping the per-molecule final train/validation/test prediction pass."
+        ),
+    )
     p.add_argument("--outdir", default="outputs/closed_shell_s1_self_consistent_train")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def _metric_scalar(metrics: dict[str, Any], key: str, default: float = float("nan")) -> float:
@@ -191,6 +245,24 @@ def _metric_mean(metrics: dict[str, Any], key: str, default: float = float("nan"
     if int(arr.size) <= 0:
         return default
     return float(jnp.mean(arr))
+
+
+def _normalize_input_feature_mode(value: str) -> str:
+    mode = str(value).strip().lower()
+    if mode == "dm21_original":
+        return "canonical"
+    if mode in {"canonical", "enhanced"}:
+        return mode
+    raise ValueError(f"Unsupported input feature mode {value!r}.")
+
+
+def _normalize_scf_gradient_mode(value: str) -> str:
+    mode = str(value).strip().lower()
+    if mode in {"impl", "implicit_commutator"}:
+        return "impl"
+    if mode in {"expl", "unrolled"}:
+        return "expl"
+    raise ValueError(f"Unsupported SCF gradient mode {value!r}.")
 
 
 def _with_scf_initial_density(molecule: Any, density: Any) -> Any:
@@ -246,8 +318,156 @@ def _tree_all_finite(tree: Any) -> bool:
     return all(bool(jnp.all(jnp.isfinite(jnp.asarray(leaf)))) for leaf in leaves)
 
 
+def _tree_l2_norm(tree: Any) -> jnp.ndarray:
+    leaves = jax.tree_util.tree_leaves(tree)
+    if not leaves:
+        return jnp.asarray(0.0, dtype=jnp.float32)
+    total = jnp.asarray(0.0, dtype=jnp.float32)
+    for leaf in leaves:
+        arr = jnp.asarray(leaf)
+        arr = jnp.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+        total = total + jnp.sum(jnp.square(arr.astype(jnp.float32)))
+    return jnp.sqrt(total)
+
+
+def _tree_add(left: Any | None, right: Any) -> Any:
+    if left is None:
+        return right
+    return jax.tree_util.tree_map(lambda a, b: a + b, left, right)
+
+
+def _tree_scale(tree: Any, scale: float) -> Any:
+    return jax.tree_util.tree_map(lambda value: value * scale, tree)
+
+
 def _loss_and_metrics_all_finite(loss: Any, metrics: dict[str, Any]) -> bool:
     return bool(jnp.all(jnp.isfinite(jnp.asarray(loss)))) and _tree_all_finite(metrics)
+
+
+def _use_host_reference_cache(args: argparse.Namespace) -> bool:
+    if args.host_reference_cache is not None:
+        return bool(args.host_reference_cache)
+    return bool(args.stream_train)
+
+
+def _host_cache_pytree(tree: Any) -> Any:
+    return jax.device_get(tree)
+
+
+def _reference_cache_path(args: argparse.Namespace) -> Path | None:
+    value = str(getattr(args, "reference_cache", "") or "").strip()
+    if not value or value.lower() in {"none", "off", "false"}:
+        return None
+    return Path(value)
+
+
+def _reference_cache_key(
+    row: ReferenceRow,
+    *,
+    args: argparse.Namespace,
+    input_feature_mode: str,
+) -> str:
+    payload = {
+        "version": 1,
+        "system": row.system,
+        "atom": row.atom,
+        "basis": row.basis,
+        "unit": row.unit,
+        "charge": int(row.charge),
+        "spin": int(row.spin),
+        "cart": True,
+        "xc": str(args.xc),
+        "grids_level": int(args.grids_level),
+        "input_feature_mode": str(input_feature_mode),
+        "include_pt2_channel": bool(args.include_pt2_channel),
+    }
+    digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return f"closed_shell_s1/v1/{digest[:2]}/{digest}"
+
+
+def _load_reference_from_cache(
+    row: ReferenceRow,
+    *,
+    args: argparse.Namespace,
+    input_feature_mode: str,
+    host_reference_cache: bool,
+    logger: RunLogger,
+) -> Any | None:
+    cache_path = _reference_cache_path(args)
+    if cache_path is None or bool(args.rebuild_reference_cache) or not cache_path.exists():
+        return None
+    key = _reference_cache_key(row, args=args, input_feature_mode=input_feature_mode)
+    try:
+        import h5py
+
+        with h5py.File(cache_path, "r") as handle:
+            if key not in handle:
+                return None
+            molecule = read_restricted_molecule(
+                handle[key]["molecule"],
+                array_backend="host" if host_reference_cache else "jax",
+            )
+    except Exception as exc:
+        logger.log(f"[ref_cache] miss/error {row.system}: {exc!r}; rebuilding")
+        return None
+    logger.log(f"[ref_cache] hit {row.system}: {cache_path}::{key}")
+    return molecule
+
+
+def _save_reference_to_cache(
+    row: ReferenceRow,
+    molecule: Any,
+    *,
+    args: argparse.Namespace,
+    input_feature_mode: str,
+    logger: RunLogger,
+) -> None:
+    cache_path = _reference_cache_path(args)
+    if cache_path is None:
+        return
+    key = _reference_cache_key(row, args=args, input_feature_mode=input_feature_mode)
+    try:
+        import h5py
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(cache_path, "a") as handle:
+            parent_name, leaf_name = key.rsplit("/", 1)
+            parent = handle.require_group(parent_name)
+            if leaf_name in parent:
+                del parent[leaf_name]
+            group = parent.create_group(leaf_name)
+            group.attrs["system"] = row.system
+            group.attrs["basis"] = row.basis
+            group.attrs["xc"] = str(args.xc)
+            group.attrs["grids_level"] = int(args.grids_level)
+            group.attrs["input_feature_mode"] = str(input_feature_mode)
+            group.attrs["include_pt2_channel"] = bool(args.include_pt2_channel)
+            write_restricted_molecule(group.require_group("molecule"), molecule)
+    except Exception as exc:
+        logger.log(f"[ref_cache] write failed {row.system}: {exc!r}")
+        return
+    logger.log(f"[ref_cache] wrote {row.system}: {cache_path}::{key}")
+
+
+def _streaming_average_eval(
+    params: Any,
+    data: tuple[GroundStateDatum, ...],
+    eval_kernel: Any,
+) -> tuple[float, dict[str, float]]:
+    if not data:
+        return float("nan"), {"s1_mae": float("nan"), "s1_mse": float("nan")}
+    losses: list[float] = []
+    s1_maes: list[float] = []
+    s1_mses: list[float] = []
+    for datum in data:
+        loss, metrics = eval_kernel(params, datum)
+        losses.append(float(loss))
+        s1_maes.append(_metric_mean(metrics, "s1_mae", 0.0))
+        s1_mses.append(_metric_mean(metrics, "s1_mse", 0.0))
+    return float(np.mean(losses)), {
+        "s1_mae": float(np.mean(s1_maes)),
+        "s1_mse": float(np.mean(s1_mses)),
+    }
 
 
 def _load_reference_rows(path: Path, *, basis: str) -> list[ReferenceRow]:
@@ -328,7 +548,20 @@ def _prepare_references(
     logger: RunLogger,
 ) -> list[PreparedReference]:
     prepared: list[PreparedReference] = []
+    host_reference_cache = _use_host_reference_cache(args)
     for idx, row in enumerate(rows, start=1):
+        input_feature_mode = _normalize_input_feature_mode(str(args.input_feature_mode))
+        reference = _load_reference_from_cache(
+            row,
+            args=args,
+            input_feature_mode=input_feature_mode,
+            host_reference_cache=host_reference_cache,
+            logger=logger,
+        )
+        if reference is not None:
+            prepared.append(PreparedReference(row=row, molecule=reference))
+            continue
+
         logger.log(f"[ref] {idx}/{len(rows)} build {row.system} ({row.split})")
         mf = _run_rks_reference(
             row,
@@ -339,9 +572,20 @@ def _prepare_references(
         )
         reference = restricted_reference_from_pyscf(
             mf,
-            compute_local_hfx_features=(str(args.input_feature_mode) == "dm21_original"),
-            compute_local_hfx_aux=(str(args.input_feature_mode) == "dm21_original"),
+            compute_local_hfx_features=(input_feature_mode == "canonical"),
+            compute_local_hfx_aux=(input_feature_mode == "canonical"),
             compute_local_pt2_features=bool(args.include_pt2_channel),
+        )
+        if host_reference_cache:
+            reference = _host_cache_pytree(reference)
+            gc.collect()
+            logger.log(f"[ref] {idx}/{len(rows)} host-cached {row.system} ({row.split})")
+        _save_reference_to_cache(
+            row,
+            reference,
+            args=args,
+            input_feature_mode=input_feature_mode,
+            logger=logger,
         )
         prepared.append(PreparedReference(row=row, molecule=reference))
     return prepared
@@ -534,6 +778,215 @@ def _write_training_history_csv(path: Path, training: dict[str, Any]) -> None:
             )
 
 
+def _train_streaming(
+    state: Any,
+    train_dataset: tuple[GroundStateDatum, ...],
+    val_dataset: tuple[GroundStateDatum, ...],
+    *,
+    functional: Any,
+    training_config: GroundStateTrainingConfig,
+    lr_schedule: Any,
+    args: argparse.Namespace,
+    logger: RunLogger,
+) -> dict[str, Any]:
+    loss_and_grad_kernel = make_ground_state_loss_and_grad(
+        functional,
+        training_config=training_config,
+    )
+    eval_kernel = lambda params, datum: ground_state_mse_loss(  # noqa: E731
+        params,
+        functional,
+        datum,
+        training_config=training_config,
+    )
+    if bool(args.jit_train):
+        loss_and_grad_kernel = jax.jit(loss_and_grad_kernel)
+    if bool(args.jit_eval):
+        eval_kernel = jax.jit(eval_kernel)
+
+    logger.log("[train_init] streaming mode: one molecule per JIT call; averaging grads")
+    if bool(args.skip_initial_eval):
+        initial_train_loss = float("nan")
+        initial_train_metrics = {"s1_mae": float("nan"), "s1_mse": float("nan")}
+        initial_val_loss = float("nan")
+        initial_val_metrics = {"s1_mae": float("nan"), "s1_mse": float("nan")}
+        best_score = float("inf")
+        logger.log("[train_init] skipped initial eval")
+    else:
+        initial_train_loss, initial_train_metrics = _streaming_average_eval(
+            state.params,
+            train_dataset,
+            eval_kernel,
+        )
+        initial_val_loss, initial_val_metrics = _streaming_average_eval(
+            state.params,
+            val_dataset,
+            eval_kernel,
+        )
+        best_score = (
+            initial_val_metrics["s1_mae"]
+            if val_dataset
+            else initial_train_metrics["s1_mae"]
+        )
+    best_params = state.params
+    best_step = 0
+
+    history_steps = [0]
+    loss_history = [initial_train_loss]
+    s1_mae_history = [initial_train_metrics["s1_mae"]]
+    grad_norm_history = [float("nan")]
+    grad_abs_max_history = [float("nan")]
+    param_update_norm_history = [float("nan")]
+    nonfinite_grad_fraction_history = [0.0]
+    eval_steps = [0]
+    eval_train_loss_history = [initial_train_loss]
+    eval_train_s1_mae_history = [initial_train_metrics["s1_mae"]]
+    eval_val_loss_history = [initial_val_loss]
+    eval_val_s1_mae_history = [initial_val_metrics["s1_mae"]]
+
+    logger.log(
+        "[train] "
+        f"steps={int(args.steps)} mode={str(args.training_mode)} "
+        f"objective=s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'} "
+        f"train_step_mode=stream_single_molecule train_size={len(train_dataset)} "
+        f"val_size={len(val_dataset)}"
+    )
+
+    t0 = time.perf_counter()
+    for step in range(1, int(args.steps) + 1):
+        params_for_loss = state.params
+        grad_sum = None
+        losses: list[float] = []
+        s1_maes: list[float] = []
+        grad_norms: list[float] = []
+        grad_abs_maxes: list[float] = []
+        nonfinite_fracs: list[float] = []
+        for datum in train_dataset:
+            loss, metrics, grads = loss_and_grad_kernel(params_for_loss, datum)
+            losses.append(float(loss))
+            s1_maes.append(_metric_mean(metrics, "s1_mae", 0.0))
+            grad_norms.append(_metric_scalar(metrics, "grad_norm"))
+            grad_abs_maxes.append(_metric_scalar(metrics, "grad_abs_max"))
+            nonfinite_fracs.append(_metric_scalar(metrics, "nonfinite_grad_fraction", 0.0))
+            grad_sum = _tree_add(grad_sum, grads)
+        grads_avg = _tree_scale(grad_sum, 1.0 / max(1, len(train_dataset)))
+        train_loss_val = float(np.mean(losses))
+        train_s1_mae_val = float(np.mean(s1_maes))
+        grad_norm_val = float(np.mean(grad_norms))
+        grad_abs_max_val = float(np.max(grad_abs_maxes))
+        nonfinite_grad_fraction_val = float(np.mean(nonfinite_fracs))
+
+        prev_state = state
+        state = state.apply_gradients(grads=grads_avg)
+        param_delta = jax.tree_util.tree_map(
+            lambda new, old: new - old,
+            state.params,
+            prev_state.params,
+        )
+        reverted_step = False
+        if not _tree_all_finite(state.params):
+            state = prev_state
+            reverted_step = True
+            logger.log(f"[train] non-finite params at step {step}; reverted update")
+        update_norm_val = 0.0 if reverted_step else float(_tree_l2_norm(param_delta))
+
+        history_steps.append(step)
+        loss_history.append(train_loss_val)
+        s1_mae_history.append(train_s1_mae_val)
+        grad_norm_history.append(grad_norm_val)
+        grad_abs_max_history.append(grad_abs_max_val)
+        param_update_norm_history.append(update_norm_val)
+        nonfinite_grad_fraction_history.append(nonfinite_grad_fraction_val)
+
+        should_eval = (
+            step == 1
+            or step == int(args.steps)
+            or step % max(1, int(args.eval_interval)) == 0
+        )
+        if should_eval:
+            eval_train_loss, eval_train_metrics = _streaming_average_eval(
+                state.params,
+                train_dataset,
+                eval_kernel,
+            )
+            eval_val_loss, eval_val_metrics = _streaming_average_eval(
+                state.params,
+                val_dataset,
+                eval_kernel,
+            )
+            eval_steps.append(step)
+            eval_train_loss_history.append(eval_train_loss)
+            eval_train_s1_mae_history.append(eval_train_metrics["s1_mae"])
+            eval_val_loss_history.append(eval_val_loss)
+            eval_val_s1_mae_history.append(eval_val_metrics["s1_mae"])
+            score = eval_val_metrics["s1_mae"] if val_dataset else eval_train_metrics["s1_mae"]
+            if score < best_score:
+                best_score = score
+                best_params = state.params
+                best_step = step
+            current_lr = (
+                float(lr_schedule(step - 1))
+                if lr_schedule is not None
+                else float(args.learning_rate)
+            )
+            logger.log(
+                "[train] "
+                f"step={step:4d}/{int(args.steps):4d} "
+                f"train_loss={eval_train_loss:.8e} "
+                f"train_s1_mae={eval_train_metrics['s1_mae']:.8e} "
+                f"val_loss={eval_val_loss:.8e} "
+                f"val_s1_mae={eval_val_metrics['s1_mae']:.8e} "
+                f"grad_norm={grad_norm_val:.8e} "
+                f"grad_abs_max={grad_abs_max_val:.8e} "
+                f"update_norm={update_norm_val:.8e} "
+                f"lr={current_lr:.8e}"
+            )
+
+    elapsed_s = time.perf_counter() - t0
+    final_train_loss, final_train_metrics = _streaming_average_eval(
+        state.params,
+        train_dataset,
+        eval_kernel,
+    )
+    final_val_loss, final_val_metrics = _streaming_average_eval(
+        state.params,
+        val_dataset,
+        eval_kernel,
+    )
+    logger.log(
+        "[train] done "
+        f"final_train_loss={final_train_loss:.8e} "
+        f"best_s1_mae={best_score:.8e}@{best_step} "
+        f"elapsed_s={elapsed_s:.2f}"
+    )
+    return {
+        "functional": functional,
+        "training_config": training_config,
+        "best_params": best_params,
+        "final_params": state.params,
+        "best_step": int(best_step),
+        "best_score": float(best_score),
+        "final_train_loss": float(final_train_loss),
+        "final_train_s1_mae": float(final_train_metrics["s1_mae"]),
+        "final_val_loss": float(final_val_loss),
+        "final_val_s1_mae": float(final_val_metrics["s1_mae"]),
+        "elapsed_s": float(elapsed_s),
+        "history_steps": history_steps,
+        "loss_history": loss_history,
+        "s1_mae_history": s1_mae_history,
+        "grad_norm_history": grad_norm_history,
+        "grad_abs_max_history": grad_abs_max_history,
+        "param_update_norm_history": param_update_norm_history,
+        "nonfinite_grad_fraction_history": nonfinite_grad_fraction_history,
+        "eval_steps": eval_steps,
+        "eval_train_loss_history": eval_train_loss_history,
+        "eval_train_s1_mae_history": eval_train_s1_mae_history,
+        "eval_val_loss_history": eval_val_loss_history,
+        "eval_val_s1_mae_history": eval_val_s1_mae_history,
+        "post_update_recoveries": 0,
+    }
+
+
 def _train(
     train_dataset: tuple[GroundStateDatum, ...],
     val_dataset: tuple[GroundStateDatum, ...],
@@ -546,9 +999,11 @@ def _train(
         architecture=str(args.network_architecture),
         semilocal_xc=tuple(str(name) for name in args.semilocal_xc),
         hidden_dims=tuple(int(value) for value in args.hidden_dims),
-        input_feature_mode=str(args.input_feature_mode),
+        input_feature_mode=_normalize_input_feature_mode(str(args.input_feature_mode)),
         include_pt2_channel=bool(args.include_pt2_channel),
         pt2_channel_mode=str(args.pt2_channel_mode),
+        response_grid_chunk_size=int(args.response_grid_chunk_size),
+        strict_hfx_response_mode=str(args.strict_hfx_response_mode),
         name=f"neural_xc_closed_shell_{str(args.training_mode)}",
     )
     training_config = GroundStateTrainingConfig(
@@ -564,7 +1019,7 @@ def _train(
         scf_require_convergence=bool(args.scf_require_convergence),
         scf_stop_gradient_on_unconverged=bool(args.scf_stop_gradient_on_unconverged),
         scf_stop_gradient_rms_threshold=args.scf_stop_gradient_rms_threshold,
-        scf_gradient_mode=str(args.scf_gradient_mode),
+        scf_gradient_mode=_normalize_scf_gradient_mode(str(args.scf_gradient_mode)),
         scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
@@ -592,6 +1047,17 @@ def _train(
         init_molecule,
         optimizer,
     )
+    if bool(args.stream_train):
+        return _train_streaming(
+            state,
+            train_dataset,
+            val_dataset,
+            functional=functional,
+            training_config=training_config,
+            lr_schedule=lr_schedule,
+            args=args,
+            logger=logger,
+        )
     train_step = make_ground_state_train_step(functional, training_config=training_config)
     use_warm_start = bool(args.scf_warm_start) and training_config.mode == "self_consistent"
     train_dataset_current = train_dataset
@@ -884,6 +1350,7 @@ def main() -> None:
         f"reference_csv={args.reference_csv}, basis={args.basis}, xc={args.xc}, "
         f"steps={args.steps}, mode={args.training_mode}, include_pt2_channel={bool(args.include_pt2_channel)}, "
         f"pt2_channel_mode={args.pt2_channel_mode if bool(args.include_pt2_channel) else 'none'}, "
+        f"strict_hfx_response_mode={args.strict_hfx_response_mode}, "
         f"train={len(train_rows)}, validation={len(val_rows)}, test={len(test_rows)}"
     )
 
@@ -913,6 +1380,75 @@ def main() -> None:
     params = training["best_params"]
     functional = training["functional"]
     training_config = training["training_config"]
+    if bool(args.skip_final_evaluation):
+        training_png = outdir / "training_loss.png"
+        _plot_training_history(
+            training_png,
+            training,
+            title=f"Closed-shell S1 {'TDA' if bool(args.s1_use_tda) else 'Casida'} training",
+        )
+        training_history_csv = outdir / "training_history.csv"
+        _write_training_history_csv(training_history_csv, training)
+        checkpoint_path = outdir / "neural_xc_params.msgpack"
+        checkpoint_path, checkpoint_meta_path = save_params_checkpoint(
+            checkpoint_path,
+            params,
+            metadata={
+                "reference_csv": str(args.reference_csv),
+                "basis": str(args.basis),
+                "xc": str(args.xc),
+                "training_mode": str(args.training_mode),
+                "skip_final_evaluation": True,
+                "include_pt2_channel": bool(args.include_pt2_channel),
+                "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
+                "response_grid_chunk_size": int(args.response_grid_chunk_size),
+                "strict_hfx_response_mode": str(args.strict_hfx_response_mode),
+                "s1_use_tda": bool(args.s1_use_tda),
+                "eval_use_tda": bool(args.eval_use_tda),
+                "steps": int(args.steps),
+                "best_step": int(training["best_step"]),
+                "train_systems": [row.system for row in train_rows],
+                "validation_systems": [row.system for row in val_rows],
+                "test_systems": [row.system for row in test_rows],
+            },
+        )
+        summary = {
+            "reference_csv": str(args.reference_csv),
+            "basis": str(args.basis),
+            "xc": str(args.xc),
+            "training_mode": str(args.training_mode),
+            "objective": f"s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'}",
+            "evaluation_solver": None,
+            "skip_final_evaluation": True,
+            "include_pt2_channel": bool(args.include_pt2_channel),
+            "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
+            "response_grid_chunk_size": int(args.response_grid_chunk_size),
+            "strict_hfx_response_mode": str(args.strict_hfx_response_mode),
+            "steps": int(args.steps),
+            "best_step": int(training["best_step"]),
+            "best_validation_s1_mae_h": float(training["best_score"]),
+            "final_train_loss": float(training["final_train_loss"]),
+            "final_train_s1_mae_h": float(training["final_train_s1_mae"]),
+            "final_val_loss": float(training["final_val_loss"]),
+            "final_val_s1_mae_h": float(training["final_val_s1_mae"]),
+            "train_s1_mae_ev": None,
+            "validation_s1_mae_ev": None,
+            "test_s1_mae_ev": None,
+            "predictions_csv": None,
+            "training_curve_png": str(training_png),
+            "training_history_csv": str(training_history_csv),
+            "checkpoint": str(checkpoint_path),
+            "checkpoint_meta": str(checkpoint_meta_path) if checkpoint_meta_path is not None else None,
+            "train_systems": [row.system for row in train_rows],
+            "validation_systems": [row.system for row in val_rows],
+            "test_systems": [row.system for row in test_rows],
+        }
+        (outdir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+        logger.log("[eval] skipped final per-molecule prediction pass")
+        logger.log(f"Wrote summary   : {outdir / 'summary.json'}")
+        logger.log(f"Wrote checkpoint: {checkpoint_path}")
+        return
+
     use_tda = bool(args.eval_use_tda)
     train_pred_rows, train_metrics = _evaluate_dataset(
         prepared_train,
@@ -968,6 +1504,8 @@ def main() -> None:
             "scf_implicit_diff_restart": int(args.scf_implicit_diff_restart),
             "include_pt2_channel": bool(args.include_pt2_channel),
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
+            "response_grid_chunk_size": int(args.response_grid_chunk_size),
+            "strict_hfx_response_mode": str(args.strict_hfx_response_mode),
             "s1_use_tda": bool(args.s1_use_tda),
             "eval_use_tda": bool(args.eval_use_tda),
             "steps": int(args.steps),
@@ -998,6 +1536,8 @@ def main() -> None:
         "scf_implicit_diff_restart": int(args.scf_implicit_diff_restart),
         "include_pt2_channel": bool(args.include_pt2_channel),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
+        "response_grid_chunk_size": int(args.response_grid_chunk_size),
+        "strict_hfx_response_mode": str(args.strict_hfx_response_mode),
         "steps": int(args.steps),
         "best_step": int(training["best_step"]),
         "best_validation_s1_mae_h": float(training["best_score"]),

@@ -17,6 +17,7 @@ from td_graddft.training import (
     GroundStateTrainingConfig,
     create_train_state_from_molecule,
     dm21_scf_regularization_delta_energy,
+    density_matrix_matching_penalty,
     density_matching_penalty,
     density_on_grid,
     density_on_grid_spin_resolved,
@@ -35,6 +36,7 @@ from td_graddft.training import (
 )
 from td_graddft.training.targets import _electron_count, orbital_energy_matching_penalty
 from td_graddft.training.targets import janak_frontier_finite_difference_penalty
+from td_graddft.scf.molecules import QuadratureGrid, UnrestrictedMolecule
 from td_graddft.workflows.core import run_molecule_from_spec
 from td_graddft.workflows.types import MoleculeSpecConfig, SimulationConfig
 
@@ -166,6 +168,110 @@ def _make_overlap_toy_molecule():
         nuclear_repulsion=0.0,
         overlap_matrix=jnp.array([[1.5, 0.0], [0.0, 0.5]]),
     )
+
+
+def test_batched_self_consistent_path_rejects_open_shell_unrestricted_dataset():
+    def _molecule(mo_occ, rdm1, *, nocc_alpha, nocc_beta):
+        return UnrestrictedMolecule(
+            ao=jnp.array([[1.0, 0.5], [0.5, 1.0]]),
+            grid=QuadratureGrid(weights=jnp.array([1.0, 1.0])),
+            dipole_integrals=jnp.zeros((3, 2, 2)),
+            rep_tensor=jnp.zeros((2, 2, 2, 2)),
+            mo_coeff=jnp.stack([jnp.eye(2), jnp.eye(2)], axis=0),
+            mo_occ=mo_occ,
+            mo_energy=jnp.array([[0.0, 1.0], [0.0, 1.0]]),
+            rdm1=rdm1,
+            h1e=jnp.zeros((2, 2)),
+            nuclear_repulsion=jnp.asarray(0.0),
+            overlap_matrix=jnp.eye(2),
+            nocc_alpha=nocc_alpha,
+            nocc_beta=nocc_beta,
+        )
+
+    closed_shell = _molecule(
+        jnp.array([[1.0, 0.0], [1.0, 0.0]]),
+        jnp.array(
+            [
+                [[1.0, 0.0], [0.0, 0.0]],
+                [[1.0, 0.0], [0.0, 0.0]],
+            ]
+        ),
+        nocc_alpha=1,
+        nocc_beta=1,
+    )
+    open_shell = _molecule(
+        jnp.array([[1.0, 0.0], [0.0, 0.0]]),
+        jnp.array(
+            [
+                [[1.0, 0.0], [0.0, 0.0]],
+                [[0.0, 0.0], [0.0, 0.0]],
+            ]
+        ),
+        nocc_alpha=1,
+        nocc_beta=0,
+    )
+    cfg = GroundStateTrainingConfig(mode="self_consistent")
+
+    assert training_targets._can_use_batched_self_consistent_ground_state_path(
+        [
+            GroundStateDatum(closed_shell, jnp.array(0.0)),
+            GroundStateDatum(closed_shell, jnp.array(0.0)),
+        ],
+        cfg,
+        predictor=None,
+    )
+    assert not training_targets._can_use_batched_self_consistent_ground_state_path(
+        [
+            GroundStateDatum(open_shell, jnp.array(0.0)),
+            GroundStateDatum(open_shell, jnp.array(0.0)),
+        ],
+        cfg,
+        predictor=None,
+    )
+
+
+def test_pointwise_dataset_loss_calls_single_datum_loss(monkeypatch):
+    calls = []
+
+    def fake_loss(params, functional, data, *, training_config=None, predictor=None):
+        assert isinstance(data, GroundStateDatum)
+        calls.append(float(data.target_total_energy))
+        value = jnp.asarray(data.target_total_energy + params["offset"])
+        return value, {
+            "loss": value,
+            "energy_mae": jnp.atleast_1d(value),
+            "density_mse": jnp.atleast_1d(value + 1.0),
+            "density_penalty": jnp.atleast_1d(value + 2.0),
+            "density_matrix_mse": jnp.atleast_1d(value + 3.0),
+            "density_matrix_penalty": jnp.atleast_1d(value + 4.0),
+            "scf_converged": jnp.atleast_1d(1.0),
+            "scf_stop_gradient_applied": jnp.atleast_1d(0.0),
+            "scf_cycles": jnp.atleast_1d(value + 5.0),
+            "scf_selected_cycle": jnp.atleast_1d(value + 6.0),
+            "scf_best_cycle": jnp.atleast_1d(value + 7.0),
+            "scf_final_rms_density": jnp.atleast_1d(value + 8.0),
+            "scf_selected_rms_density": jnp.atleast_1d(value + 9.0),
+            "scf_best_rms_density": jnp.atleast_1d(value + 10.0),
+        }
+
+    monkeypatch.setattr(training_targets, "ground_state_mse_loss", fake_loss)
+    dataset = (
+        GroundStateDatum(SimpleNamespace(), jnp.asarray(1.0)),
+        GroundStateDatum(SimpleNamespace(), jnp.asarray(3.0)),
+    )
+
+    loss, metrics = training_targets.ground_state_mse_loss_pointwise_dataset(
+        {"offset": jnp.asarray(0.5)},
+        object(),
+        dataset,
+        training_config=GroundStateTrainingConfig(mode="self_consistent"),
+    )
+
+    np.testing.assert_allclose(float(loss), 2.5)
+    np.testing.assert_allclose(np.asarray(metrics["energy_mae"]), np.asarray([1.5, 3.5]))
+    np.testing.assert_allclose(np.asarray(metrics["scf_cycles_mean"]), np.asarray([7.5]))
+    np.testing.assert_allclose(np.asarray(metrics["scf_cycles_max"]), np.asarray([8.5]))
+    assert calls == [1.0, 3.0]
 
 
 def _clip_toy_density(density: jnp.ndarray, density_floor: float) -> jnp.ndarray:
@@ -578,6 +684,42 @@ def test_density_matching_penalty_is_finite_and_reported_in_loss():
     assert metrics["density_mse"][0] >= 0.0
 
 
+def test_density_matrix_matching_penalty_is_separate_from_grid_density_loss():
+    molecule = _make_toy_molecule()
+    target_density_matrix = jnp.asarray(molecule.rdm1).sum(axis=0) * 0.75
+    datum = GroundStateDatum(
+        molecule=molecule,
+        target_total_energy=jnp.array(2.125),
+        target_density_matrix=target_density_matrix,
+        density_constraint_weight=0.1,
+        density_matrix_constraint_weight=0.2,
+    )
+
+    penalty = density_matrix_matching_penalty(
+        molecule,
+        target_density_matrix=target_density_matrix,
+    )
+    _, metrics = ground_state_mse_loss(
+        {},
+        _make_trainable_functional(),
+        datum,
+        training_config=GroundStateTrainingConfig(
+            mode="self_consistent",
+            energy_mse_weight=0.0,
+            energy_mae_weight=0.0,
+        ),
+        predictor=lambda params, mol: (jnp.asarray(2.125), mol),
+    )
+
+    assert jnp.isfinite(penalty)
+    assert penalty > 0.0
+    assert metrics["density_penalty"].shape == (1,)
+    assert metrics["density_matrix_penalty"].shape == (1,)
+    assert metrics["density_mse"].shape == (1,)
+    assert metrics["density_matrix_mse"].shape == (1,)
+    assert metrics["density_matrix_penalty"][0] == jnp.asarray(0.2) * metrics["density_matrix_mse"][0]
+
+
 def test_spin_resolved_density_helpers_and_penalty_are_available():
     molecule = _make_toy_molecule()
     functional = _make_trainable_functional()
@@ -809,7 +951,8 @@ def test_s1_constraint_penalty_is_finite_and_affects_loss():
     assert metrics["s1_penalty"][0] > 0.0
     assert metrics["s1_mse"][0] > 0.0
     assert metrics["s1_mae"][0] > 0.0
-    assert jnp.allclose(metrics["s1_penalty"][0], 0.5 * metrics["s1_mae"][0], atol=1e-8)
+    expected_s1_penalty = 0.5 * (metrics["s1_mse"][0] + metrics["s1_mae"][0])
+    assert jnp.allclose(metrics["s1_penalty"][0], expected_s1_penalty, atol=1e-8)
     assert loss_constrained > loss_plain
 
 

@@ -10,9 +10,8 @@ from jax.lax import Precision
 from jaxtyping import Array, PRNGKeyArray, PyTree
 
 from ..features import (
+    grid_features_for_molecule,
     restricted_feature_bundle_from_response_variables,
-    restricted_grid_features,
-    restricted_grid_features_with_gradients,
     restricted_transition_response_features,
 )
 from ..xc_backend.jax_libxc import RestrictedFeatureBundle
@@ -161,7 +160,7 @@ class AssemblyMixin:
         return self._mlp_functional().init(rng, sample_inputs)
 
     def init_from_molecule(self, rng: PRNGKeyArray, molecule: Any) -> PyTree:
-        features = restricted_grid_features(molecule)
+        features = grid_features_for_molecule(molecule)
         semilocal = self.semilocal_energy_density(features)
         hf_projected, hf_projected_a, hf_projected_b = self.projected_hf_grid_contribution_components(
             molecule,
@@ -236,7 +235,7 @@ class AssemblyMixin:
         """
 
         if features is None:
-            features = restricted_grid_features(molecule)
+            features = grid_features_for_molecule(molecule)
         semilocal_channels = self.semilocal_energy_density_channels(features)
         semilocal_local_channels = self._semilocal_local_contribution_channels(
             features,
@@ -270,7 +269,7 @@ class AssemblyMixin:
         """GradDFT-compatible input feature builder for c_theta."""
 
         if features is None:
-            features = restricted_grid_features(molecule)
+            features = grid_features_for_molecule(molecule)
         semilocal = (
             self.semilocal_energy_density(features)
             if semilocal_energy_density is None
@@ -566,6 +565,73 @@ class ResponseMixin:
         )
         return rho0, grad0, tau0, variables
 
+    def _unrestricted_response_variables(
+        self,
+        features: RestrictedFeatureBundle,
+        grad_a: Array,
+        grad_b: Array,
+    ) -> tuple[Array, Array]:
+        response_floor = self._effective_response_density_floor()
+        rho_a = jnp.maximum(features.rho_a, response_floor)
+        rho_b = jnp.maximum(features.rho_b, response_floor)
+        tau_a = jnp.maximum(features.tau_a, 0.0)
+        tau_b = jnp.maximum(features.tau_b, 0.0)
+        variables = jnp.concatenate(
+            [
+                rho_a[..., None],
+                rho_b[..., None],
+                jnp.asarray(grad_a, dtype=rho_a.dtype),
+                jnp.asarray(grad_b, dtype=rho_a.dtype),
+                tau_a[..., None],
+                tau_b[..., None],
+            ],
+            axis=-1,
+        )
+        active = features.rho > response_floor
+        return variables, active
+
+    def _feature_bundle_from_unrestricted_variables(
+        self,
+        variables: Array,
+    ) -> RestrictedFeatureBundle:
+        response_floor = self._effective_response_density_floor()
+        rho_a = jnp.maximum(variables[0], response_floor)
+        rho_b = jnp.maximum(variables[1], response_floor)
+        grad_a = variables[2:5]
+        grad_b = variables[5:8]
+        return RestrictedFeatureBundle(
+            rho_a=rho_a,
+            rho_b=rho_b,
+            sigma_aa=jnp.dot(grad_a, grad_a),
+            sigma_ab=jnp.dot(grad_a, grad_b),
+            sigma_bb=jnp.dot(grad_b, grad_b),
+            tau_a=jnp.maximum(variables[8], 0.0),
+            tau_b=jnp.maximum(variables[9], 0.0),
+        )
+
+    def _feature_bundle_from_restricted_response_variables(
+        self,
+        variables: Array,
+    ) -> RestrictedFeatureBundle:
+        response_floor = self._effective_response_density_floor()
+        rho_point = jnp.maximum(variables[0], response_floor)
+        grad_point = jnp.asarray(variables[1:4], dtype=rho_point.dtype)
+        tau_point = jnp.maximum(variables[4], response_floor)
+        grad_floor = jnp.asarray(response_floor, dtype=rho_point.dtype)
+        grad_norm2 = jnp.dot(grad_point, grad_point)
+        floor_grad = jnp.zeros_like(grad_point).at[0].set(grad_floor)
+        safe_grad = jnp.where(
+            grad_norm2 > grad_floor * grad_floor,
+            grad_point,
+            floor_grad,
+        )
+        return restricted_feature_bundle_from_response_variables(
+            rho_point,
+            safe_grad,
+            tau_point,
+            density_floor=response_floor,
+        )
+
     def _strict_response_payload(
         self,
         features: RestrictedFeatureBundle,
@@ -599,16 +665,7 @@ class ResponseMixin:
         )
 
     def _semilocal_point_local_energy_from_variables(self, variables: Array) -> Array:
-        response_floor = self._effective_response_density_floor()
-        rho_point = jnp.maximum(variables[0], response_floor)
-        grad_point = variables[1:4]
-        tau_point = jnp.maximum(variables[4], 0.0)
-        point_features = restricted_feature_bundle_from_response_variables(
-            rho_point,
-            grad_point,
-            tau_point,
-            density_floor=response_floor,
-        )
+        point_features = self._feature_bundle_from_restricted_response_variables(variables)
         semilocal_channels = self.semilocal_energy_density_channels(point_features)
         semilocal_local_channels = self._semilocal_local_contribution_channels(
             point_features,
@@ -630,16 +687,7 @@ class ResponseMixin:
     ) -> Array:
         hf_mode = self.response_hf_mode if response_hf_mode is None else response_hf_mode
         pt2_mode = self.response_pt2_mode if response_pt2_mode is None else response_pt2_mode
-        response_floor = self._effective_response_density_floor()
-        rho_point = jnp.maximum(variables[0], response_floor)
-        grad_point = variables[1:4]
-        tau_point = jnp.maximum(variables[4], 0.0)
-        point_features = restricted_feature_bundle_from_response_variables(
-            rho_point,
-            grad_point,
-            tau_point,
-            density_floor=response_floor,
-        )
+        point_features = self._feature_bundle_from_restricted_response_variables(variables)
         semilocal_channels = self.semilocal_energy_density_channels(point_features)
         semilocal_local_channels = self._semilocal_local_contribution_channels(
             point_features,
@@ -695,6 +743,75 @@ class ResponseMixin:
             )
         channels = self._assemble_channel_contributions(coefficients, basis)
         return jnp.sum(channels, axis=-1)
+
+    def _total_point_local_energy_from_unrestricted_variables(
+        self,
+        params: PyTree,
+        variables: Array,
+        hf_point: Array,
+        hf_point_a: Array,
+        hf_point_b: Array,
+        *,
+        pt2_point: Array | None = None,
+        response_hf_mode: Literal["approx", "strict"] | None = None,
+        response_pt2_mode: Literal["approx", "strict"] | None = None,
+    ) -> Array:
+        hf_mode = self.response_hf_mode if response_hf_mode is None else response_hf_mode
+        pt2_mode = self.response_pt2_mode if response_pt2_mode is None else response_pt2_mode
+        point_features = self._feature_bundle_from_unrestricted_variables(variables)
+        semilocal_channels = self.semilocal_energy_density_channels(point_features)
+        semilocal_local_channels = self._semilocal_local_contribution_channels(
+            point_features,
+            semilocal_channels,
+        )
+        semilocal_total = jnp.sum(semilocal_channels, axis=-1)
+        if hf_mode not in {"approx", "strict"}:
+            raise ValueError(
+                f"Unsupported response_hf_mode={hf_mode!r}. "
+                "Expected 'strict' or 'approx'."
+            )
+        hf_input = jax.lax.stop_gradient(hf_point)
+        hf_basis = jnp.zeros_like(hf_input)
+        hf_spin_inputs = (
+            jax.lax.stop_gradient(hf_point_a),
+            jax.lax.stop_gradient(hf_point_b),
+        )
+        if pt2_point is None:
+            pt2_point = jnp.zeros_like(hf_point)
+        if self.include_pt2_channel:
+            if pt2_mode == "approx":
+                pt2_input = jax.lax.stop_gradient(pt2_point)
+                pt2_basis = pt2_input
+            elif pt2_mode == "strict":
+                pt2_input = jnp.zeros_like(hf_point)
+                pt2_basis = jnp.zeros_like(hf_point)
+            else:
+                raise ValueError(
+                    f"Unsupported response_pt2_mode={pt2_mode!r}. "
+                    "Expected 'approx' or 'strict'."
+                )
+        else:
+            pt2_input = None
+            pt2_basis = None
+        coefficients = self.channel_coefficients(
+            params,
+            point_features,
+            semilocal_energy_density=semilocal_total,
+            hf_energy_density=hf_input,
+            pt2_energy_density=pt2_input,
+            hf_spin_energy_density=hf_spin_inputs,
+        )
+        basis = self._assemble_basis_channels(
+            semilocal_local_channels,
+            hf_projected=hf_basis,
+            pt2_projected=pt2_basis,
+        )
+        if coefficients.shape[-1] != basis.shape[-1]:
+            raise ValueError(
+                "Model output_dim must match basis channels "
+                f"(got {coefficients.shape[-1]}, expected {basis.shape[-1]})."
+            )
+        return jnp.sum(self._assemble_channel_contributions(coefficients, basis), axis=-1)
 
     def _hf_channel_point_energy_from_response_variables(
         self,
@@ -847,14 +964,6 @@ class ResponseMixin:
             hessian = point_hessian_fn(params, variables, pt2_point=pt2_point)
             return grad, hessian
 
-        gradients, hessians = jax.vmap(point_grad_hessian)(point_variables, pt2_values)
-        gradients = jnp.nan_to_num(gradients, nan=0.0, posinf=0.0, neginf=0.0)
-        hessians = jnp.nan_to_num(hessians, nan=0.0, posinf=0.0, neginf=0.0)
-        gradients = self._maybe_clip_response(gradients)
-        hessians = self._maybe_clip_response(hessians)
-        gradients = gradients * active[:, None].astype(gradients.dtype)
-        hessians = hessians * active[:, None, None].astype(hessians.dtype)
-
         mo_coeff = jnp.asarray(molecule.mo_coeff, dtype=point_variables.dtype)
         mo_occ = jnp.asarray(molecule.mo_occ)
         if mo_coeff.ndim == 3:
@@ -872,8 +981,289 @@ class ResponseMixin:
         rho_o = jnp.einsum("gp,pi->gi", ao, orbo, precision=Precision.HIGHEST)
         rho_v = jnp.einsum("gp,pa->ga", ao, orbv, precision=Precision.HIGHEST)
 
+        weights = jnp.asarray(molecule.grid.weights, dtype=point_variables.dtype)
         dm_spin = self._restricted_spin_density_blocks(molecule)
         dm_spin = jnp.asarray(dm_spin, dtype=point_variables.dtype)
+
+        if self.strict_hfx_response_mode == "low_memory":
+            ao_deriv1 = getattr(molecule, "ao_deriv1", None)
+            if ao_deriv1 is None:
+                raise AttributeError(
+                    "Molecule-like object must define ao_deriv1 for low-memory strict HFX response."
+                )
+            ao_deriv1 = jnp.asarray(ao_deriv1, dtype=point_variables.dtype)
+            if ao_deriv1.shape[0] < 4:
+                raise ValueError("ao_deriv1 must contain AO values plus first derivatives.")
+            ngrids = int(weights.shape[0])
+            chunk_size = self._effective_response_grid_chunk_size(ngrids)
+            n_chunks = (ngrids + chunk_size - 1) // chunk_size
+
+            def _mgga_response_features_chunk(ao_deriv1_chunk: Array) -> Array:
+                rho_o_full = jnp.einsum(
+                    "xgp,pi->xgi",
+                    ao_deriv1_chunk[:4],
+                    orbo,
+                    precision=Precision.HIGHEST,
+                )
+                rho_v_full = jnp.einsum(
+                    "xgp,pa->xga",
+                    ao_deriv1_chunk[:4],
+                    orbv,
+                    precision=Precision.HIGHEST,
+                )
+                gga_features = jnp.einsum(
+                    "xgi,ga->xgia",
+                    rho_o_full,
+                    rho_v_full[0],
+                    precision=Precision.HIGHEST,
+                )
+                gga_features = gga_features.at[1:4].add(
+                    jnp.einsum(
+                        "gi,xga->xgia",
+                        rho_o_full[0],
+                        rho_v_full[1:4],
+                        precision=Precision.HIGHEST,
+                    )
+                )
+                tau_ov = 0.5 * jnp.einsum(
+                    "xgi,xga->gia",
+                    rho_o_full[1:4],
+                    rho_v_full[1:4],
+                    precision=Precision.HIGHEST,
+                )
+                return jnp.concatenate([gga_features, tau_ov[None, ...]], axis=0)
+
+            def chunk_contribution(
+                point_variables_chunk: Array,
+                pt2_values_chunk: Array,
+                active_chunk: Array,
+                weights_chunk: Array,
+                ao_chunk: Array,
+                ao_deriv1_chunk: Array,
+                nu_chunk: Array,
+            ) -> tuple[Array, Array]:
+                gradients_chunk, hessians_chunk = jax.vmap(point_grad_hessian)(
+                    point_variables_chunk,
+                    pt2_values_chunk,
+                )
+                gradients_chunk = jnp.nan_to_num(
+                    gradients_chunk,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
+                hessians_chunk = jnp.nan_to_num(
+                    hessians_chunk,
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
+                gradients_chunk = self._maybe_clip_response(gradients_chunk)
+                hessians_chunk = self._maybe_clip_response(hessians_chunk)
+                gradients_chunk = gradients_chunk * active_chunk[:, None].astype(
+                    gradients_chunk.dtype
+                )
+                hessians_chunk = hessians_chunk * active_chunk[:, None, None].astype(
+                    hessians_chunk.dtype
+                )
+
+                rho_o_chunk = jnp.einsum(
+                    "gp,pi->gi",
+                    ao_chunk,
+                    orbo,
+                    precision=Precision.HIGHEST,
+                )
+                rho_v_chunk = jnp.einsum(
+                    "gp,pa->ga",
+                    ao_chunk,
+                    orbv,
+                    precision=Precision.HIGHEST,
+                )
+                e_spin_chunk = jnp.einsum(
+                    "gp,spq->sgq",
+                    ao_chunk,
+                    dm_spin,
+                    precision=Precision.HIGHEST,
+                )
+                v_nu_e_chunk = jnp.einsum(
+                    "pa,wgpq,sgq->swga",
+                    orbv,
+                    nu_chunk,
+                    e_spin_chunk,
+                    precision=Precision.HIGHEST,
+                )
+                hprime_spin_chunk = -0.5 * jnp.einsum(
+                    "gi,swga->swgia",
+                    rho_o_chunk,
+                    v_nu_e_chunk,
+                    precision=Precision.HIGHEST,
+                )
+                if hvar_kind == "canonical":
+                    hprime_vars_chunk = jnp.concatenate(
+                        [hprime_spin_chunk[0], hprime_spin_chunk[1]],
+                        axis=0,
+                    )
+                    grad_h_chunk = gradients_chunk[:, 5 : 5 + 2 * n_hfx]
+                elif hvar_kind == "total_only":
+                    hprime_vars_chunk = (
+                        hprime_spin_chunk[0, 0] + hprime_spin_chunk[1, 0]
+                    )[None, ...]
+                    grad_h_chunk = gradients_chunk[:, 5:6]
+                else:
+                    hprime_vars_chunk = jnp.stack(
+                        [hprime_spin_chunk[0, 0], hprime_spin_chunk[1, 0]],
+                        axis=0,
+                    )
+                    grad_h_chunk = gradients_chunk[:, 5:7]
+
+                semilocal_response_features_chunk = _mgga_response_features_chunk(
+                    ao_deriv1_chunk
+                )
+                response_features_chunk = jnp.concatenate(
+                    [semilocal_response_features_chunk, hprime_vars_chunk],
+                    axis=0,
+                )
+                weighted_hessian_chunk = (
+                    hessians_chunk.transpose(1, 2, 0)
+                    * weights_chunk[None, None, :]
+                )
+                common_matrix_chunk = 2.0 * jnp.einsum(
+                    "xyg,xgia,ygjb->iajb",
+                    weighted_hessian_chunk,
+                    response_features_chunk,
+                    response_features_chunk,
+                    precision=Precision.HIGHEST,
+                )
+
+                def second_matrix_chunk(
+                    grad_values: Array,
+                    omega_index: int,
+                    spin_weight: float,
+                ) -> tuple[Array, Array]:
+                    weighted_grad = weights_chunk * grad_values * spin_weight
+                    nu_omega = nu_chunk[omega_index]
+                    nu_vv_chunk = jnp.einsum(
+                        "pa,gpq,qb->gab",
+                        orbv,
+                        nu_omega,
+                        orbv,
+                        precision=Precision.HIGHEST,
+                    )
+                    nu_vo_chunk = jnp.einsum(
+                        "pa,gpq,qj->gaj",
+                        orbv,
+                        nu_omega,
+                        orbo,
+                        precision=Precision.HIGHEST,
+                    )
+                    matrix_a = -jnp.einsum(
+                        "g,gi,gj,gab->iajb",
+                        weighted_grad,
+                        rho_o_chunk,
+                        rho_o_chunk,
+                        nu_vv_chunk,
+                        precision=Precision.HIGHEST,
+                    )
+                    matrix_b = -jnp.einsum(
+                        "g,gi,gb,gaj->iajb",
+                        weighted_grad,
+                        rho_o_chunk,
+                        rho_v_chunk,
+                        nu_vo_chunk,
+                        precision=Precision.HIGHEST,
+                    )
+                    return matrix_a, matrix_b
+
+                second_a_chunk = jnp.zeros(
+                    (nocc, nvir, nocc, nvir),
+                    dtype=point_variables.dtype,
+                )
+                second_b_chunk = jnp.zeros_like(second_a_chunk)
+                if hvar_kind == "canonical":
+                    for idx in range(n_hfx):
+                        matrix_a, matrix_b = second_matrix_chunk(
+                            grad_h_chunk[:, idx],
+                            idx,
+                            0.5,
+                        )
+                        second_a_chunk = second_a_chunk + matrix_a
+                        second_b_chunk = second_b_chunk + matrix_b
+                    for idx in range(n_hfx):
+                        matrix_a, matrix_b = second_matrix_chunk(
+                            grad_h_chunk[:, n_hfx + idx],
+                            idx,
+                            0.5,
+                        )
+                        second_a_chunk = second_a_chunk + matrix_a
+                        second_b_chunk = second_b_chunk + matrix_b
+                elif hvar_kind == "total_only":
+                    matrix_a, matrix_b = second_matrix_chunk(grad_h_chunk[:, 0], 0, 1.0)
+                    second_a_chunk = second_a_chunk + matrix_a
+                    second_b_chunk = second_b_chunk + matrix_b
+                else:
+                    matrix_a, matrix_b = second_matrix_chunk(grad_h_chunk[:, 0], 0, 0.5)
+                    second_a_chunk = second_a_chunk + matrix_a
+                    second_b_chunk = second_b_chunk + matrix_b
+                    matrix_a, matrix_b = second_matrix_chunk(grad_h_chunk[:, 1], 0, 0.5)
+                    second_a_chunk = second_a_chunk + matrix_a
+                    second_b_chunk = second_b_chunk + matrix_b
+                return common_matrix_chunk + second_a_chunk, common_matrix_chunk + second_b_chunk
+
+            zero = jnp.zeros((nocc, nvir, nocc, nvir), dtype=point_variables.dtype)
+
+            def chunk_contribution_from_start(start: Array) -> tuple[Array, Array]:
+                return chunk_contribution(
+                    self._take_grid_chunk(point_variables, start, chunk_size, axis=0),
+                    self._take_grid_chunk(pt2_values, start, chunk_size, axis=0),
+                    self._take_grid_chunk(
+                        active.astype(point_variables.dtype),
+                        start,
+                        chunk_size,
+                        axis=0,
+                    ),
+                    self._take_grid_chunk(weights, start, chunk_size, axis=0),
+                    self._take_grid_chunk(ao, start, chunk_size, axis=0),
+                    self._take_grid_chunk(ao_deriv1, start, chunk_size, axis=1),
+                    self._take_grid_chunk(nu, start, chunk_size, axis=1),
+                )
+
+            chunk_contribution_from_start = jax.checkpoint(chunk_contribution_from_start)
+
+            def body(
+                carry: tuple[Array, Array],
+                chunk_idx: Array,
+            ) -> tuple[tuple[Array, Array], None]:
+                start = chunk_idx * chunk_size
+                matrix_a_chunk, matrix_b_chunk = chunk_contribution_from_start(start)
+                matrix_a, matrix_b = carry
+                return (matrix_a + matrix_a_chunk, matrix_b + matrix_b_chunk), None
+
+            (matrix_a, matrix_b), _ = jax.lax.scan(
+                body,
+                (zero, zero),
+                jnp.arange(n_chunks),
+            )
+            matrix_a = jnp.nan_to_num(matrix_a, nan=0.0, posinf=0.0, neginf=0.0)
+            matrix_b = jnp.nan_to_num(matrix_b, nan=0.0, posinf=0.0, neginf=0.0)
+            return (
+                matrix_a.reshape(int(nocc * nvir), int(nocc * nvir)),
+                matrix_b.reshape(int(nocc * nvir), int(nocc * nvir)),
+            )
+
+        if self.strict_hfx_response_mode != "dense":
+            raise ValueError(
+                f"Unsupported strict_hfx_response_mode={self.strict_hfx_response_mode!r}. "
+                "Expected 'dense' or 'low_memory'."
+            )
+
+        gradients, hessians = jax.vmap(point_grad_hessian)(point_variables, pt2_values)
+        gradients = jnp.nan_to_num(gradients, nan=0.0, posinf=0.0, neginf=0.0)
+        hessians = jnp.nan_to_num(hessians, nan=0.0, posinf=0.0, neginf=0.0)
+        gradients = self._maybe_clip_response(gradients)
+        hessians = self._maybe_clip_response(hessians)
+        gradients = gradients * active[:, None].astype(gradients.dtype)
+        hessians = hessians * active[:, None, None].astype(hessians.dtype)
+
         e_spin = jnp.einsum("gp,spq->sgq", ao, dm_spin, precision=Precision.HIGHEST)
         v_nu_e = jnp.einsum(
             "pa,wgpq,sgq->swga",
@@ -934,8 +1324,6 @@ class ResponseMixin:
             orbo,
             precision=Precision.HIGHEST,
         )
-        weights = jnp.asarray(molecule.grid.weights, dtype=point_variables.dtype)
-
         def second_matrix(
             grad_values: Array,
             omega_index: int,
@@ -1051,6 +1439,68 @@ class ResponseMixin:
         v_tau = jnp.where(active, gradients[:, 4], 0.0)
         v_lapl = jnp.zeros_like(v_rho)
         return v_rho, v_grad, v_tau, v_lapl
+
+    def _unrestricted_total_potential_components(
+        self,
+        params: PyTree,
+        features: RestrictedFeatureBundle,
+        grad_a: Array,
+        grad_b: Array,
+        hf_projected: Array,
+        *,
+        pt2_projected: Array | None = None,
+        hf_spin_energy_density: tuple[Array, Array],
+        response_hf_mode: Literal["approx", "strict"] | None = None,
+        response_pt2_mode: Literal["approx", "strict"] | None = None,
+    ) -> tuple[Array, Array, Array, Array]:
+        response_variables, active = self._unrestricted_response_variables(
+            features,
+            grad_a,
+            grad_b,
+        )
+        hf_feature_a, hf_feature_b = hf_spin_energy_density
+        pt2_feature = (
+            jnp.zeros_like(hf_projected)
+            if pt2_projected is None
+            else jnp.asarray(pt2_projected)
+        )
+        point_gradient_fn = jax.grad(
+            self._total_point_local_energy_from_unrestricted_variables,
+            argnums=1,
+        )
+
+        def point_gradients(
+            variables: Array,
+            hf_point: Array,
+            hf_point_a: Array,
+            hf_point_b: Array,
+            pt2_point: Array,
+        ) -> Array:
+            return point_gradient_fn(
+                params,
+                variables,
+                hf_point,
+                hf_point_a,
+                hf_point_b,
+                pt2_point=pt2_point,
+                response_hf_mode=response_hf_mode,
+                response_pt2_mode=response_pt2_mode,
+            )
+
+        gradients = jax.vmap(point_gradients)(
+            response_variables,
+            hf_projected,
+            hf_feature_a,
+            hf_feature_b,
+            pt2_feature,
+        )
+        gradients = jnp.nan_to_num(gradients, nan=0.0, posinf=0.0, neginf=0.0)
+        gradients = self._maybe_clip_response(gradients)
+        v_rho_a = jnp.where(active, gradients[:, 0], 0.0)
+        v_rho_b = jnp.where(active, gradients[:, 1], 0.0)
+        v_grad_a = jnp.where(active[:, None], gradients[:, 2:5], 0.0)
+        v_grad_b = jnp.where(active[:, None], gradients[:, 5:8], 0.0)
+        return v_rho_a, v_rho_b, v_grad_a, v_grad_b
 
     def _projected_semilocal_kernel(
         self,
@@ -1203,10 +1653,12 @@ class NeuralXCModel(
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected"
     response_hf_mode: Literal["approx", "strict"] = "strict"
     response_pt2_mode: Literal["approx", "strict"] = "approx"
+    strict_hfx_response_mode: Literal["dense", "low_memory"] = "dense"
     strict_feature_alignment: bool = True
     allow_experimental_jax_xc: bool = False
     density_floor: float = 1e-12
     response_density_floor: float | None = None
+    response_grid_chunk_size: int | None = 1024
     kernel_clip: float = 5.0
     response_kernel_clip: float | None = 5.0
     name: str = "neural_xc"

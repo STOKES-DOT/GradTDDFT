@@ -947,6 +947,7 @@ def _build_uks_inputs_from_cpu_backbone(
     libcint_grad_policy_mode: str,
     mol_kwargs: dict[str, Any],
 ) -> UKSIntegralInputs:
+    skip_cpu_eri = integral_backend_mode == "gpu"
     if isinstance(atom, MoleculeSpec):
         if not isinstance(basis, str):
             raise TypeError("Traceable libcint geometry currently supports named basis strings only.")
@@ -976,19 +977,23 @@ def _build_uks_inputs_from_cpu_backbone(
         )
         if precompile_eri:
             warnings.warn(
-                "precompile_eri is ignored for traceable libcint geometry.",
+                "precompile_eri is ignored for libcint UKS input construction.",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        eri = libcint_int2e_full_with_coords(
-            coords_bohr,
-            tuple(spec.symbols),
-            str(basis),
-            int(spec.charge),
-            int(spec.spin),
-            bool(cart),
-            int(verbose),
-            libcint_grad_policy_mode,
+        eri = (
+            jnp.zeros((0, 0, 0, 0), dtype=hcore.dtype)
+            if skip_cpu_eri
+            else libcint_int2e_full_with_coords(
+                coords_bohr,
+                tuple(spec.symbols),
+                str(basis),
+                int(spec.charge),
+                int(spec.spin),
+                bool(cart),
+                int(verbose),
+                libcint_grad_policy_mode,
+            )
         )
         nuclear_repulsion = spec.nuclear_repulsion
     else:
@@ -1023,17 +1028,19 @@ def _build_uks_inputs_from_cpu_backbone(
         )
         if precompile_eri:
             warnings.warn(
-                "precompile_eri is ignored when integral_backend='cpu'.",
+                "precompile_eri is ignored for libcint UKS input construction.",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        eri_name = libcint_intor_name(mol, "int2e")
-        eri = _cached_libcint_host_integral(
-            mol=mol,
-            integral_name=eri_name,
-            geometry_anchor=geometry_anchor,
-            geometry_grad_policy=libcint_grad_policy_mode,
-            loader=lambda: jnp.asarray(mol.intor(eri_name)),
+        eri = jnp.zeros((0, 0, 0, 0), dtype=hcore.dtype)
+        if not skip_cpu_eri:
+            eri_name = libcint_intor_name(mol, "int2e")
+            eri = _cached_libcint_host_integral(
+                mol=mol,
+                integral_name=eri_name,
+                geometry_anchor=geometry_anchor,
+                geometry_grad_policy=libcint_grad_policy_mode,
+                loader=lambda: jnp.asarray(mol.intor(eri_name)),
         )
         nuclear_repulsion = spec.nuclear_repulsion
 
@@ -1318,8 +1325,8 @@ def build_uks_integral_inputs(
         grid_ao_backend=grid_ao_backend,
         libcint_geometry_grad_policy=libcint_geometry_grad_policy,
     )
-    if integral_backend_mode == "cpu":
-        return _build_uks_inputs_from_cpu_backbone(
+    if integral_backend_mode in {"cpu", "gpu"}:
+        inputs = _build_uks_inputs_from_cpu_backbone(
             atom=atom,
             basis=basis,
             xc_spec_resolved=xc_spec_resolved,
@@ -1340,6 +1347,21 @@ def build_uks_integral_inputs(
             libcint_grad_policy_mode=libcint_grad_policy_mode,
             mol_kwargs=dict(mol_kwargs),
         )
+        if integral_backend_mode == "gpu":
+            inputs = replace(
+                inputs,
+                eri=_gpu4pyscf_eri_tensor(
+                    atom=atom,
+                    basis=basis,
+                    unit=unit,
+                    charge=charge,
+                    spin=spin,
+                    cart=bool(cart),
+                    verbose=verbose,
+                    mol_kwargs=dict(mol_kwargs),
+                ),
+            )
+        return inputs
     inputs = _build_uks_inputs_from_jax_backbone(
         atom=atom,
         basis=basis,
@@ -1360,20 +1382,6 @@ def build_uks_integral_inputs(
         grid_ao_backend_mode=grid_ao_backend_mode,
         _precompile_eri_kernels=_precompile_eri_kernels,
     )
-    if integral_backend_mode == "gpu":
-        inputs = replace(
-            inputs,
-            eri=_gpu4pyscf_eri_tensor(
-                atom=atom,
-                basis=basis,
-                unit=unit,
-                charge=charge,
-                spin=spin,
-                cart=bool(cart),
-                verbose=verbose,
-                mol_kwargs=dict(mol_kwargs),
-            ),
-        )
     return inputs
 
 

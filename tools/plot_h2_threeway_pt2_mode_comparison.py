@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import os
 from pathlib import Path
@@ -60,6 +61,12 @@ def parse_args() -> argparse.Namespace:
         default=Path(
             "outputs/h2_s1_tda_threeway_pt2_mode_compare/h2_equilibrium_s1_threeway_pt2_mode_compare.json"
         ),
+    )
+    parser.add_argument(
+        "--output-csv",
+        type=Path,
+        default=None,
+        help="CSV table containing the stick-spectrum values used by the plot.",
     )
     parser.add_argument(
         "--margin-ev",
@@ -171,6 +178,42 @@ def main() -> None:
     fig.tight_layout()
     fig.savefig(args.output_png, dpi=220, bbox_inches="tight")
     plt.close(fig)
+    output_csv = (
+        args.output_csv
+        if args.output_csv is not None
+        else args.output_png.with_suffix(".csv")
+    )
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    with output_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "series_key",
+                "label",
+                "r_angstrom",
+                "basis",
+                "training_mode",
+                "objective",
+                "excitation_ev",
+                "oscillator_strength",
+                "s1_gap_mae_ev",
+            ]
+        )
+        for _, key, _ in SERIES:
+            row = series[key]
+            writer.writerow(
+                [
+                    key,
+                    str(row["label"]),
+                    float(nopt2_spec["r_angstrom"]),
+                    str(nopt2_summary["basis"]),
+                    str(nopt2_summary["training_mode"]),
+                    str(nopt2_summary["objective"]),
+                    float(row["excitation_ev"]),
+                    float(row["oscillator_strength"]),
+                    float(row["s1_gap_mae_ev"]),
+                ]
+            )
 
     payload = {
         "r_angstrom": float(nopt2_spec["r_angstrom"]),
@@ -179,6 +222,7 @@ def main() -> None:
         "objective": str(nopt2_summary["objective"]),
         "series": series,
         "output_png": str(args.output_png),
+        "output_csv": str(output_csv),
     }
     args.output_json.write_text(
         json.dumps(payload, indent=2, sort_keys=True),

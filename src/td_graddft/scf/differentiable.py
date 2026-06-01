@@ -24,6 +24,7 @@ from .rks import (
     _run_scf_iterations_lax_core,
     _vxc_matrix_from_grid_potential,
 )
+from .uks import run_unrestricted_scf_scan
 
 
 def _replace_molecule(molecule: Any, **updates: Any) -> Any:
@@ -124,15 +125,6 @@ def _initial_density_matrix_spin(molecule: Any) -> Array:
         if cached_arr.ndim == 3 and cached_arr.shape[0] == 2:
             return cached_arr
     return _spin_resolved_density_matrix(molecule)
-
-
-def _build_density_spin(mo_coeff_spin: Array, mo_occ_spin: Array) -> Array:
-    return jax.vmap(_build_density_from_occ)(mo_coeff_spin, mo_occ_spin)
-
-
-def _spin_density_rms(density_new: Array, density_old: Array) -> Array:
-    diff = jnp.asarray(density_new) - jnp.asarray(density_old)
-    return jnp.sqrt(jnp.mean(diff**2))
 
 
 def _restricted_channel(molecule: Any) -> tuple[Array, Array]:
@@ -305,14 +297,18 @@ def _unrestricted_scf_xc_components(
     *,
     functional_dtype: Any,
 ) -> tuple[Array, Array, Array, Array, str, Array, Array, Array]:
-    resolved = _resolved_xc_object(params, functional, molecule)
-    contributions_getter = getattr(resolved, "unrestricted_scf_components", None)
-    if not callable(contributions_getter):
-        raise NotImplementedError(
-            "Unrestricted differentiable SCF currently requires the resolved XC object "
-            "to expose unrestricted_scf_components(molecule)."
-        )
-    components = contributions_getter(molecule)
+    direct = getattr(functional, "unrestricted_scf_potential_components_and_alpha", None)
+    if callable(direct):
+        components = direct(params, molecule)
+    else:
+        resolved = _resolved_xc_object(params, functional, molecule)
+        contributions_getter = getattr(resolved, "unrestricted_scf_components", None)
+        if not callable(contributions_getter):
+            raise NotImplementedError(
+                "Unrestricted differentiable SCF currently requires the resolved XC object "
+                "to expose unrestricted_scf_components(molecule)."
+            )
+        components = contributions_getter(molecule)
     if len(components) != 8:
         raise ValueError(
             "unrestricted_scf_components must return "
@@ -631,7 +627,26 @@ def _restricted_xc_fock_terms(
     weights: Array,
     functional_dtype: Any,
     vxc_clip: float,
-) -> tuple[Array, Array, Array]:
+) -> tuple[Array, Array, Array, Array]:
+    direct_terms_preference = getattr(functional, "prefer_direct_scf_fock_terms", False)
+    if callable(direct_terms_preference):
+        direct_terms_preference = direct_terms_preference()
+    direct_terms_callback = getattr(functional, "scf_xc_fock_terms", None)
+    if bool(direct_terms_preference) and callable(direct_terms_callback):
+        vxc_matrix, alpha, vhf_matrix, xc_energy = direct_terms_callback(
+            params,
+            molecule,
+            weights=weights,
+            functional_dtype=functional_dtype,
+            vxc_clip=vxc_clip,
+        )
+        return (
+            jnp.asarray(vxc_matrix, dtype=functional_dtype),
+            _clip_hybrid_alpha(jnp.asarray(alpha, dtype=functional_dtype)),
+            jnp.asarray(vhf_matrix, dtype=functional_dtype),
+            jnp.asarray(xc_energy, dtype=functional_dtype),
+        )
+
     energy_alpha_callback = getattr(functional, "scf_xc_energy_and_alpha_for_density", None)
     energy_callback = getattr(functional, "scf_xc_energy_for_density", None)
     if callable(energy_alpha_callback) or callable(energy_callback):
@@ -665,6 +680,7 @@ def _restricted_xc_fock_terms(
             jnp.asarray(result.vxc_matrix, dtype=functional_dtype),
             _clip_hybrid_alpha(jnp.asarray(alpha, dtype=functional_dtype)),
             jnp.asarray(result.extra_fock_matrix, dtype=functional_dtype),
+            jnp.asarray(result.xc_energy, dtype=functional_dtype),
         )
 
     vxc_rho, vxc_grad, vxc_tau, vxc_lapl, xc_kind, alpha, vhf_matrix = _scf_xc_components(
@@ -683,7 +699,12 @@ def _restricted_xc_fock_terms(
         v_lapl=vxc_lapl,
         xc_kind=xc_kind,
     )
-    return vxc_matrix, _clip_hybrid_alpha(alpha), vhf_matrix
+    energy_from_molecule = getattr(functional, "energy_from_molecule", None)
+    if callable(energy_from_molecule):
+        xc_energy = energy_from_molecule(params, molecule)
+    else:
+        xc_energy = jnp.asarray(0.0, dtype=functional_dtype)
+    return vxc_matrix, _clip_hybrid_alpha(alpha), vhf_matrix, jnp.asarray(xc_energy, dtype=functional_dtype)
 
 
 @dataclass(frozen=True)
@@ -695,6 +716,8 @@ class DifferentiableSCFConfig:
     max_cycle: int = 12
     damping: float = 0.25
     level_shift: float = 0.0
+    conv_tol_energy: float | None = None
+    convergence_metric: Literal["energy_and_residual", "energy"] = "energy_and_residual"
     occupation_tolerance: float = 1e-8
     conv_tol_density: float = 1e-8
     orthogonalization_eps: float = 1e-10
@@ -717,6 +740,17 @@ class DifferentiableSCFConfig:
                 f"gradient_mode must be one of {_valid_gradient_modes}, "
                 f"got {self.gradient_mode!r}."
             )
+        _valid_convergence_metrics = {"energy_and_residual", "energy"}
+        if self.convergence_metric not in _valid_convergence_metrics:
+            raise ValueError(
+                "convergence_metric must be one of "
+                f"{_valid_convergence_metrics}, got {self.convergence_metric!r}."
+            )
+
+    def energy_convergence_tolerance(self) -> float:
+        if self.conv_tol_energy is not None:
+            return float(self.conv_tol_energy)
+        return float(self.conv_tol_density) ** 2
 
 @dataclass(frozen=True)
 class DifferentiableSCFInfo:
@@ -792,24 +826,66 @@ class DifferentiableSCF:
         rms_history: Array,
     ) -> DifferentiableSCFInfo:
         max_idx = jnp.asarray(int(self.config.max_cycle) - 1, dtype=jnp.int32)
-        selected_idx = jnp.clip(jnp.asarray(cycles, dtype=jnp.int32) - 1, 0, max_idx)
-        valid_history = jnp.arange(int(self.config.max_cycle), dtype=jnp.int32) <= selected_idx
+        final_idx = jnp.clip(jnp.asarray(cycles, dtype=jnp.int32) - 1, 0, max_idx)
+        selected_idx = final_idx
+        valid_history = jnp.arange(int(self.config.max_cycle), dtype=jnp.int32) <= final_idx
         masked_history = jnp.where(
             valid_history,
             rms_history,
             jnp.asarray(jnp.inf, dtype=rms_history.dtype),
         )
         best_idx = jnp.argmin(masked_history)
+        first_converged_history = masked_history < jnp.asarray(
+            self.config.conv_tol_density,
+            dtype=rms_history.dtype,
+        )
+        first_converged_idx = jnp.argmax(first_converged_history.astype(jnp.int32))
+        has_density_converged = jnp.any(first_converged_history)
+        if self.config.iterate_selection == "best_rms":
+            selected_idx = best_idx
+        elif self.config.iterate_selection == "first_converged":
+            selected_idx = jnp.where(has_density_converged, first_converged_idx, best_idx)
         return DifferentiableSCFInfo(
             mode=mode,
             converged=converged,
             cycles=cycles,
-            final_rms_density=rms_history[selected_idx],
+            final_rms_density=rms_history[final_idx],
             rms_density_history=rms_history,
             selected_cycle=selected_idx + 1,
             selected_rms_density=rms_history[selected_idx],
             best_cycle=best_idx + 1,
             best_rms_density=rms_history[best_idx],
+        )
+
+    def _select_restricted_scf_iterate(
+        self,
+        *,
+        cycles: Array,
+        density_final: Array,
+        mo_coeff_final: Array,
+        mo_energy_final: Array,
+        density_history: Array,
+        mo_coeff_history: Array,
+        mo_energy_history: Array,
+        rms_history: Array,
+    ) -> tuple[Array, Array, Array]:
+        if self.config.iterate_selection == "final":
+            return density_final, mo_coeff_final, mo_energy_final
+        info = self._rks_loop_info(
+            "self_consistent",
+            converged=jnp.asarray(False),
+            cycles=cycles,
+            rms_history=rms_history,
+        )
+        selected_idx = jnp.clip(
+            jnp.asarray(info.selected_cycle, dtype=jnp.int32) - 1,
+            0,
+            int(self.config.max_cycle) - 1,
+        )
+        return (
+            density_history[selected_idx],
+            mo_coeff_history[selected_idx],
+            mo_energy_history[selected_idx],
         )
 
     def __call__(
@@ -942,7 +1018,7 @@ class DifferentiableSCF:
             vxc_clip=self.config.vxc_clip,
         )
 
-    def _restricted_fock_from_density(
+    def _restricted_energy_and_fock_from_density(
         self,
         ctx: _RestrictedSCFContext,
         params: PyTree,
@@ -957,7 +1033,7 @@ class DifferentiableSCF:
             density,
             with_k=with_k,
         )
-        vxc_matrix, alpha, vhf_matrix = self._restricted_xc_terms_from_density(
+        vxc_matrix, alpha, vhf_matrix, xc_energy = self._restricted_xc_terms_from_density(
             ctx,
             params,
             density,
@@ -965,7 +1041,39 @@ class DifferentiableSCF:
             mo_energy,
         )
         fock = ctx.h1e + j_mat - 0.5 * alpha * k_mat + vxc_matrix + vhf_matrix
-        return _safe_symmetric_matrix(fock), alpha, j_mat, k_mat
+        one_body = jnp.einsum("ij,ij->", density, ctx.h1e, precision=Precision.HIGHEST)
+        coulomb = 0.5 * jnp.einsum("ij,ij->", density, j_mat, precision=Precision.HIGHEST)
+        exact_exchange = -0.25 * alpha * jnp.einsum(
+            "ij,ij->",
+            density,
+            k_mat,
+            precision=Precision.HIGHEST,
+        )
+        total = one_body + coulomb + exact_exchange + xc_energy + jnp.asarray(
+            getattr(ctx.molecule, "nuclear_repulsion", 0.0),
+            dtype=ctx.h1e.dtype,
+        )
+        return total, xc_energy, _safe_symmetric_matrix(fock), alpha, j_mat, k_mat
+
+    def _restricted_fock_from_density(
+        self,
+        ctx: _RestrictedSCFContext,
+        params: PyTree,
+        density: Array,
+        mo_coeff: Array,
+        mo_energy: Array,
+        *,
+        with_k: bool = True,
+    ) -> tuple[Array, Array, Array, Array]:
+        _total, _xc_energy, fock, alpha, j_mat, k_mat = self._restricted_energy_and_fock_from_density(
+            ctx,
+            params,
+            density,
+            mo_coeff,
+            mo_energy,
+            with_k=with_k,
+        )
+        return fock, alpha, j_mat, k_mat
 
     def _restricted_scf_problem(
         self,
@@ -999,15 +1107,14 @@ class DifferentiableSCF:
             _j_last: Array | None,
             _k_last: Array | None,
         ) -> tuple[Array, Array, Array, Array, Array]:
-            fock, _alpha, j_mat, k_mat = self._restricted_fock_from_density(
+            total, xc_energy, fock, _alpha, j_mat, k_mat = self._restricted_energy_and_fock_from_density(
                 ctx,
                 xc_params,
                 density,
                 mo_coeff_ref,
                 mo_energy_ref,
             )
-            zero = jnp.asarray(0.0, dtype=ctx.h1e.dtype)
-            return zero, zero, fock, j_mat, k_mat
+            return total, xc_energy, fock, j_mat, k_mat
 
         _, _, fock0, j0, k0 = _energy_and_fock_builder(
             density0,
@@ -1038,13 +1145,36 @@ class DifferentiableSCF:
         mo_energy: Array,
         mo_occ_stacked: Array,
     ) -> Any:
-        return _replace_molecule(
-            molecule,
-            rdm1=jnp.stack([0.5 * density, 0.5 * density], axis=0),
-            mo_coeff=jnp.stack([mo_coeff, mo_coeff], axis=0),
-            mo_occ=mo_occ_stacked,
-            mo_energy=jnp.stack([mo_energy, mo_energy], axis=0),
-        )
+        updates = {
+            "rdm1": jnp.stack([0.5 * density, 0.5 * density], axis=0),
+            "mo_coeff": jnp.stack([mo_coeff, mo_coeff], axis=0),
+            "mo_occ": mo_occ_stacked,
+            "mo_energy": jnp.stack([mo_energy, mo_energy], axis=0),
+        }
+        if is_dataclass(molecule):
+            field_names = getattr(molecule, "__dataclass_fields__", {})
+            updates.update(
+                {
+                    name: None
+                    for name in (
+                        "eri_ovov",
+                        "eri_ovvo",
+                        "eri_oovv",
+                        "pt2_local",
+                    )
+                    if name in field_names
+                }
+            )
+        else:
+            updates.update(
+                {
+                    "eri_ovov": None,
+                    "eri_ovvo": None,
+                    "eri_oovv": None,
+                    "pt2_local": None,
+                }
+            )
+        return _replace_molecule(molecule, **updates)
 
     def _run_restricted_scf_core(
         self,
@@ -1062,6 +1192,7 @@ class DifferentiableSCF:
             damping=self.config.damping,
             level_shift=self.config.level_shift,
             orthogonalization_eps=self.config.orthogonalization_eps,
+            convergence_metric=self.config.convergence_metric,
         )
         return _run_scf_iterations_lax_core(
             h=problem.ctx.h1e,
@@ -1112,13 +1243,23 @@ class DifferentiableSCF:
             _fock_final,
             _j_final,
             _k_final,
-            _density_history,
-            _mo_coeff_history,
-            _mo_energy_history,
+            density_history,
+            mo_coeff_history,
+            mo_energy_history,
             rms_history,
         ) = self._run_restricted_scf_core(
             problem,
-            conv_tol=float(self.config.conv_tol_density) ** 2,
+            conv_tol=self.config.energy_convergence_tolerance(),
+        )
+        density_final, mo_coeff_final, mo_energy_final = self._select_restricted_scf_iterate(
+            cycles=cycles,
+            density_final=density_final,
+            mo_coeff_final=mo_coeff_final,
+            mo_energy_final=mo_energy_final,
+            density_history=density_history,
+            mo_coeff_history=mo_coeff_history,
+            mo_energy_history=mo_energy_history,
+            rms_history=rms_history,
         )
 
         molecule_final = self._restricted_molecule_from_total_density(
@@ -1142,7 +1283,6 @@ class DifferentiableSCF:
         xc_params: PyTree,
     ) -> tuple[Any, DifferentiableSCFInfo]:
         h1e, rep_tensor, ao, weights, overlap = _scf_problem_arrays(molecule)
-        x = _orthogonalizer(overlap, self.config.orthogonalization_eps)
 
         density_spin0 = _initial_density_matrix_spin(molecule)
         cached_initial_density = getattr(molecule, "scf_initial_density", None)
@@ -1164,11 +1304,11 @@ class DifferentiableSCF:
             )
         mo_occ_spin_fixed = jnp.asarray(mo_occ_spin_fixed, dtype=h1e.dtype)
 
-        def _raw_fock_from_density(
+        def fock_builder(
             density_spin: Array,
             mo_coeff_ref_spin: Array,
             mo_energy_ref_spin: Array,
-        ) -> tuple[Array, Any]:
+        ) -> tuple[Array, Array]:
             updates = dict(
                 rdm1=density_spin,
                 mo_coeff=mo_coeff_ref_spin,
@@ -1239,78 +1379,34 @@ class DifferentiableSCF:
                 ],
                 axis=0,
             )
-            return fock_spin, molecule_iter
+            return fock_spin, fock_spin
 
-        def body(
-            carry: tuple[Array, Array, Array, Array],
-            _,
-        ) -> tuple[tuple[Array, Array, Array, Array], tuple[Array, Array, Array, Array]]:
-            density_spin, mo_coeff_spin, mo_energy_spin, fock_spin = carry
-            mo_energy_spin_new, mo_coeff_spin_new = jax.vmap(
-                lambda fock_diag: _diagonalize_fock(
-                    fock_diag,
-                    x,
-                    eigenvalue_jitter=self.config.eigenvalue_jitter,
-                )
-            )(fock_spin)
-            mo_energy_spin_new = jnp.nan_to_num(
-                mo_energy_spin_new,
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
-            )
-            mo_coeff_spin_new = jnp.nan_to_num(
-                mo_coeff_spin_new,
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
-            )
-            density_spin_new = _build_density_spin(mo_coeff_spin_new, mo_occ_spin_fixed)
-            density_spin_new = jnp.nan_to_num(
-                density_spin_new,
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
-            )
-            density_spin_next = (
-                (1.0 - self.config.damping) * density_spin_new + self.config.damping * density_spin
-            )
-            fock_spin_next, _ = _raw_fock_from_density(
-                density_spin_next,
-                mo_coeff_spin_new,
-                mo_energy_spin_new,
-            )
-            rms_density = _spin_density_rms(density_spin_next, density_spin)
-            return (
-                density_spin_next,
-                mo_coeff_spin_new,
-                mo_energy_spin_new,
-                fock_spin_next,
-            ), (
-                density_spin_next,
-                mo_coeff_spin_new,
-                mo_energy_spin_new,
-                rms_density,
-            )
-
-        fock_spin0, _ = _raw_fock_from_density(
-            density_spin0,
-            mo_coeff_spin0,
-            mo_energy_spin0,
+        (
+            density_spin_final,
+            mo_coeff_spin_final,
+            mo_energy_spin_final,
+            _raw_fock_spin_final,
+            converged,
+            cycles,
+            rms_history,
+            selected_cycle,
+            best_cycle,
+            selected_rms,
+            best_rms,
+        ) = run_unrestricted_scf_scan(
+            fock_builder=fock_builder,
+            density_spin=density_spin0,
+            mo_coeff_spin=mo_coeff_spin0,
+            mo_occ_spin=mo_occ_spin_fixed,
+            mo_energy_spin=mo_energy_spin0,
+            overlap=overlap,
+            max_cycle=int(self.config.max_cycle),
+            damping=float(self.config.damping),
+            conv_tol_density=float(self.config.conv_tol_density),
+            orthogonalization_eps=float(self.config.orthogonalization_eps),
+            eigenvalue_jitter=float(self.config.eigenvalue_jitter),
+            iterate_selection=str(self.config.iterate_selection),
         )
-        carry0 = (
-            density_spin0,
-            mo_coeff_spin0,
-            mo_energy_spin0,
-            fock_spin0,
-        )
-        (density_spin_final, mo_coeff_spin_final, mo_energy_spin_final, _), (_, _, _, rms_history) = jax.lax.scan(
-            body,
-            carry0,
-            xs=None,
-            length=self.config.max_cycle,
-        )
-
         molecule_final = _replace_molecule(
             molecule,
             rdm1=density_spin_final,
@@ -1318,7 +1414,17 @@ class DifferentiableSCF:
             mo_occ=mo_occ_spin_fixed,
             mo_energy=mo_energy_spin_final,
         )
-        return molecule_final, self._fixed_cycle_info("self_consistent", rms_history)
+        return molecule_final, DifferentiableSCFInfo(
+            mode="self_consistent",
+            converged=converged,
+            cycles=cycles,
+            final_rms_density=rms_history[-1],
+            rms_density_history=rms_history,
+            selected_cycle=selected_cycle,
+            selected_rms_density=selected_rms,
+            best_cycle=best_cycle,
+            best_rms_density=best_rms,
+        )
 
     def _full_scf_implicit_commutator_unrestricted(
         self,
@@ -1326,8 +1432,12 @@ class DifferentiableSCF:
         xc_functional: Any,
         xc_params: PyTree,
     ) -> tuple[Any, DifferentiableSCFInfo]:
-        forward_molecule = molecule
-        info = self._implicit_input_state_info(_spin_resolved_density_matrix(molecule))
+        forward_params = jax.tree_util.tree_map(jax.lax.stop_gradient, xc_params)
+        forward_molecule, forward_info = self._full_scf_unrestricted(
+            molecule,
+            xc_functional,
+            forward_params,
+        )
 
         density_star_spin = _spin_resolved_density_matrix(forward_molecule)
         density_star_spin = jnp.nan_to_num(
@@ -1340,24 +1450,72 @@ class DifferentiableSCF:
             forward_molecule
         )
 
-        h1e, rep_tensor, ao, weights, overlap = _scf_problem_arrays(molecule)
+        h1e, rep_tensor, _ao, weights, overlap = _scf_problem_arrays(molecule)
+        fixed_point_args = None
+        if _is_traceable_pytree(molecule):
+            fixed_point_args = (
+                molecule,
+                mo_coeff_spin_ref,
+                mo_occ_spin_fixed,
+                mo_energy_spin_ref,
+            )
+
+        def _unrestricted_args(
+            args: tuple[Any, ...] | None,
+        ) -> tuple[Any, Array, Array, Array, Array, Array, Array, Array]:
+            if args is None:
+                return (
+                    molecule,
+                    h1e,
+                    rep_tensor,
+                    weights,
+                    overlap,
+                    mo_coeff_spin_ref,
+                    mo_occ_spin_fixed,
+                    mo_energy_spin_ref,
+                )
+            molecule_arg, coeff_ref_arg, occ_fixed_arg, energy_ref_arg = args
+            h1e_arg, rep_tensor_arg, _ao_arg, weights_arg, overlap_arg = _scf_problem_arrays(
+                molecule_arg
+            )
+            return (
+                molecule_arg,
+                h1e_arg,
+                rep_tensor_arg,
+                weights_arg,
+                overlap_arg,
+                coeff_ref_arg,
+                occ_fixed_arg,
+                energy_ref_arg,
+            )
 
         def _raw_fock_from_density(
             density_spin: Array,
             params_local: PyTree,
+            args: tuple[Any, ...] | None = fixed_point_args,
         ) -> Array:
+            (
+                molecule_base,
+                h1e_local,
+                rep_tensor_local,
+                weights_local,
+                _overlap_local,
+                mo_coeff_ref_local,
+                mo_occ_fixed_local,
+                mo_energy_ref_local,
+            ) = _unrestricted_args(args)
             density_spin = jnp.nan_to_num(density_spin, nan=0.0, posinf=0.0, neginf=0.0)
             updates = dict(
                 rdm1=density_spin,
-                mo_coeff=mo_coeff_spin_ref,
-                mo_occ=mo_occ_spin_fixed,
-                mo_energy=mo_energy_spin_ref,
+                mo_coeff=mo_coeff_ref_local,
+                mo_occ=mo_occ_fixed_local,
+                mo_energy=mo_energy_ref_local,
             )
-            molecule_iter = _replace_molecule(molecule, **updates)
+            molecule_iter = _replace_molecule(molecule_base, **updates)
             density_total = density_spin.sum(axis=0)
-            j_mat, _ = _coulomb_exchange_matrices(rep_tensor, density_total)
-            _, k_alpha = _coulomb_exchange_matrices(rep_tensor, density_spin[0])
-            _, k_beta = _coulomb_exchange_matrices(rep_tensor, density_spin[1])
+            j_mat, _ = _coulomb_exchange_matrices(rep_tensor_local, density_total)
+            _, k_alpha = _coulomb_exchange_matrices(rep_tensor_local, density_spin[0])
+            _, k_beta = _coulomb_exchange_matrices(rep_tensor_local, density_spin[1])
             (
                 vxc_rho_a,
                 vxc_rho_b,
@@ -1371,7 +1529,7 @@ class DifferentiableSCF:
                 params_local,
                 xc_functional,
                 molecule_iter,
-                functional_dtype=h1e.dtype,
+                functional_dtype=h1e_local.dtype,
             )
             vxc_rho_a, vxc_grad_a = _clip_grid_potential_components(
                 vxc_rho_a,
@@ -1388,7 +1546,7 @@ class DifferentiableSCF:
             zero_aux_b = jnp.zeros_like(vxc_rho_b)
             vxc_matrix_a = _build_vxc_matrix_from_components(
                 molecule=molecule_iter,
-                weights=weights,
+                weights=weights_local,
                 v_rho=vxc_rho_a,
                 v_grad=vxc_grad_a,
                 v_tau=zero_aux_a,
@@ -1397,7 +1555,7 @@ class DifferentiableSCF:
             )
             vxc_matrix_b = _build_vxc_matrix_from_components(
                 molecule=molecule_iter,
-                weights=weights,
+                weights=weights_local,
                 v_rho=vxc_rho_b,
                 v_grad=vxc_grad_b,
                 v_tau=zero_aux_b,
@@ -1405,8 +1563,8 @@ class DifferentiableSCF:
                 xc_kind=xc_kind,
             )
             alpha = _clip_hybrid_alpha(alpha)
-            fock_alpha = h1e + j_mat - alpha * k_alpha + extra_fock_a + vxc_matrix_a
-            fock_beta = h1e + j_mat - alpha * k_beta + extra_fock_b + vxc_matrix_b
+            fock_alpha = h1e_local + j_mat - alpha * k_alpha + extra_fock_a + vxc_matrix_a
+            fock_beta = h1e_local + j_mat - alpha * k_beta + extra_fock_b + vxc_matrix_b
             fock_spin = jnp.stack(
                 [
                     0.5
@@ -1427,15 +1585,19 @@ class DifferentiableSCF:
         def _residual(
             density_spin: Array,
             params_local: PyTree,
+            args: tuple[Any, ...] | None = fixed_point_args,
         ) -> Array:
+            _molecule_base, _h1e_local, _rep_tensor_local, _weights_local, overlap_local, *_ = (
+                _unrestricted_args(args)
+            )
             density_spin = jnp.nan_to_num(density_spin, nan=0.0, posinf=0.0, neginf=0.0)
-            fock_spin = _raw_fock_from_density(density_spin, params_local)
+            fock_spin = _raw_fock_from_density(density_spin, params_local, args)
             residual_spin = jnp.stack(
                 [
-                    fock_spin[0] @ density_spin[0] @ overlap
-                    - overlap @ density_spin[0] @ fock_spin[0],
-                    fock_spin[1] @ density_spin[1] @ overlap
-                    - overlap @ density_spin[1] @ fock_spin[1],
+                    fock_spin[0] @ density_spin[0] @ overlap_local
+                    - overlap_local @ density_spin[0] @ fock_spin[0],
+                    fock_spin[1] @ density_spin[1] @ overlap_local
+                    - overlap_local @ density_spin[1] @ fock_spin[1],
                 ],
                 axis=0,
             )
@@ -1461,23 +1623,32 @@ class DifferentiableSCF:
             clip=float(self.config.implicit_diff_clip),
         )
 
-        def _fixed_point_from_residual(
-            density_spin: Array,
-            params_local: PyTree,
-        ) -> Array:
-            return density_spin + _residual(density_spin, params_local)
+        if fixed_point_args is None:
+            def _fixed_point_from_residual(
+                density_spin: Array,
+                params_local: PyTree,
+            ) -> Array:
+                return density_spin + _residual(density_spin, params_local)
+        else:
+            def _fixed_point_from_residual(
+                density_spin: Array,
+                params_local: PyTree,
+                args: tuple[Any, ...],
+            ) -> Array:
+                return density_spin + _residual(density_spin, params_local, args)
 
         density_spin_implicit = implicit_fixed_point_solution(
             xc_params,
             solution=density_star_spin,
             fixed_point=_fixed_point_from_residual,
+            fixed_point_args=fixed_point_args,
             config=implicit_cfg,
         )
         molecule_final = _replace_molecule(
             forward_molecule,
             rdm1=density_spin_implicit,
         )
-        return molecule_final, info
+        return molecule_final, replace(forward_info, mode="self_consistent_implicit")
 
     def _full_scf_implicit_fixed_point(
         self,
@@ -1498,15 +1669,25 @@ class DifferentiableSCF:
             _fock_final,
             _j_final,
             _k_final,
-            _density_history,
-            _mo_coeff_history,
-            _mo_energy_history,
+            density_history,
+            mo_coeff_history,
+            mo_energy_history,
             rms_history,
         ) = self._run_restricted_scf_core(
             problem,
-            conv_tol=float(self.config.conv_tol_density) ** 2,
+            conv_tol=self.config.energy_convergence_tolerance(),
         )
         ctx = problem.ctx
+        density_star, mo_coeff_star, mo_energy_star = self._select_restricted_scf_iterate(
+            cycles=cycles,
+            density_final=density_star,
+            mo_coeff_final=mo_coeff_star,
+            mo_energy_final=mo_energy_star,
+            density_history=density_history,
+            mo_coeff_history=mo_coeff_history,
+            mo_energy_history=mo_energy_history,
+            rms_history=rms_history,
+        )
         density_star = jax.lax.stop_gradient(
             jnp.nan_to_num(density_star, nan=0.0, posinf=0.0, neginf=0.0)
         )

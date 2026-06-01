@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import copy
+from dataclasses import dataclass, fields, is_dataclass, replace
 from functools import partial
 from typing import Any, Callable
 
@@ -23,6 +24,30 @@ from ._utils import (
     _restricted_orbital_data,
 )
 from .types import TDDFTMatrices
+
+
+_RESTRICTED_RESPONSE_ERI_ATTRS = ("eri_ovov", "eri_ovvo", "eri_oovv")
+
+
+def _replace_response_eri_cache(molecule: Any, **updates: Any) -> Any:
+    if is_dataclass(molecule):
+        field_names = {field.name for field in fields(molecule)}
+        field_updates = {
+            key: value for key, value in updates.items() if key in field_names
+        }
+        extra_updates = {
+            key: value for key, value in updates.items() if key not in field_names
+        }
+        molecule_out = replace(molecule, **field_updates) if field_updates else copy.copy(molecule)
+        if extra_updates:
+            molecule_out = copy.copy(molecule_out)
+            for key, value in extra_updates.items():
+                setattr(molecule_out, key, value)
+        return molecule_out
+    molecule_out = copy.copy(molecule)
+    for key, value in updates.items():
+        setattr(molecule_out, key, value)
+    return molecule_out
 
 
 @dataclass(frozen=True)
@@ -457,8 +482,33 @@ def build_restricted_response_matrices(
     exchange_a = jnp.zeros_like(hartree_a)
     exchange_b = jnp.zeros_like(hartree_b)
     if resolved_xc is not None:
+        strict_tda_xc_matrix = getattr(resolved_xc, "strict_tda_xc_matrix", None)
         grid_response_tensor = getattr(resolved_xc, "grid_response_tensor", None)
-        if callable(grid_response_tensor):
+        strict_tda_matrix_values = None
+        if callable(strict_tda_xc_matrix):
+            try:
+                strict_tda_matrix_values = strict_tda_xc_matrix(
+                    molecule,
+                    occupation_tolerance=occupation_tolerance,
+                )
+            except AttributeError as exc:
+                if "does not expose" not in str(exc):
+                    raise
+                strict_tda_matrix_values = None
+        if strict_tda_matrix_values is not None:
+            strict_tda_matrix = _as_nonlocal_response_matrix(
+                strict_tda_matrix_values,
+                nocc=nocc,
+                nvir=nvir,
+                label="Strict TDA XC matrix",
+            )
+            xc_contribution = xc_contribution + strict_tda_matrix.reshape(
+                nocc,
+                nvir,
+                nocc,
+                nvir,
+            )
+        elif callable(grid_response_tensor):
             strict_tensor = _as_grid_response_tensor(
                 grid_response_tensor(molecule),
                 ngrids=int(weights.shape[0]),
@@ -696,6 +746,42 @@ def _restricted_eri_slices(
     return eri_ovov, eri_ovvo, eri_oovv
 
 
+def refresh_restricted_response_eri_slices(
+    molecule: Any,
+    *,
+    occupation_tolerance: float = 1e-8,
+    include_oovv: bool = True,
+) -> Any:
+    """Return a molecule with MO-basis restricted response ERI slices cached."""
+
+    orbo, orbv, _, _ = _restricted_orbital_data(
+        molecule,
+        occupation_tolerance=occupation_tolerance,
+    )
+    rep_tensor_obj = getattr(molecule, "rep_tensor", None)
+    rep_tensor = None
+    if rep_tensor_obj is not None and int(jnp.asarray(rep_tensor_obj).size) > 0:
+        rep_tensor = jnp.asarray(rep_tensor_obj)
+    uncached = _replace_response_eri_cache(
+        molecule,
+        **{name: None for name in _RESTRICTED_RESPONSE_ERI_ATTRS},
+    )
+    eri_ovov, eri_ovvo, eri_oovv = _restricted_eri_slices(
+        uncached,
+        rep_tensor,
+        orbo,
+        orbv,
+        need_ovvo=True,
+        include_oovv=include_oovv,
+    )
+    return _replace_response_eri_cache(
+        molecule,
+        eri_ovov=eri_ovov,
+        eri_ovvo=eri_ovvo,
+        eri_oovv=eri_oovv,
+    )
+
+
 def build_restricted_tda_matrix(
     molecule: Any,
     xc_functional: Any | None = None,
@@ -762,8 +848,28 @@ def build_restricted_tda_matrix(
             )
 
     if resolved_xc is not None:
+        strict_tda_xc_matrix = getattr(resolved_xc, "strict_tda_xc_matrix", None)
         grid_response_tensor = getattr(resolved_xc, "grid_response_tensor", None)
-        if callable(grid_response_tensor):
+        strict_tda_matrix_values = None
+        if callable(strict_tda_xc_matrix):
+            try:
+                strict_tda_matrix_values = strict_tda_xc_matrix(
+                    molecule,
+                    occupation_tolerance=occupation_tolerance,
+                )
+            except AttributeError as exc:
+                if "does not expose" not in str(exc):
+                    raise
+                strict_tda_matrix_values = None
+        if strict_tda_matrix_values is not None:
+            strict_tda_matrix = _as_nonlocal_response_matrix(
+                strict_tda_matrix_values,
+                nocc=nocc,
+                nvir=nvir,
+                label="Strict TDA XC matrix",
+            )
+            flat_a = flat_a + strict_tda_matrix
+        elif callable(grid_response_tensor):
             strict_tensor = _as_grid_response_tensor(
                 grid_response_tensor(molecule),
                 ngrids=int(weights.shape[0]),
@@ -1271,7 +1377,20 @@ def build_restricted_a_minus_b_matrix(
         exchange_a_raw = -jnp.transpose(data.eri_oovv, (0, 2, 1, 3))
         exchange_b_raw = -jnp.transpose(data.eri_ovvo, (0, 2, 3, 1))
         exchange_diff = alpha * (exchange_a_raw - exchange_b_raw)
-    return (diagonal + hartree_diff + exchange_diff).reshape(dim, dim), delta_eps
+    a_minus_b = (diagonal + hartree_diff + exchange_diff).reshape(dim, dim)
+
+    resolved_xc = _resolve_xc_functional(molecule, xc_functional, xc_params)
+    nonlocal_a_matrix, nonlocal_b_matrix = _resolve_nonlocal_response_matrix_pair(
+        resolved_xc,
+        molecule,
+        delta_eps=delta_eps,
+        occupation_tolerance=occupation_tolerance,
+    )
+    if nonlocal_a_matrix is not None:
+        a_minus_b = a_minus_b + nonlocal_a_matrix
+    if nonlocal_b_matrix is not None:
+        a_minus_b = a_minus_b - nonlocal_b_matrix
+    return a_minus_b, delta_eps
 
 
 def gen_tda_vind(

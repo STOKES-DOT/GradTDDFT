@@ -131,6 +131,7 @@ def write_training_curve_csv(path: Path, training: TrainingRun) -> None:
                 "step",
                 "loss",
                 "density_penalty",
+                "density_matrix_penalty",
                 "stationarity_penalty",
                 "coefficient_prior_penalty",
                 "grad_norm",
@@ -142,6 +143,7 @@ def write_training_curve_csv(path: Path, training: TrainingRun) -> None:
         for step, (
             loss,
             density_penalty,
+            density_matrix_penalty,
             stationarity_penalty,
             coefficient_prior_penalty,
             grad_norm,
@@ -152,6 +154,11 @@ def write_training_curve_csv(path: Path, training: TrainingRun) -> None:
             zip(
                 training.loss_history,
                 training.density_penalty_history,
+                getattr(
+                    training,
+                    "density_matrix_penalty_history",
+                    [0.0] * len(training.loss_history),
+                ),
                 training.stationarity_penalty_history,
                 training.coefficient_prior_penalty_history,
                 training.grad_norm_history,
@@ -166,6 +173,7 @@ def write_training_curve_csv(path: Path, training: TrainingRun) -> None:
                     step,
                     loss,
                     density_penalty,
+                    density_matrix_penalty,
                     stationarity_penalty,
                     coefficient_prior_penalty,
                     grad_norm,
@@ -181,6 +189,14 @@ def plot_training_curves(path: Path, training: TrainingRun, *, title: str) -> No
     steps = np.arange(len(training.loss_history))
     loss_values = np.asarray(training.loss_history, dtype=float)
     density_penalty_values = np.asarray(training.density_penalty_history, dtype=float)
+    density_matrix_penalty_values = np.asarray(
+        getattr(
+            training,
+            "density_matrix_penalty_history",
+            [0.0] * len(training.loss_history),
+        ),
+        dtype=float,
+    )
     stationarity_penalty_values = np.asarray(training.stationarity_penalty_history, dtype=float)
     coefficient_prior_penalty_values = np.asarray(
         training.coefficient_prior_penalty_history,
@@ -190,6 +206,7 @@ def plot_training_curves(path: Path, training: TrainingRun, *, title: str) -> No
     # Keep the default report compact when only the main loss is active.
     if not (
         np.any(density_penalty_values > 0.0)
+        or np.any(density_matrix_penalty_values > 0.0)
         or np.any(stationarity_penalty_values > 0.0)
         or np.any(coefficient_prior_penalty_values > 0.0)
     ):
@@ -216,10 +233,10 @@ def plot_training_curves(path: Path, training: TrainingRun, *, title: str) -> No
     axes[0].grid(alpha=0.2)
 
     if np.any(density_penalty_values > 0.0):
-        axes[1].plot(steps, np.maximum(density_penalty_values, 1e-16), lw=1.8)
+        axes[1].plot(steps, np.maximum(density_penalty_values, 1e-16), lw=1.8, label="grid")
         axes[1].set_yscale("log")
     else:
-        axes[1].plot(steps, density_penalty_values, lw=1.8)
+        axes[1].plot(steps, density_penalty_values, lw=1.8, label="grid")
         axes[1].set_yscale("linear")
         axes[1].text(
             0.03,
@@ -230,8 +247,17 @@ def plot_training_curves(path: Path, training: TrainingRun, *, title: str) -> No
             ha="left",
             va="top",
         )
+    if np.any(density_matrix_penalty_values > 0.0):
+        axes[1].plot(
+            steps,
+            np.maximum(density_matrix_penalty_values, 1e-16),
+            lw=1.8,
+            label="AO DM",
+        )
+        axes[1].set_yscale("log")
+        axes[1].legend(frameon=False)
     axes[1].set_xlabel("Step")
-    axes[1].set_ylabel("Density Penalty")
+    axes[1].set_ylabel("Penalty")
     axes[1].set_title("Density Matching")
     axes[1].grid(alpha=0.2)
 
