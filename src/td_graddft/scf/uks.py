@@ -392,16 +392,6 @@ def _molecule_like_state_for_bound_xc(
     )
 
 
-def _density_rms(density_a_new: Array, density_a_old: Array, density_b_new: Array, density_b_old: Array) -> Array:
-    return jnp.sqrt(
-        0.5
-        * (
-            jnp.mean((density_a_new - density_a_old) ** 2)
-            + jnp.mean((density_b_new - density_b_old) ** 2)
-        )
-    )
-
-
 def _build_density_spin(mo_coeff_spin: Array, mo_occ_spin: Array) -> Array:
     return jax.vmap(_build_density_from_occ)(mo_coeff_spin, mo_occ_spin)
 
