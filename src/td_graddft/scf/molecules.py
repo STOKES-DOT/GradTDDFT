@@ -23,6 +23,7 @@ class QuadratureGrid:
         "scf_converged",
         "runtime_scf_backend",
         "runtime_scf_options",
+        "hfx_nu_api",
     )
 )
 @dataclass(frozen=True)
@@ -50,6 +51,7 @@ class RestrictedMolecule:
     hfx_omega_values: jnp.ndarray | None = None
     hfx_local: jnp.ndarray | None = None
     hfx_nu: jnp.ndarray | None = None
+    hfx_nu_api: Any | None = None
     pt2_local: jnp.ndarray | None = None
     scf_initial_density: jnp.ndarray | None = None
     df_factors: jnp.ndarray | None = None
@@ -94,6 +96,7 @@ class UnrestrictedMolecule:
     hfx_omega_values: jnp.ndarray | None = None
     hfx_local: jnp.ndarray | None = None
     hfx_nu: jnp.ndarray | None = None
+    pt2_local: jnp.ndarray | None = None
     scf_initial_density: jnp.ndarray | None = None
     runtime_scf_backend: str | None = None
     runtime_scf_options: Any | None = None

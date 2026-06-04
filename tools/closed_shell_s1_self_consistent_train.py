@@ -7,7 +7,7 @@ import hashlib
 import json
 import os
 import time
-from dataclasses import dataclass, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -38,6 +38,7 @@ from td_graddft.neural_xc import (
     DEFAULT_NETWORK_HIDDEN_DIMS,
 )
 from td_graddft.data.reference import restricted_reference_from_pyscf
+from td_graddft.neural_xc.inputs import ChunkedHFXNu
 from td_graddft.spectra import HARTREE_TO_EV
 from td_graddft.training import (
     ExcitedStateDatum,
@@ -179,8 +180,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--scf-implicit-diff-restart", type=int, default=12)
     p.add_argument("--scf-require-convergence", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--grad-clip-norm", type=float, default=None)
-    p.add_argument("--scf-stop-gradient-on-unconverged", action=argparse.BooleanOptionalAction, default=False)
-    p.add_argument("--scf-stop-gradient-rms-threshold", type=float, default=None)
     p.add_argument("--scf-warm-start", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--scf-warm-start-update-interval", type=int, default=1)
     p.add_argument(
@@ -199,6 +198,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Average one-molecule gradients instead of tracing the whole dataset as one batch.",
+    )
+    p.add_argument(
+        "--stream-update-mode",
+        choices=("accumulate", "per_molecule"),
+        default="accumulate",
+        help=(
+            "Optimizer update policy for --stream-train. 'accumulate' averages "
+            "one-molecule gradients over the training split before one update; "
+            "'per_molecule' applies one optimizer update per molecule, i.e. "
+            "traditional batch_size=1 while still evaluating per epoch."
+        ),
     )
     p.add_argument(
         "--host-reference-cache",
@@ -263,6 +273,13 @@ def _normalize_scf_gradient_mode(value: str) -> str:
     if mode in {"expl", "unrolled"}:
         return "expl"
     raise ValueError(f"Unsupported SCF gradient mode {value!r}.")
+
+
+def _ground_state_training_config(**kwargs: Any) -> GroundStateTrainingConfig:
+    allowed = {field.name for field in fields(GroundStateTrainingConfig)}
+    return GroundStateTrainingConfig(
+        **{name: value for name, value in kwargs.items() if name in allowed}
+    )
 
 
 def _with_scf_initial_density(molecule: Any, density: Any) -> Any:
@@ -350,6 +367,27 @@ def _use_host_reference_cache(args: argparse.Namespace) -> bool:
     return bool(args.stream_train)
 
 
+def _lr_transition_steps(args: argparse.Namespace, *, train_size: int) -> int:
+    transition_steps = int(args.lr_decay_every)
+    if (
+        bool(args.stream_train)
+        and str(getattr(args, "stream_update_mode", "accumulate")) == "per_molecule"
+    ):
+        transition_steps *= max(1, int(train_size))
+    return transition_steps
+
+
+def _stream_lr_schedule_index(
+    args: argparse.Namespace,
+    *,
+    step: int,
+    train_size: int,
+) -> int:
+    if str(getattr(args, "stream_update_mode", "accumulate")) == "per_molecule":
+        return max(0, int(step) - 1) * max(1, int(train_size))
+    return max(0, int(step) - 1)
+
+
 def _host_cache_pytree(tree: Any) -> Any:
     return jax.device_get(tree)
 
@@ -385,6 +423,53 @@ def _reference_cache_key(
     return f"closed_shell_s1/v1/{digest[:2]}/{digest}"
 
 
+def _build_pyscf_mol_from_row(row: ReferenceRow) -> Any:
+    return gto.M(
+        atom=row.atom.replace(";", "\n"),
+        unit=row.unit,
+        basis=row.basis,
+        charge=row.charge,
+        spin=row.spin,
+        cart=True,
+        verbose=0,
+    )
+
+
+def _maybe_reattach_chunked_hfx_nu_api(
+    row: ReferenceRow,
+    molecule: Any,
+    *,
+    input_feature_mode: str,
+    logger: RunLogger,
+) -> Any:
+    if str(input_feature_mode) != "canonical":
+        return molecule
+    if getattr(molecule, "hfx_nu_api", None) is not None:
+        return molecule
+    mol = _build_pyscf_mol_from_row(row)
+    if int(getattr(mol, "natm", 0)) <= 3:
+        return molecule
+    omega_values = getattr(molecule, "hfx_omega_values", None)
+    coords = getattr(getattr(molecule, "grid", None), "coords", None)
+    ao = getattr(molecule, "ao", None)
+    if omega_values is None or coords is None or ao is None:
+        return molecule
+    omega_tuple = tuple(
+        float(value)
+        for value in np.asarray(jax.device_get(omega_values)).reshape(-1)
+    )
+    if not omega_tuple:
+        return molecule
+    api = ChunkedHFXNu.from_pyscf_mol(
+        mol,
+        np.asarray(jax.device_get(coords)),
+        omega_values=omega_tuple,
+        nao=int(np.asarray(jax.device_get(ao)).shape[1]),
+    )
+    logger.log(f"[ref_cache] reattached chunked hfx_nu_api for {row.system}")
+    return replace(molecule, hfx_nu=None, hfx_nu_api=api)
+
+
 def _load_reference_from_cache(
     row: ReferenceRow,
     *,
@@ -406,6 +491,12 @@ def _load_reference_from_cache(
             molecule = read_restricted_molecule(
                 handle[key]["molecule"],
                 array_backend="host" if host_reference_cache else "jax",
+            )
+            molecule = _maybe_reattach_chunked_hfx_nu_api(
+                row,
+                molecule,
+                input_feature_mode=input_feature_mode,
+                logger=logger,
             )
     except Exception as exc:
         logger.log(f"[ref_cache] miss/error {row.system}: {exc!r}; rebuilding")
@@ -503,15 +594,7 @@ def _run_rks_reference(
     scf_conv_tol: float,
     scf_max_cycle: int,
 ) -> Any:
-    mol = gto.M(
-        atom=row.atom.replace(";", "\n"),
-        unit=row.unit,
-        basis=row.basis,
-        charge=row.charge,
-        spin=row.spin,
-        cart=True,
-        verbose=0,
-    )
+    mol = _build_pyscf_mol_from_row(row)
     attempts = (
         dict(init_guess="minao", damping=0.15, level_shift=0.0, max_cycle=scf_max_cycle, use_newton=False),
         dict(init_guess="atom", damping=0.3, level_shift=0.5, max_cycle=max(scf_max_cycle, 180), use_newton=False),
@@ -575,6 +658,7 @@ def _prepare_references(
             compute_local_hfx_features=(input_feature_mode == "canonical"),
             compute_local_hfx_aux=(input_feature_mode == "canonical"),
             compute_local_pt2_features=bool(args.include_pt2_channel),
+            array_backend="host" if host_reference_cache else "jax",
         )
         if host_reference_cache:
             reference = _host_cache_pytree(reference)
@@ -804,7 +888,14 @@ def _train_streaming(
     if bool(args.jit_eval):
         eval_kernel = jax.jit(eval_kernel)
 
-    logger.log("[train_init] streaming mode: one molecule per JIT call; averaging grads")
+    stream_update_mode = str(getattr(args, "stream_update_mode", "accumulate"))
+    if stream_update_mode == "per_molecule":
+        logger.log(
+            "[train_init] streaming mode: one molecule per JIT call; "
+            "applying per-molecule optimizer updates"
+        )
+    else:
+        logger.log("[train_init] streaming mode: one molecule per JIT call; averaging grads")
     if bool(args.skip_initial_eval):
         initial_train_loss = float("nan")
         initial_train_metrics = {"s1_mae": float("nan"), "s1_mse": float("nan")}
@@ -848,47 +939,74 @@ def _train_streaming(
         "[train] "
         f"steps={int(args.steps)} mode={str(args.training_mode)} "
         f"objective=s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'} "
-        f"train_step_mode=stream_single_molecule train_size={len(train_dataset)} "
+        f"train_step_mode=stream_single_molecule update_mode={stream_update_mode} "
+        f"train_size={len(train_dataset)} "
         f"val_size={len(val_dataset)}"
     )
 
     t0 = time.perf_counter()
     for step in range(1, int(args.steps) + 1):
-        params_for_loss = state.params
-        grad_sum = None
         losses: list[float] = []
         s1_maes: list[float] = []
         grad_norms: list[float] = []
         grad_abs_maxes: list[float] = []
         nonfinite_fracs: list[float] = []
-        for datum in train_dataset:
-            loss, metrics, grads = loss_and_grad_kernel(params_for_loss, datum)
-            losses.append(float(loss))
-            s1_maes.append(_metric_mean(metrics, "s1_mae", 0.0))
-            grad_norms.append(_metric_scalar(metrics, "grad_norm"))
-            grad_abs_maxes.append(_metric_scalar(metrics, "grad_abs_max"))
-            nonfinite_fracs.append(_metric_scalar(metrics, "nonfinite_grad_fraction", 0.0))
-            grad_sum = _tree_add(grad_sum, grads)
-        grads_avg = _tree_scale(grad_sum, 1.0 / max(1, len(train_dataset)))
+        update_norms: list[float] = []
+        if stream_update_mode == "per_molecule":
+            for datum in train_dataset:
+                loss, metrics, grads = loss_and_grad_kernel(state.params, datum)
+                losses.append(float(loss))
+                s1_maes.append(_metric_mean(metrics, "s1_mae", 0.0))
+                grad_norms.append(_metric_scalar(metrics, "grad_norm"))
+                grad_abs_maxes.append(_metric_scalar(metrics, "grad_abs_max"))
+                nonfinite_fracs.append(_metric_scalar(metrics, "nonfinite_grad_fraction", 0.0))
+                prev_state = state
+                state = state.apply_gradients(grads=grads)
+                param_delta = jax.tree_util.tree_map(
+                    lambda new, old: new - old,
+                    state.params,
+                    prev_state.params,
+                )
+                if not _tree_all_finite(state.params):
+                    state = prev_state
+                    update_norms.append(0.0)
+                    logger.log(
+                        f"[train] non-finite params at step {step}; "
+                        "reverted per-molecule update"
+                    )
+                else:
+                    update_norms.append(float(_tree_l2_norm(param_delta)))
+        else:
+            params_for_loss = state.params
+            grad_sum = None
+            for datum in train_dataset:
+                loss, metrics, grads = loss_and_grad_kernel(params_for_loss, datum)
+                losses.append(float(loss))
+                s1_maes.append(_metric_mean(metrics, "s1_mae", 0.0))
+                grad_norms.append(_metric_scalar(metrics, "grad_norm"))
+                grad_abs_maxes.append(_metric_scalar(metrics, "grad_abs_max"))
+                nonfinite_fracs.append(_metric_scalar(metrics, "nonfinite_grad_fraction", 0.0))
+                grad_sum = _tree_add(grad_sum, grads)
+            grads_avg = _tree_scale(grad_sum, 1.0 / max(1, len(train_dataset)))
+            prev_state = state
+            state = state.apply_gradients(grads=grads_avg)
+            param_delta = jax.tree_util.tree_map(
+                lambda new, old: new - old,
+                state.params,
+                prev_state.params,
+            )
+            if not _tree_all_finite(state.params):
+                state = prev_state
+                update_norms.append(0.0)
+                logger.log(f"[train] non-finite params at step {step}; reverted update")
+            else:
+                update_norms.append(float(_tree_l2_norm(param_delta)))
         train_loss_val = float(np.mean(losses))
         train_s1_mae_val = float(np.mean(s1_maes))
         grad_norm_val = float(np.mean(grad_norms))
         grad_abs_max_val = float(np.max(grad_abs_maxes))
         nonfinite_grad_fraction_val = float(np.mean(nonfinite_fracs))
-
-        prev_state = state
-        state = state.apply_gradients(grads=grads_avg)
-        param_delta = jax.tree_util.tree_map(
-            lambda new, old: new - old,
-            state.params,
-            prev_state.params,
-        )
-        reverted_step = False
-        if not _tree_all_finite(state.params):
-            state = prev_state
-            reverted_step = True
-            logger.log(f"[train] non-finite params at step {step}; reverted update")
-        update_norm_val = 0.0 if reverted_step else float(_tree_l2_norm(param_delta))
+        update_norm_val = float(np.mean(update_norms))
 
         history_steps.append(step)
         loss_history.append(train_loss_val)
@@ -925,7 +1043,15 @@ def _train_streaming(
                 best_params = state.params
                 best_step = step
             current_lr = (
-                float(lr_schedule(step - 1))
+                float(
+                    lr_schedule(
+                        _stream_lr_schedule_index(
+                            args,
+                            step=step,
+                            train_size=len(train_dataset),
+                        )
+                    )
+                )
                 if lr_schedule is not None
                 else float(args.learning_rate)
             )
@@ -1006,7 +1132,7 @@ def _train(
         strict_hfx_response_mode=str(args.strict_hfx_response_mode),
         name=f"neural_xc_closed_shell_{str(args.training_mode)}",
     )
-    training_config = GroundStateTrainingConfig(
+    training_config = _ground_state_training_config(
         mode=str(args.training_mode),
         energy_mse_weight=float(args.energy_mse_weight),
         energy_mae_weight=float(args.energy_mae_weight),
@@ -1017,8 +1143,6 @@ def _train(
         scf_vxc_clip=float(args.train_scf_vxc_clip),
         scf_iterate_selection=str(args.scf_iterate_selection),
         scf_require_convergence=bool(args.scf_require_convergence),
-        scf_stop_gradient_on_unconverged=bool(args.scf_stop_gradient_on_unconverged),
-        scf_stop_gradient_rms_threshold=args.scf_stop_gradient_rms_threshold,
         scf_gradient_mode=_normalize_scf_gradient_mode(str(args.scf_gradient_mode)),
         scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
@@ -1026,9 +1150,10 @@ def _train(
         scf_implicit_diff_restart=int(args.scf_implicit_diff_restart),
     )
     if int(args.lr_decay_every) > 0:
+        transition_steps = _lr_transition_steps(args, train_size=len(train_dataset))
         lr_schedule = optax.exponential_decay(
             init_value=float(args.learning_rate),
-            transition_steps=int(args.lr_decay_every),
+            transition_steps=transition_steps,
             decay_rate=float(args.lr_decay_factor),
             staircase=True,
         )
@@ -1277,7 +1402,6 @@ def _train(
                 f"train_s1_mae={_metric_mean(eval_train_metrics, 's1_mae', float('nan')):.8e} "
                 f"val_loss={eval_val_loss_history[-1]:.8e} "
                 f"val_s1_mae={eval_val_s1_mae_history[-1]:.8e} "
-                f"train_scf_stop_grad_frac={_metric_mean(eval_train_metrics, 'scf_stop_gradient_fraction', float('nan')):.8e} "
                 f"grad_norm={grad_norm_val:.8e} "
                 f"grad_abs_max={grad_abs_max_val:.8e} "
                 f"update_norm={update_norm_val:.8e} "
@@ -1351,12 +1475,17 @@ def main() -> None:
         f"steps={args.steps}, mode={args.training_mode}, include_pt2_channel={bool(args.include_pt2_channel)}, "
         f"pt2_channel_mode={args.pt2_channel_mode if bool(args.include_pt2_channel) else 'none'}, "
         f"strict_hfx_response_mode={args.strict_hfx_response_mode}, "
+        f"stream_train={bool(args.stream_train)}, stream_update_mode={args.stream_update_mode}, "
         f"train={len(train_rows)}, validation={len(val_rows)}, test={len(test_rows)}"
     )
 
     prepared_train = _prepare_references(train_rows, args=args, logger=logger)
     prepared_val = _prepare_references(val_rows, args=args, logger=logger)
-    prepared_test = _prepare_references(test_rows, args=args, logger=logger)
+    if bool(args.skip_final_evaluation):
+        logger.log("[ref] skipped test split preparation because final evaluation is disabled")
+        prepared_test = []
+    else:
+        prepared_test = _prepare_references(test_rows, args=args, logger=logger)
 
     train_dataset = _build_dataset(
         prepared_train,
@@ -1403,6 +1532,11 @@ def main() -> None:
                 "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
                 "response_grid_chunk_size": int(args.response_grid_chunk_size),
                 "strict_hfx_response_mode": str(args.strict_hfx_response_mode),
+                "stream_train": bool(args.stream_train),
+                "stream_update_mode": str(args.stream_update_mode),
+                "lr_decay_every": int(args.lr_decay_every),
+                "lr_decay_factor": float(args.lr_decay_factor),
+                "lr_transition_steps": _lr_transition_steps(args, train_size=len(train_dataset)),
                 "s1_use_tda": bool(args.s1_use_tda),
                 "eval_use_tda": bool(args.eval_use_tda),
                 "steps": int(args.steps),
@@ -1424,6 +1558,11 @@ def main() -> None:
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
             "response_grid_chunk_size": int(args.response_grid_chunk_size),
             "strict_hfx_response_mode": str(args.strict_hfx_response_mode),
+            "stream_train": bool(args.stream_train),
+            "stream_update_mode": str(args.stream_update_mode),
+            "lr_decay_every": int(args.lr_decay_every),
+            "lr_decay_factor": float(args.lr_decay_factor),
+            "lr_transition_steps": _lr_transition_steps(args, train_size=len(train_dataset)),
             "steps": int(args.steps),
             "best_step": int(training["best_step"]),
             "best_validation_s1_mae_h": float(training["best_score"]),
@@ -1492,8 +1631,6 @@ def main() -> None:
             "basis": str(args.basis),
             "xc": str(args.xc),
             "training_mode": str(args.training_mode),
-            "scf_stop_gradient_on_unconverged": bool(args.scf_stop_gradient_on_unconverged),
-            "scf_stop_gradient_rms_threshold": args.scf_stop_gradient_rms_threshold,
             "scf_warm_start": bool(args.scf_warm_start),
             "scf_warm_start_update_interval": int(args.scf_warm_start_update_interval),
             "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
@@ -1506,6 +1643,11 @@ def main() -> None:
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
             "response_grid_chunk_size": int(args.response_grid_chunk_size),
             "strict_hfx_response_mode": str(args.strict_hfx_response_mode),
+            "stream_train": bool(args.stream_train),
+            "stream_update_mode": str(args.stream_update_mode),
+            "lr_decay_every": int(args.lr_decay_every),
+            "lr_decay_factor": float(args.lr_decay_factor),
+            "lr_transition_steps": _lr_transition_steps(args, train_size=len(train_dataset)),
             "s1_use_tda": bool(args.s1_use_tda),
             "eval_use_tda": bool(args.eval_use_tda),
             "steps": int(args.steps),
@@ -1524,8 +1666,6 @@ def main() -> None:
         "training_mode": str(args.training_mode),
         "objective": f"s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'}",
         "evaluation_solver": "tda" if bool(args.eval_use_tda) else "casida",
-        "scf_stop_gradient_on_unconverged": bool(args.scf_stop_gradient_on_unconverged),
-        "scf_stop_gradient_rms_threshold": args.scf_stop_gradient_rms_threshold,
         "scf_warm_start": bool(args.scf_warm_start),
         "scf_warm_start_update_interval": int(args.scf_warm_start_update_interval),
         "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
@@ -1538,6 +1678,11 @@ def main() -> None:
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
         "response_grid_chunk_size": int(args.response_grid_chunk_size),
         "strict_hfx_response_mode": str(args.strict_hfx_response_mode),
+        "stream_train": bool(args.stream_train),
+        "stream_update_mode": str(args.stream_update_mode),
+        "lr_decay_every": int(args.lr_decay_every),
+        "lr_decay_factor": float(args.lr_decay_factor),
+        "lr_transition_steps": _lr_transition_steps(args, train_size=len(train_dataset)),
         "steps": int(args.steps),
         "best_step": int(training["best_step"]),
         "best_validation_s1_mae_h": float(training["best_score"]),

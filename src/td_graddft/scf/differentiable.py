@@ -12,6 +12,12 @@ from jax.lax import Precision
 from jaxtyping import Array, PyTree
 
 from ..data.integrals import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix
+from ..neural_xc.inputs import (
+    hfx_nu_grid_chunk,
+    hfx_nu_shape,
+    hfx_nu_source,
+    is_chunked_hfx_nu,
+)
 from .core import _build_density_from_occ, _diagonalize_fock, _orthogonalizer
 from .implicit import (
     ImplicitFixedPointConfig,
@@ -539,35 +545,77 @@ def _restricted_hfx_features_from_nu(
     *,
     ao: Array,
     density: Array,
-    nu_cache: Array,
+    nu_cache: Any,
 ) -> Array:
     """Recompute Neural XC local-HF density features hfx_local from current density."""
 
-    nu = jnp.asarray(nu_cache, dtype=ao.dtype)
-    if nu.ndim != 4:
+    n_omega, ngrid, nao, nao2 = hfx_nu_shape(nu_cache)
+    if int(ao.shape[0]) != ngrid:
         raise ValueError(
-            "hfx_nu must have shape (n_omega, ngrids, nao, nao), "
-            f"got {nu.shape}."
+            "hfx_nu grid axis must match ao first axis "
+            f"(got {ngrid} vs {ao.shape[0]})."
+        )
+    if int(ao.shape[1]) != nao or int(ao.shape[1]) != nao2:
+        raise ValueError(
+            "hfx_nu AO dimensions must match ao second axis "
+            f"(got {(nao, nao2)} vs {(ao.shape[1], ao.shape[1])})."
         )
     density_half = 0.5 * density
-    e = jnp.einsum(
-        "rp,pq->rq",
-        ao,
-        density_half,
-        precision=Precision.HIGHEST,
-    )
-    fxx = jnp.einsum(
-        "wgbc,gc->wgb",
-        nu,
-        e,
-        precision=Precision.HIGHEST,
-    )
-    exx = -0.5 * jnp.einsum(
-        "gb,wgb->wg",
-        e,
-        fxx,
-        precision=Precision.HIGHEST,
-    )
+    if is_chunked_hfx_nu(nu_cache):
+        chunk_size = max(1, min(int(getattr(nu_cache, "chunk_size", ngrid)), ngrid))
+        exx_chunks = []
+        for start in range(0, ngrid, chunk_size):
+            end = min(start + chunk_size, ngrid)
+            ao_chunk = ao[start:end]
+            nu_chunk = hfx_nu_grid_chunk(
+                nu_cache,
+                start,
+                end,
+                n_omega=n_omega,
+                dtype=ao.dtype,
+            )
+            e_chunk = jnp.einsum(
+                "rp,pq->rq",
+                ao_chunk,
+                density_half,
+                precision=Precision.HIGHEST,
+            )
+            fxx_chunk = jnp.einsum(
+                "wgbc,gc->wgb",
+                nu_chunk,
+                e_chunk,
+                precision=Precision.HIGHEST,
+            )
+            exx_chunks.append(
+                -0.5
+                * jnp.einsum(
+                    "gb,wgb->wg",
+                    e_chunk,
+                    fxx_chunk,
+                    precision=Precision.HIGHEST,
+                )
+            )
+        exx = jnp.concatenate(exx_chunks, axis=1)
+    else:
+        nu = jnp.asarray(nu_cache, dtype=ao.dtype)
+        e = jnp.einsum(
+            "rp,pq->rq",
+            ao,
+            density_half,
+            precision=Precision.HIGHEST,
+        )
+        fxx = jnp.einsum(
+            "wgbc,gc->wgb",
+            nu,
+            e,
+            precision=Precision.HIGHEST,
+        )
+        exx = -0.5 * jnp.einsum(
+            "gb,wgb->wg",
+            e,
+            fxx,
+            precision=Precision.HIGHEST,
+        )
     exx = jnp.nan_to_num(exx, nan=0.0, posinf=0.0, neginf=0.0)
     # Restricted reference: alpha and beta channels share the same exx profile.
     exx_grid = exx.T
@@ -593,18 +641,20 @@ def _restricted_iteration_molecule(
         mo_energy=jnp.stack([mo_energy, mo_energy], axis=0),
     )
     if hasattr(molecule, "hfx_local"):
-        if hfx_local is not None:
-            local = jnp.asarray(hfx_local)
+        nu_source = hfx_nu if hfx_nu is not None else hfx_nu_source(molecule)
+        local_ref = hfx_local if hfx_local is not None else getattr(molecule, "hfx_local", None)
+        if local_ref is not None:
+            local = jnp.asarray(local_ref)
             updates["hfx_local"] = (
                 jax.lax.stop_gradient(local)
                 if stop_gradient_hfx_local
                 else local
             )
-        elif hfx_nu is not None:
+        elif nu_source is not None:
             local = _restricted_hfx_features_from_nu(
                 ao=ao,
                 density=density,
-                nu_cache=hfx_nu,
+                nu_cache=nu_source,
             )
             updates["hfx_local"] = (
                 jax.lax.stop_gradient(local)
@@ -845,6 +895,7 @@ class DifferentiableSCF:
             selected_idx = best_idx
         elif self.config.iterate_selection == "first_converged":
             selected_idx = jnp.where(has_density_converged, first_converged_idx, best_idx)
+        selected_idx = jnp.where(jnp.asarray(converged), selected_idx, final_idx)
         return DifferentiableSCFInfo(
             mode=mode,
             converged=converged,
@@ -860,6 +911,7 @@ class DifferentiableSCF:
     def _select_restricted_scf_iterate(
         self,
         *,
+        converged: Array,
         cycles: Array,
         density_final: Array,
         mo_coeff_final: Array,
@@ -873,7 +925,7 @@ class DifferentiableSCF:
             return density_final, mo_coeff_final, mo_energy_final
         info = self._rks_loop_info(
             "self_consistent",
-            converged=jnp.asarray(False),
+            converged=converged,
             cycles=cycles,
             rms_history=rms_history,
         )
@@ -973,7 +1025,7 @@ class DifferentiableSCF:
             x=x,
             mo_occ_total=mo_occ_total,
             mo_occ_stacked=_restricted_stacked_occupations_from_total(mo_occ_total),
-            hfx_nu=getattr(molecule, "hfx_nu", None),
+            hfx_nu=hfx_nu_source(molecule),
             hfx_local_ref=getattr(molecule, "hfx_local", None),
             uses_explicit_hfx_fock=uses_explicit_hfx_fock,
         )
@@ -1252,6 +1304,7 @@ class DifferentiableSCF:
             conv_tol=self.config.energy_convergence_tolerance(),
         )
         density_final, mo_coeff_final, mo_energy_final = self._select_restricted_scf_iterate(
+            converged=converged,
             cycles=cycles,
             density_final=density_final,
             mo_coeff_final=mo_coeff_final,
@@ -1615,10 +1668,8 @@ class DifferentiableSCF:
             return residual_spin
 
         implicit_cfg = ImplicitFixedPointConfig(
-            solver_name=str(self.config.implicit_diff_solver),
             tolerance=float(self.config.implicit_diff_tolerance),
             max_iter=int(self.config.implicit_diff_max_iter),
-            restart=int(self.config.implicit_diff_restart),
             regularization=float(self.config.implicit_diff_regularization),
             clip=float(self.config.implicit_diff_clip),
         )
@@ -1679,6 +1730,7 @@ class DifferentiableSCF:
         )
         ctx = problem.ctx
         density_star, mo_coeff_star, mo_energy_star = self._select_restricted_scf_iterate(
+            converged=converged,
             cycles=cycles,
             density_final=density_star,
             mo_coeff_final=mo_coeff_star,
@@ -1721,7 +1773,7 @@ class DifferentiableSCF:
                 x=x_arg,
                 mo_occ_total=mo_occ_total_arg,
                 mo_occ_stacked=mo_occ_stacked_arg,
-                hfx_nu=getattr(molecule_arg, "hfx_nu", None),
+                hfx_nu=hfx_nu_source(molecule_arg),
                 hfx_local_ref=getattr(molecule_arg, "hfx_local", None),
                 uses_explicit_hfx_fock=ctx.uses_explicit_hfx_fock,
             )
@@ -1770,10 +1822,8 @@ class DifferentiableSCF:
                 return _density_from_fock(fock, args)
 
         implicit_cfg = ImplicitFixedPointConfig(
-            solver_name=str(self.config.implicit_diff_solver),
             tolerance=float(self.config.implicit_diff_tolerance),
             max_iter=int(self.config.implicit_diff_max_iter),
-            restart=int(self.config.implicit_diff_restart),
             regularization=float(self.config.implicit_diff_regularization),
             clip=float(self.config.implicit_diff_clip),
         )
