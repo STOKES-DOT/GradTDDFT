@@ -44,6 +44,62 @@ def _write_array(group: Any, name: str, value: Any) -> None:
     group.create_dataset(name, data=array, compression="gzip", compression_opts=1)
 
 
+def _write_hfx_nu(group: Any, molecule: RestrictedMolecule | UnrestrictedMolecule) -> None:
+    hfx_nu = getattr(molecule, "hfx_nu", None)
+    if hfx_nu is not None:
+        _write_array(group, "hfx_nu", hfx_nu)
+        return
+
+    hfx_nu_api = getattr(molecule, "hfx_nu_api", None)
+    grid_chunk = getattr(hfx_nu_api, "grid_chunk", None)
+    shape = getattr(hfx_nu_api, "shape", None)
+    if hfx_nu_api is None or not callable(grid_chunk) or shape is None:
+        return
+    shape = tuple(int(dim) for dim in shape)
+    if len(shape) != 4:
+        raise ValueError(
+            "HFX nu API must expose shape (n_omega, ngrids, nao, nao), "
+            f"got {shape}."
+        )
+    if "hfx_nu" in group:
+        del group["hfx_nu"]
+    ngrid = int(shape[1])
+    chunk_size = max(1, int(getattr(hfx_nu_api, "chunk_size", 512)))
+    first_stop = min(chunk_size, ngrid)
+    first_chunk = (
+        np.asarray(grid_chunk(0, first_stop))
+        if first_stop > 0
+        else np.zeros((shape[0], 0, shape[2], shape[3]), dtype=np.float64)
+    )
+    bytes_per_grid = max(
+        1,
+        int(shape[0]) * int(shape[2]) * int(shape[3]) * int(first_chunk.dtype.itemsize),
+    )
+    target_chunk_bytes = 4 * 1024 * 1024
+    hdf5_grid_chunk = max(
+        1,
+        min(first_stop, max(1, target_chunk_bytes // bytes_per_grid)),
+    )
+    chunks = (
+        (shape[0], hdf5_grid_chunk, shape[2], shape[3])
+        if first_stop > 0
+        else None
+    )
+    dataset = group.create_dataset(
+        "hfx_nu",
+        shape=shape,
+        dtype=first_chunk.dtype,
+        chunks=chunks,
+        compression="gzip",
+        compression_opts=1,
+    )
+    if first_stop > 0:
+        dataset[:, 0:first_stop] = first_chunk
+    for start in range(first_stop, ngrid, chunk_size):
+        stop = min(start + chunk_size, ngrid)
+        dataset[:, start:stop] = np.asarray(grid_chunk(start, stop))
+
+
 def _read_array(group: Any, name: str, *, array_backend: str = "jax") -> Any | None:
     if name not in group:
         return None
@@ -73,7 +129,10 @@ def write_restricted_molecule(group: Any, molecule: RestrictedMolecule) -> None:
     _write_array(grid_group, "weights", molecule.grid.weights)
     _write_array(grid_group, "coords", molecule.grid.coords)
     for field in _ARRAY_FIELDS:
+        if field == "hfx_nu":
+            continue
         _write_array(group, field, getattr(molecule, field))
+    _write_hfx_nu(group, molecule)
 
 
 def write_unrestricted_molecule(group: Any, molecule: UnrestrictedMolecule) -> None:
@@ -94,14 +153,19 @@ def write_unrestricted_molecule(group: Any, molecule: UnrestrictedMolecule) -> N
     _write_array(grid_group, "weights", molecule.grid.weights)
     _write_array(grid_group, "coords", molecule.grid.coords)
     for field in _ARRAY_FIELDS:
+        if field == "hfx_nu":
+            continue
         if hasattr(molecule, field):
             _write_array(group, field, getattr(molecule, field))
+    _write_hfx_nu(group, molecule)
 
 
 def read_restricted_molecule(
     group: Any,
     *,
     array_backend: str = "jax",
+    hfx_nu_storage: str = "array",
+    hfx_nu_chunk_size: int = 512,
 ) -> RestrictedMolecule:
     """Read a restricted molecule saved by :func:`write_restricted_molecule`."""
 
@@ -110,10 +174,23 @@ def read_restricted_molecule(
         weights=_read_array(grid_group, "weights", array_backend=array_backend),
         coords=_read_array(grid_group, "coords", array_backend=array_backend),
     )
-    kwargs = {
-        field: _read_array(group, field, array_backend=array_backend)
-        for field in _ARRAY_FIELDS
-    }
+    kwargs = {}
+    for field in _ARRAY_FIELDS:
+        if field == "hfx_nu" and hfx_nu_storage == "chunked":
+            kwargs[field] = None
+        else:
+            kwargs[field] = _read_array(group, field, array_backend=array_backend)
+    hfx_nu_api = None
+    if hfx_nu_storage == "chunked" and "hfx_nu" in group:
+        from td_graddft.neural_xc.inputs import ChunkedHFXNu
+
+        hfx_nu_api = ChunkedHFXNu.from_hdf5_dataset(
+            str(group.file.filename),
+            str(group["hfx_nu"].name),
+            chunk_size=int(hfx_nu_chunk_size),
+        )
+    elif hfx_nu_storage != "array":
+        raise ValueError(f"Unsupported hfx_nu_storage={hfx_nu_storage!r}.")
     return RestrictedMolecule(
         ao=kwargs.pop("ao"),
         grid=grid,
@@ -142,6 +219,7 @@ def read_restricted_molecule(
             if "runtime_scf_backend" in group.attrs
             else None
         ),
+        hfx_nu_api=hfx_nu_api,
         **kwargs,
     )
 

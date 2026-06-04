@@ -470,6 +470,25 @@ def _maybe_reattach_chunked_hfx_nu_api(
     return replace(molecule, hfx_nu=None, hfx_nu_api=api)
 
 
+def _cache_hfx_nu_storage(
+    molecule_group: Any,
+    *,
+    args: argparse.Namespace,
+    input_feature_mode: str,
+) -> str:
+    if str(input_feature_mode) != "canonical":
+        return "array"
+    if str(getattr(args, "strict_hfx_response_mode", "dense")) != "low_memory":
+        return "array"
+    if "hfx_nu" not in molecule_group:
+        return "array"
+    if "atom_coords" not in molecule_group:
+        return "array"
+    if int(molecule_group["atom_coords"].shape[0]) <= 3:
+        return "array"
+    return "chunked"
+
+
 def _load_reference_from_cache(
     row: ReferenceRow,
     *,
@@ -477,9 +496,14 @@ def _load_reference_from_cache(
     input_feature_mode: str,
     host_reference_cache: bool,
     logger: RunLogger,
+    ignore_rebuild: bool = False,
 ) -> Any | None:
     cache_path = _reference_cache_path(args)
-    if cache_path is None or bool(args.rebuild_reference_cache) or not cache_path.exists():
+    if (
+        cache_path is None
+        or (bool(args.rebuild_reference_cache) and not bool(ignore_rebuild))
+        or not cache_path.exists()
+    ):
         return None
     key = _reference_cache_key(row, args=args, input_feature_mode=input_feature_mode)
     try:
@@ -488,9 +512,17 @@ def _load_reference_from_cache(
         with h5py.File(cache_path, "r") as handle:
             if key not in handle:
                 return None
+            molecule_group = handle[key]["molecule"]
+            hfx_nu_storage = _cache_hfx_nu_storage(
+                molecule_group,
+                args=args,
+                input_feature_mode=input_feature_mode,
+            )
             molecule = read_restricted_molecule(
-                handle[key]["molecule"],
+                molecule_group,
                 array_backend="host" if host_reference_cache else "jax",
+                hfx_nu_storage=hfx_nu_storage,
+                hfx_nu_chunk_size=int(getattr(args, "response_grid_chunk_size", 512)),
             )
             molecule = _maybe_reattach_chunked_hfx_nu_api(
                 row,
@@ -671,6 +703,16 @@ def _prepare_references(
             input_feature_mode=input_feature_mode,
             logger=logger,
         )
+        cached_reference = _load_reference_from_cache(
+            row,
+            args=args,
+            input_feature_mode=input_feature_mode,
+            host_reference_cache=host_reference_cache,
+            logger=logger,
+            ignore_rebuild=True,
+        )
+        if cached_reference is not None:
+            reference = cached_reference
         prepared.append(PreparedReference(row=row, molecule=reference))
     return prepared
 

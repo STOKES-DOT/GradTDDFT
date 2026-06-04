@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -289,6 +290,40 @@ class ChunkedHFXNu:
 
         return cls(
             shape=tuple(int(dim) for dim in array.shape),
+            chunk_size=int(chunk_size),
+            _grid_chunk_fn=grid_chunk,
+        )
+
+    @classmethod
+    def from_hdf5_dataset(
+        cls,
+        filename: str,
+        dataset_path: str,
+        *,
+        chunk_size: int = 512,
+    ) -> "ChunkedHFXNu":
+        try:
+            import h5py
+        except ModuleNotFoundError as exc:
+            raise ImportError("h5py is required for HDF5-backed HFX nu chunks.") from exc
+
+        filename = str(Path(filename).resolve())
+        dataset_path = str(dataset_path)
+        with h5py.File(filename, "r") as handle:
+            dataset = handle[dataset_path]
+            shape = tuple(int(dim) for dim in dataset.shape)
+        if len(shape) != 4:
+            raise ValueError(
+                "HDF5 HFX nu dataset must have shape (n_omega, ngrids, nao, nao), "
+                f"got {shape}."
+            )
+
+        def grid_chunk(start: int, stop: int) -> np.ndarray:
+            with h5py.File(filename, "r") as handle:
+                return np.asarray(handle[dataset_path][:, int(start) : int(stop)])
+
+        return cls(
+            shape=shape,
             chunk_size=int(chunk_size),
             _grid_chunk_fn=grid_chunk,
         )
