@@ -5,7 +5,7 @@ from typing import Any
 from .components import normalize_semilocal_selection, resolve_component_module
 from .config import Config
 from .factory import make_neural_xc_functional
-from .networks import normalize_architecture, resolve_activation
+from .networks import resolve_activation
 
 
 def _functional_kwargs_from_config(config: Config) -> dict[str, Any]:
@@ -30,9 +30,9 @@ def _functional_kwargs_from_config(config: Config) -> dict[str, Any]:
         "response_pt2_mode": config.channels.response_pt2,
         "strict_feature_alignment": config.strict_feature_alignment,
         "allow_experimental_jax_xc": allow_experimental_jax_xc,
+        "network_architecture": config.network.architecture,
         "hidden_dims": tuple(int(value) for value in config.network.hidden_dims),
         "activation": resolve_activation(config.network.activation),
-        "network_architecture": normalize_architecture(config.network.architecture),
         "squash_offset": float(config.network.squash_offset),
         "sigmoid_scale_factor": float(config.network.sigmoid_scale_factor),
         "density_floor": float(config.density_floor),
@@ -48,33 +48,23 @@ def _functional_kwargs_from_config(config: Config) -> dict[str, Any]:
 def make_functional(
     *,
     config: Config | None = None,
-    architecture: str = "residual",
     **kwargs: Any,
 ):
     if config is not None:
-        if architecture != "residual":
-            raise ValueError(
-                "When config is provided, architecture must be specified inside "
-                "config.network.architecture."
-            )
         if kwargs:
             merged = _functional_kwargs_from_config(config)
             merged.update(kwargs)
             return make_neural_xc_functional(**merged)
         return make_neural_xc_functional(**_functional_kwargs_from_config(config))
-    return make_neural_xc_functional(
-        network_architecture=normalize_architecture(architecture),
-        **kwargs,
-    )
+    return make_neural_xc_functional(**kwargs)
 
 
 def Functional(
     *,
     config: Config | None = None,
-    architecture: str = "residual",
     **kwargs: Any,
 ):
-    return make_functional(config=config, architecture=architecture, **kwargs)
+    return make_functional(config=config, **kwargs)
 
 
 __all__ = [

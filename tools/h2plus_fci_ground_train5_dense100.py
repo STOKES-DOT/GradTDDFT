@@ -51,7 +51,7 @@ from td_graddft.training import (
 HARTREE_TO_EV = 27.211386245988
 _DEFAULT_SEMILOCAL_XC = ("lda_x", "gga_x_b88", "lda_c_vwn_rpa", "gga_c_lyp")
 _TRAIN_SCF_SAFETY_MAX_CYCLE = 32
-_JAX_UKS_CACHE_VERSION = "spinpolarized-diis-v1"
+_JAX_UKS_CACHE_VERSION = "spinpolarized-fci-density-v2"
 
 
 @dataclass(frozen=True)
@@ -61,7 +61,6 @@ class ReferencePoint:
     molecule: Any
     exact_energy_h: float
     exact_total_energies_h: np.ndarray
-    exact_dm_ao: np.ndarray
     exact_density_grid: np.ndarray
     exact_electron_count: float
     reference_backend: str
@@ -84,30 +83,11 @@ def build_h2plus_atom(r_angstrom: float) -> str:
     return f"H 0 0 {-0.5 * r_angstrom:.12f}; H 0 0 {0.5 * r_angstrom:.12f}"
 
 
-def _move_scf_to_gpu(mf: Any) -> Any:
-    try:
-        import gpu4pyscf  # noqa: F401
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("--reference-scf-device gpu requires gpu4pyscf.") from exc
-    to_gpu = getattr(mf, "to_gpu", None)
-    if not callable(to_gpu):
-        raise RuntimeError("gpu4pyscf did not expose to_gpu() on this SCF object.")
-    return to_gpu()
-
-
-def _move_scf_to_cpu(mf: Any) -> Any:
-    to_cpu = getattr(mf, "to_cpu", None)
-    return to_cpu() if callable(to_cpu) else mf
-
-
-def solve_h2plus_with_pyscf(
+def solve_h2plus_fci_one_electron(
     atom: str,
     *,
     basis: str,
     nroots: int,
-    reference_scf_device: str,
-    max_cycle: int,
-    conv_tol: float,
 ) -> tuple[float, np.ndarray, np.ndarray, str, bool]:
     mol = gto.M(
         atom=atom,
@@ -118,28 +98,15 @@ def solve_h2plus_with_pyscf(
         cart=True,
         verbose=0,
     )
-    mf = scf.UHF(mol)
-    mf.max_cycle = int(max_cycle)
-    mf.conv_tol = float(conv_tol)
-    backend = "cpu"
-    if str(reference_scf_device) == "gpu":
-        try:
-            mf = _move_scf_to_gpu(mf)
-            backend = "gpu"
-        except Exception as exc:
-            backend = f"cpu_fallback:{type(exc).__name__}"
-    energy = float(mf.kernel())
-    mf_cpu = _move_scf_to_cpu(mf)
-    dm_spin = np.asarray(mf_cpu.make_rdm1(), dtype=np.float64)
-    dm_ao = dm_spin.sum(axis=0) if dm_spin.ndim == 3 else dm_spin
-    total_energies = np.asarray([energy], dtype=np.float64)
-    if int(nroots) > 1:
-        total_energies = np.pad(
-            total_energies,
-            (0, int(nroots) - 1),
-            mode="edge",
-        )
-    return energy, total_energies, dm_ao, backend, bool(getattr(mf_cpu, "converged", True))
+    hcore = mol.intor_symmetric("int1e_kin") + mol.intor_symmetric("int1e_nuc")
+    overlap = mol.intor_symmetric("int1e_ovlp")
+    orbital_energies, mo_coeff = scf.hf.eig(hcore, overlap)
+    total_energies = np.asarray(orbital_energies[: max(1, int(nroots))] + mol.energy_nuc())
+    if total_energies.size < int(nroots):
+        total_energies = np.pad(total_energies, (0, int(nroots) - total_energies.size), mode="edge")
+    occupied_orbital = np.asarray(mo_coeff[:, 0], dtype=np.float64)
+    rdm1_ao = np.outer(occupied_orbital, occupied_orbital)
+    return float(total_energies[0]), total_energies, rdm1_ao, "fci_one_electron", True
 
 
 def build_reference_point(
@@ -151,16 +118,13 @@ def build_reference_point(
     (
         exact_energy_h,
         exact_total_energies_h,
-        exact_dm_ao,
+        exact_rdm1_ao,
         reference_backend,
         reference_converged,
-    ) = solve_h2plus_with_pyscf(
+    ) = solve_h2plus_fci_one_electron(
         atom,
         basis=str(args.basis),
         nroots=max(1, int(args.nroots)),
-        reference_scf_device=str(args.reference_scf_device),
-        max_cycle=int(args.reference_scf_max_cycle),
-        conv_tol=float(args.reference_scf_conv_tol),
     )
     reference = unrestricted_molecule_from_spec_with_jax_uks(
         atom=atom,
@@ -188,14 +152,13 @@ def build_reference_point(
     )
     ao = np.asarray(reference.ao, dtype=np.float64)
     weights = np.asarray(reference.grid.weights, dtype=np.float64)
-    exact_density_grid = np.einsum("pq,rp,rq->r", exact_dm_ao, ao, ao, optimize=True)
+    exact_density_grid = np.einsum("pq,rp,rq->r", exact_rdm1_ao, ao, ao, optimize=True)
     return ReferencePoint(
         r_angstrom=float(r_angstrom),
         atom=atom,
         molecule=reference,
         exact_energy_h=float(exact_energy_h),
         exact_total_energies_h=exact_total_energies_h,
-        exact_dm_ao=exact_dm_ao,
         exact_density_grid=exact_density_grid,
         exact_electron_count=float(np.dot(weights, exact_density_grid)),
         reference_backend=reference_backend,
@@ -228,7 +191,7 @@ def _write_reference_point(group: Any, point: ReferencePoint) -> None:
     group.attrs["exact_electron_count"] = float(point.exact_electron_count)
     group.attrs["reference_backend"] = str(point.reference_backend)
     group.attrs["reference_converged"] = bool(point.reference_converged)
-    for name in ("exact_total_energies_h", "exact_dm_ao", "exact_density_grid"):
+    for name in ("exact_total_energies_h", "exact_density_grid"):
         if name in group:
             del group[name]
         group.create_dataset(name, data=np.asarray(getattr(point, name)), compression="gzip")
@@ -243,12 +206,51 @@ def _read_reference_point(group: Any) -> ReferencePoint:
         molecule=read_unrestricted_molecule(group["molecule"]),
         exact_energy_h=float(group.attrs["exact_energy_h"]),
         exact_total_energies_h=np.asarray(group["exact_total_energies_h"][()], dtype=np.float64),
-        exact_dm_ao=np.asarray(group["exact_dm_ao"][()], dtype=np.float64),
         exact_density_grid=np.asarray(group["exact_density_grid"][()], dtype=np.float64),
         exact_electron_count=float(group.attrs["exact_electron_count"]),
         reference_backend=str(group.attrs["reference_backend"]),
         reference_converged=bool(group.attrs["reference_converged"]),
     )
+
+
+def _validate_cached_reference_point(point: ReferencePoint, args: argparse.Namespace) -> tuple[bool, str]:
+    """Reject cache entries whose molecule integrals do not match their geometry."""
+
+    mol = gto.M(
+        atom=str(point.atom),
+        unit="Angstrom",
+        basis=str(args.basis),
+        charge=1,
+        spin=1,
+        cart=True,
+        verbose=0,
+    )
+    expected_hcore = np.asarray(mol.intor_symmetric("int1e_kin"), dtype=np.float64) + np.asarray(
+        mol.intor_symmetric("int1e_nuc"),
+        dtype=np.float64,
+    )
+    expected_overlap = np.asarray(mol.intor_symmetric("int1e_ovlp"), dtype=np.float64)
+    cached = point.molecule
+    cached_hcore = np.asarray(cached.h1e, dtype=np.float64)
+    cached_overlap = np.asarray(cached.overlap_matrix, dtype=np.float64)
+    if not np.allclose(cached_hcore, expected_hcore, rtol=1e-9, atol=1e-8):
+        max_diff = float(np.max(np.abs(cached_hcore - expected_hcore)))
+        return False, f"hcore mismatch max_abs={max_diff:.3e}"
+    if not np.allclose(cached_overlap, expected_overlap, rtol=1e-9, atol=1e-8):
+        max_diff = float(np.max(np.abs(cached_overlap - expected_overlap)))
+        return False, f"overlap mismatch max_abs={max_diff:.3e}"
+    cached_nuclear = float(cached.nuclear_repulsion)
+    expected_nuclear = float(mol.energy_nuc())
+    if abs(cached_nuclear - expected_nuclear) > 1e-8:
+        return False, f"nuclear_repulsion mismatch cached={cached_nuclear:.12e} expected={expected_nuclear:.12e}"
+    cached_coords = getattr(cached, "atom_coords", None)
+    if cached_coords is not None:
+        expected_coords = np.asarray(mol.atom_coords(), dtype=np.float64)
+        cached_coords_arr = np.asarray(cached_coords, dtype=np.float64)
+        if not np.allclose(cached_coords_arr, expected_coords, rtol=1e-9, atol=1e-8):
+            max_diff = float(np.max(np.abs(cached_coords_arr - expected_coords)))
+            return False, f"atom_coords mismatch max_abs={max_diff:.3e}"
+    return True, "ok"
 
 
 def get_or_build_reference_point(
@@ -265,8 +267,14 @@ def get_or_build_reference_point(
 
             with h5py.File(cache_path, "r") as handle:
                 if key in handle:
-                    logger.log(f"[ref_cache] hit R={float(r_angstrom):.4f}: {cache_path}::{key}")
-                    return _read_reference_point(handle[key])
+                    point = _read_reference_point(handle[key])
+                    valid, reason = _validate_cached_reference_point(point, args)
+                    if valid:
+                        logger.log(f"[ref_cache] hit R={float(r_angstrom):.4f}: {cache_path}::{key}")
+                        return point
+                    logger.log(
+                        f"[ref_cache] invalid R={float(r_angstrom):.4f}: {reason}; rebuilding {cache_path}::{key}"
+                    )
         except Exception as exc:
             logger.log(f"[ref_cache] miss/error R={float(r_angstrom):.4f}: {exc!r}; rebuilding")
     point = build_reference_point(float(r_angstrom), args=args)
@@ -285,13 +293,13 @@ def get_or_build_reference_point(
     return point
 
 
-def _metric_scalar(metrics: dict[str, Any], key: str, default: float = float("nan")) -> float:
+def _metric_mean(metrics: dict[str, Any], key: str, default: float = float("nan")) -> float:
     if key not in metrics:
         return default
     arr = jnp.asarray(metrics[key])
     if int(arr.size) <= 0:
         return default
-    return float(arr.reshape(-1)[0])
+    return float(jnp.mean(arr))
 
 
 def _tree_all_finite(tree: Any) -> bool:
@@ -303,16 +311,14 @@ def build_training_data(
     points: list[ReferencePoint],
     *,
     density_constraint_weight: float,
-    density_matrix_constraint_weight: float,
 ) -> tuple[GroundStateDatum, ...]:
     return tuple(
         GroundStateDatum.from_parts(
             point.molecule,
             core=GroundStateCoreDatum(
                 target_total_energy=jnp.asarray(point.exact_energy_h, dtype=jnp.float64),
-                target_density_matrix=jnp.asarray(point.exact_dm_ao, dtype=jnp.float64),
+                target_density=jnp.asarray(point.exact_density_grid, dtype=jnp.float64),
                 density_constraint_weight=float(density_constraint_weight),
-                density_matrix_constraint_weight=float(density_matrix_constraint_weight),
             ),
         )
         for point in points
@@ -323,7 +329,6 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
     train_data = build_training_data(
         points,
         density_constraint_weight=float(args.density_constraint_weight),
-        density_matrix_constraint_weight=float(args.density_matrix_constraint_weight),
     )
     functional = neural_xc.Functional(
         semilocal_xc=tuple(str(name) for name in args.semilocal_xc),
@@ -356,10 +361,8 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
             scf_vxc_clip=float(args.train_scf_vxc_clip),
             scf_iterate_selection=str(args.scf_iterate_selection),
             scf_gradient_mode=str(args.scf_gradient_mode),
-            scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
             scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
             scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
-            scf_implicit_diff_restart=int(args.scf_implicit_diff_restart),
         ),
     )
     lr_schedule = optax.exponential_decay(
@@ -397,14 +400,12 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
         {
             "step": 0,
             "loss": float(initial_loss),
-            "energy_mae_h": _metric_scalar(initial_metrics, "energy_mae"),
-            "density_mse": _metric_scalar(initial_metrics, "density_mse"),
-            "density_penalty": _metric_scalar(initial_metrics, "density_penalty"),
-            "density_matrix_mse": _metric_scalar(initial_metrics, "density_matrix_mse"),
-            "density_matrix_penalty": _metric_scalar(initial_metrics, "density_matrix_penalty"),
-            "scf_converged_fraction": _metric_scalar(initial_metrics, "scf_converged_fraction"),
-            "scf_cycles_mean": _metric_scalar(initial_metrics, "scf_cycles_mean"),
-            "scf_cycles_max": _metric_scalar(initial_metrics, "scf_cycles_max"),
+            "energy_mae_h": _metric_mean(initial_metrics, "energy_mae"),
+            "density_mse": _metric_mean(initial_metrics, "density_mse"),
+            "density_penalty": _metric_mean(initial_metrics, "density_penalty"),
+            "scf_converged_fraction": _metric_mean(initial_metrics, "scf_converged_fraction"),
+            "scf_cycles_mean": _metric_mean(initial_metrics, "scf_cycles_mean"),
+            "scf_cycles_max": _metric_mean(initial_metrics, "scf_cycles_max"),
             "grad_norm": float("nan"),
             "param_update_norm": float("nan"),
             "lr": float(args.learning_rate),
@@ -422,7 +423,7 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
         if not _tree_all_finite(state.params):
             state = prev_state
             logger.log(f"[train] non-finite params at step {step}; reverted update")
-        loss = _metric_scalar(metrics, "loss")
+        loss = _metric_mean(metrics, "loss")
         if step >= 2 and loss < min_loss:
             min_loss = loss
             min_loss_step = step - 1
@@ -430,16 +431,14 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
         row = {
             "step": step,
             "loss": loss,
-            "energy_mae_h": _metric_scalar(metrics, "energy_mae"),
-            "density_mse": _metric_scalar(metrics, "density_mse"),
-            "density_penalty": _metric_scalar(metrics, "density_penalty"),
-            "density_matrix_mse": _metric_scalar(metrics, "density_matrix_mse"),
-            "density_matrix_penalty": _metric_scalar(metrics, "density_matrix_penalty"),
-            "scf_converged_fraction": _metric_scalar(metrics, "scf_converged_fraction"),
-            "scf_cycles_mean": _metric_scalar(metrics, "scf_cycles_mean"),
-            "scf_cycles_max": _metric_scalar(metrics, "scf_cycles_max"),
-            "grad_norm": _metric_scalar(metrics, "grad_norm"),
-            "param_update_norm": _metric_scalar(metrics, "param_update_norm"),
+            "energy_mae_h": _metric_mean(metrics, "energy_mae"),
+            "density_mse": _metric_mean(metrics, "density_mse"),
+            "density_penalty": _metric_mean(metrics, "density_penalty"),
+            "scf_converged_fraction": _metric_mean(metrics, "scf_converged_fraction"),
+            "scf_cycles_mean": _metric_mean(metrics, "scf_cycles_mean"),
+            "scf_cycles_max": _metric_mean(metrics, "scf_cycles_max"),
+            "grad_norm": _metric_mean(metrics, "grad_norm"),
+            "param_update_norm": _metric_mean(metrics, "param_update_norm"),
             "lr": float(lr_schedule(step - 1)),
         }
         rows.append(row)
@@ -449,7 +448,6 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
                 f"step={step:4d}/{int(args.steps):4d} loss={row['loss']:.8e} "
                 f"energy_mae={row['energy_mae_h']:.8e} "
                 f"density_mse={row['density_mse']:.8e} "
-                f"dm_mse={row['density_matrix_mse']:.8e} "
                 f"scf_conv_frac={row['scf_converged_fraction']:.6f} "
                 f"scf_cycles_max={row['scf_cycles_max']:.6f} "
                 f"grad_norm={row['grad_norm']:.8e} lr={row['lr']:.8e}"
@@ -467,7 +465,7 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
         "history": rows,
         "elapsed_s": time.perf_counter() - t0,
         "final_loss": float(final_loss),
-        "final_energy_mae_h": _metric_scalar(final_metrics, "energy_mae"),
+        "final_energy_mae_h": _metric_mean(final_metrics, "energy_mae"),
         "min_loss": min_loss,
         "min_loss_step": min_loss_step,
     }
@@ -515,35 +513,93 @@ def evaluate_curve(
     return rows
 
 
-def plot_outputs(outdir: Path, history: list[dict[str, float]], curve_rows: list[dict[str, float]]) -> None:
+def plot_outputs(
+    outdir: Path,
+    history: list[dict[str, float]],
+    curve_rows: list[dict[str, float]],
+    train_rows: list[dict[str, float]] | None = None,
+) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    steps = np.asarray([row["step"] for row in history], dtype=float)
-    loss = np.asarray([row["loss"] for row in history], dtype=float)
-    dm = np.asarray([row["density_matrix_mse"] for row in history], dtype=float)
-    r = np.asarray([row["r_angstrom"] for row in curve_rows], dtype=float)
-    exact = np.asarray([row["exact_energy_h"] for row in curve_rows], dtype=float)
-    pred = np.asarray([row["predicted_energy_h"] for row in curve_rows], dtype=float)
-    err = np.asarray([row["energy_abs_err_ev"] for row in curve_rows], dtype=float)
+    def series(rows: list[dict[str, float]], key: str, default: float = float("nan")) -> np.ndarray:
+        return np.asarray([float(row.get(key, default)) for row in rows], dtype=float)
 
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
-    axes[0].plot(steps, np.maximum(loss, 1e-18), label="loss")
-    axes[0].plot(steps, np.maximum(dm, 1e-18), label="AO DM MSE")
-    axes[0].set_yscale("log")
-    axes[0].set_xlabel("Step")
-    axes[0].legend(frameon=False)
-    axes[0].grid(alpha=0.2)
-    axes[1].plot(r, exact, label="exact")
-    axes[1].plot(r, pred, label="neural")
-    axes[1].set_xlabel("R (Angstrom)")
-    axes[1].set_ylabel("Energy (Ha)")
-    axes[1].legend(frameon=False)
-    ax2 = axes[1].twinx()
-    ax2.plot(r, err, color="tab:red", alpha=0.6, label="abs err")
-    ax2.set_ylabel("Abs err (eV)")
+    def positive(values: np.ndarray, floor: float = 1e-18) -> np.ndarray:
+        return np.maximum(np.asarray(values, dtype=float), floor)
+
+    steps = series(history, "step")
+    loss = series(history, "loss")
+    density_penalty = series(history, "density_penalty", 0.0)
+
+    r = series(curve_rows, "r_angstrom")
+    exact = series(curve_rows, "exact_energy_h")
+    pred = series(curve_rows, "predicted_energy_h")
+    err = series(curve_rows, "energy_abs_err_ev")
+    train_r = series(train_rows or [], "r_angstrom")
+    train_exact = series(train_rows or [], "exact_energy_h")
+
+    fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.2))
+    axes = axes.ravel()
+
+    ax = axes[0]
+    ax.plot(steps, positive(loss), lw=2.6, label="total loss")
+    ax.set_yscale("log")
+    ax.set_title("Training Total Loss")
+    ax.set_xlabel("Step")
+    ax.grid(alpha=0.2)
+
+    ax = axes[1]
+    ax.plot(steps, positive(density_penalty), lw=2.6, color="tab:green", label="density penalty")
+    ax.set_yscale("log")
+    ax.set_title("Density Constraint Penalty")
+    ax.set_xlabel("Step")
+    ax.grid(alpha=0.2)
+
+    ax = axes[2]
+    ax.plot(r, exact, lw=3.0, label="exact")
+    ax.plot(r, pred, lw=3.0, label="neural")
+    if train_r.size:
+        ax.scatter(
+            train_r,
+            train_exact,
+            s=58,
+            color="black",
+            edgecolors="white",
+            linewidths=1.1,
+            zorder=5,
+            label="train points",
+        )
+    ax.set_title("Ground-State Curve")
+    ax.set_xlabel("R (Angstrom)")
+    ax.set_ylabel("Energy (Ha)")
+    ax.legend(frameon=False, fontsize=11, prop={"weight": "bold", "size": 11})
+    ax.grid(alpha=0.2)
+
+    ax = axes[3]
+    ax.plot(r, positive(err, 1e-12), lw=3.0, color="tab:red")
+    ax.set_yscale("log")
+    ax.set_title("Absolute Energy Error")
+    ax.set_xlabel("R (Angstrom)")
+    ax.set_ylabel("eV")
+    ax.grid(alpha=0.2)
+
+    for ax in axes:
+        ax.tick_params(axis="both", which="major", labelsize=11, width=1.6, length=5.5)
+        ax.tick_params(axis="both", which="minor", width=1.2, length=3.5)
+        for label in ax.get_xticklabels() + ax.get_yticklabels():
+            label.set_fontweight("bold")
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.8)
+        title = ax.get_title()
+        if title:
+            ax.set_title(title, fontsize=14, fontweight="bold")
+        ax.xaxis.label.set_size(12)
+        ax.xaxis.label.set_weight("bold")
+        ax.yaxis.label.set_size(12)
+        ax.yaxis.label.set_weight("bold")
     fig.tight_layout()
     fig.savefig(outdir / "h2plus_ground_training_and_curve.png", dpi=180)
     plt.close(fig)
@@ -576,7 +632,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--energy-mae-weight", type=float, default=1.0)
     p.add_argument("--energy-normalization", choices=("none", "per_electron", "per_atom"), default="none")
     p.add_argument("--density-constraint-weight", type=float, default=1.0)
-    p.add_argument("--density-matrix-constraint-weight", type=float, default=1.0)
     p.add_argument("--coefficient-prior-weight", type=float, default=0.0)
     p.add_argument("--grids-level", type=int, default=2)
     p.add_argument("--max-l", type=int, default=3)
@@ -595,10 +650,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--train-scf-vxc-clip", type=float, default=20.0)
     p.add_argument("--scf-iterate-selection", choices=("final", "best_rms", "first_converged"), default="best_rms")
     p.add_argument("--scf-gradient-mode", choices=("expl", "impl"), default="impl")
-    p.add_argument("--scf-implicit-diff-solver", choices=("normal_cg", "gmres", "bicgstab"), default="normal_cg")
     p.add_argument("--scf-implicit-diff-tolerance", type=float, default=1e-6)
     p.add_argument("--scf-implicit-diff-regularization", type=float, default=1e-3)
-    p.add_argument("--scf-implicit-diff-restart", type=int, default=12)
     p.add_argument("--nroots", type=int, default=4)
     p.add_argument("--jit-train", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--jit-eval", action=argparse.BooleanOptionalAction, default=True)
@@ -619,7 +672,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "Config: H2+ "
         f"basis={args.basis} grid={args.grids_level} R=[{args.r_min},{args.r_max}] "
         f"train_points={args.train_points} dense_points={args.dense_points} steps={args.steps} "
-        f"reference_scf_device={args.reference_scf_device} integral_backend={args.integral_backend}"
+        f"reference_method=fci_one_electron integral_backend={args.integral_backend}"
     )
     train_r = np.linspace(float(args.r_min), float(args.r_max), int(args.train_points))
     dense_r = np.linspace(float(args.r_min), float(args.r_max), int(args.dense_points))
@@ -649,19 +702,17 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     )
     write_rows(outdir / "training_history.csv", training["history"])
     write_rows(outdir / "h2plus_ground_dense_curve.csv", curve_rows)
-    write_rows(
-        outdir / "h2plus_reference_points.csv",
-        [
-            {
-                "r_angstrom": point.r_angstrom,
-                "exact_energy_h": point.exact_energy_h,
-                "exact_electron_count": point.exact_electron_count,
-                "reference_backend": point.reference_backend,
-                "reference_converged": int(point.reference_converged),
-            }
-            for point in train_points
-        ],
-    )
+    train_rows = [
+        {
+            "r_angstrom": point.r_angstrom,
+            "exact_energy_h": point.exact_energy_h,
+            "exact_electron_count": point.exact_electron_count,
+            "reference_backend": point.reference_backend,
+            "reference_converged": int(point.reference_converged),
+        }
+        for point in train_points
+    ]
+    write_rows(outdir / "h2plus_reference_points.csv", train_rows)
     save_params_checkpoint(
         outdir / "neural_xc_params.msgpack",
         training["best_params"],
@@ -671,13 +722,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "grid_level": int(args.grids_level),
             "steps": int(args.steps),
             "density_constraint_weight": float(args.density_constraint_weight),
-            "density_matrix_constraint_weight": float(args.density_matrix_constraint_weight),
-            "reference_scf_device": str(args.reference_scf_device),
             "integral_backend": str(args.integral_backend),
         },
     )
     try:
-        plot_outputs(outdir, training["history"], curve_rows)
+        plot_outputs(outdir, training["history"], curve_rows, train_rows)
     except Exception as exc:
         logger.log(f"[plot] skipped after error: {exc!r}")
     summary = {
@@ -689,8 +738,6 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "lr_decay_every": int(args.lr_decay_every),
         "lr_decay_factor": float(args.lr_decay_factor),
         "density_constraint_weight": float(args.density_constraint_weight),
-        "density_matrix_constraint_weight": float(args.density_matrix_constraint_weight),
-        "reference_scf_device": str(args.reference_scf_device),
         "integral_backend": str(args.integral_backend),
         "elapsed_s": float(training["elapsed_s"]),
         "final_loss": float(training["final_loss"]),
@@ -714,9 +761,15 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 "data_files": [
                     str(outdir / "training_history.csv"),
                     str(outdir / "h2plus_ground_dense_curve.csv"),
+                    str(outdir / "h2plus_reference_points.csv"),
                 ],
                 "x": ["step", "r_angstrom"],
-                "y": ["loss", "density_matrix_mse", "exact_energy_h", "predicted_energy_h"],
+                "y": [
+                    "loss",
+                    "density_mse",
+                    "exact_energy_h",
+                    "predicted_energy_h",
+                ],
             }
         ],
         "metadata_files": [str(outdir / "summary.json"), str(outdir / "neural_xc_params.msgpack.meta.json")],

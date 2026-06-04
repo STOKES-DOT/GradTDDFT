@@ -179,8 +179,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--reference-csv", required=True)
     p.add_argument("--reference-cache", required=True)
     p.add_argument("--system", required=True)
+    p.add_argument(
+        "--init-system",
+        default=None,
+        help=(
+            "Reference system used to initialize the neural functional state. "
+            "Defaults to --system. Use the first training molecule to mirror "
+            "the streaming training script while profiling a later datum."
+        ),
+    )
     p.add_argument("--basis", default="def2-svp")
     p.add_argument("--xc", default="b3lyp")
+    p.add_argument(
+        "--input-feature-mode",
+        choices=("enhanced", "canonical", "dm21_original"),
+        default=str(_TRAIN.DEFAULT_INPUT_FEATURE_MODE),
+    )
     p.add_argument("--grids-level", type=int, default=2)
     p.add_argument("--response-grid-chunk-size", type=int, default=1024)
     p.add_argument("--strict-hfx-response-mode", choices=("dense", "low_memory"), default="dense")
@@ -210,6 +224,8 @@ def _make_train_args(args: argparse.Namespace) -> argparse.Namespace:
         str(args.basis),
         "--xc",
         str(args.xc),
+        "--input-feature-mode",
+        str(args.input_feature_mode),
         "--grids-level",
         str(args.grids_level),
         "--response-grid-chunk-size",
@@ -237,6 +253,7 @@ def _append_rows(path: Path | None, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
         "system",
+        "init_system",
         "response_grid_chunk_size",
         "strict_hfx_response_mode",
         "phase",
@@ -267,11 +284,17 @@ def main() -> None:
     if len(selected) != 1:
         raise ValueError(f"Expected exactly one row for {args.system!r}, found {len(selected)}.")
     ref_row = selected[0]
+    init_system = str(args.init_system or args.system)
+    selected_init = [row for row in rows if row.system == init_system]
+    if len(selected_init) != 1:
+        raise ValueError(f"Expected exactly one row for init system {init_system!r}, found {len(selected_init)}.")
+    init_ref_row = selected_init[0]
     out_rows: list[dict[str, Any]] = []
 
     def record(row: dict[str, Any]) -> dict[str, Any]:
         row = dict(row)
         row["system"] = ref_row.system
+        row["init_system"] = init_ref_row.system
         row["response_grid_chunk_size"] = int(args.response_grid_chunk_size)
         row["strict_hfx_response_mode"] = str(args.strict_hfx_response_mode)
         out_rows.append(row)
@@ -288,19 +311,25 @@ def main() -> None:
 
     phase_row, prepared = _phase(
         "cache_load",
-        lambda: _TRAIN._prepare_references([ref_row], args=train_args, logger=logger),
+        lambda: _TRAIN._prepare_references(
+            list(dict.fromkeys([init_ref_row, ref_row])),
+            args=train_args,
+            logger=logger,
+        ),
         gpu_id=gpu_id,
         sample_interval=float(args.sample_interval),
     )
     record(phase_row)
     stop_if_error(phase_row)
     stop_if_requested("cache_load")
-    prepared_ref = prepared[0]
+    prepared_by_system = {item.row.system: item for item in prepared}
+    prepared_ref = prepared_by_system[init_ref_row.system]
+    target_ref = prepared_by_system[ref_row.system]
 
     phase_row, dataset = _phase(
         "datum_build",
         lambda: _TRAIN._build_dataset(
-            prepared,
+            [target_ref],
             s1_weight=float(train_args.s1_weight),
             density_constraint_weight=float(train_args.density_constraint_weight),
         ),
@@ -323,7 +352,7 @@ def main() -> None:
         strict_hfx_response_mode=str(train_args.strict_hfx_response_mode),
         name=f"profile_qh9_{str(train_args.training_mode)}",
     )
-    training_config = _TRAIN.GroundStateTrainingConfig(
+    training_config = _TRAIN._ground_state_training_config(
         mode=str(train_args.training_mode),
         energy_mse_weight=float(train_args.energy_mse_weight),
         energy_mae_weight=float(train_args.energy_mae_weight),
@@ -334,8 +363,6 @@ def main() -> None:
         scf_vxc_clip=float(train_args.train_scf_vxc_clip),
         scf_iterate_selection=str(train_args.scf_iterate_selection),
         scf_require_convergence=bool(train_args.scf_require_convergence),
-        scf_stop_gradient_on_unconverged=bool(train_args.scf_stop_gradient_on_unconverged),
-        scf_stop_gradient_rms_threshold=train_args.scf_stop_gradient_rms_threshold,
         scf_gradient_mode=_TRAIN._normalize_scf_gradient_mode(str(train_args.scf_gradient_mode)),
         scf_implicit_diff_solver=str(train_args.scf_implicit_diff_solver),
         scf_implicit_diff_tolerance=float(train_args.scf_implicit_diff_tolerance),

@@ -9,8 +9,15 @@ import td_graddft.features as features_module
 import td_graddft.tddft.casida as casida_module
 import td_graddft.tddft._semilocal_response as semilocal_response_module
 import td_graddft.tddft.response as response_module
-from td_graddft.tddft import RestrictedCasidaTDDFT, build_restricted_response_matrices
-from td_graddft.tddft.cisd import restricted_cisd_second_order_correction
+from td_graddft.tddft import (
+    RestrictedCasidaTDDFT,
+    UnrestrictedCasidaTDDFT,
+    build_restricted_response_matrices,
+)
+from td_graddft.tddft.cisd import (
+    restricted_cisd_second_order_correction,
+    unrestricted_cisd_second_order_correction,
+)
 from td_graddft.tddft.response import build_restricted_tda_operator
 from td_graddft.tddft.types import TDAResult
 
@@ -72,6 +79,39 @@ def _make_toy_molecule(rep_tensor=None):
         [
             [[1.0, 0.0], [0.0, 0.0]],
             [[1.0, 0.0], [0.0, 0.0]],
+        ]
+    )
+    return _ToyMolecule(
+        ao=ao,
+        ao_deriv1=ao_deriv1,
+        grid=_Grid(weights=jnp.array([1.0, 1.0])),
+        rep_tensor=(
+            jnp.zeros((2, 2, 2, 2)) if rep_tensor is None else jnp.asarray(rep_tensor)
+        ),
+        mo_coeff=mo_coeff,
+        mo_occ=mo_occ,
+        mo_energy=mo_energy,
+        rdm1=rdm1,
+    )
+
+
+def _make_open_shell_toy_molecule(rep_tensor=None):
+    ao = jnp.array([[1.0, 0.0], [0.0, 1.0]])
+    ao_deriv1 = jnp.array(
+        [
+            ao,
+            [[0.20, 0.00], [0.00, 0.20]],
+            [[0.00, 0.10], [0.10, 0.00]],
+            [[0.10, 0.00], [0.00, 0.10]],
+        ]
+    )
+    mo_coeff = jnp.stack([jnp.eye(2), jnp.eye(2)], axis=0)
+    mo_occ = jnp.array([[1.0, 0.0], [0.0, 0.0]])
+    mo_energy = jnp.array([[0.0, 2.0], [0.2, 2.2]])
+    rdm1 = jnp.array(
+        [
+            [[1.0, 0.0], [0.0, 0.0]],
+            [[0.0, 0.0], [0.0, 0.0]],
         ]
     )
     return _ToyMolecule(
@@ -455,6 +495,45 @@ def test_restricted_solver_applies_posthoc_second_order_corrections():
     assert jnp.allclose(casida.posthoc_correction, jnp.array([-0.125]))
 
 
+def test_unrestricted_solver_applies_posthoc_second_order_corrections():
+    molecule = _make_open_shell_toy_molecule()
+
+    class _PostHocOpenShellXC:
+        exact_exchange_fraction = 0.0
+
+        def spin_local_kernel(self, rho_a, rho_b):
+            del rho_a, rho_b
+            zeros = jnp.zeros((molecule.grid.weights.shape[0],), dtype=jnp.float64)
+            return zeros, zeros, zeros
+
+        def post_tda_correction(self, mol, result, *, occupation_tolerance=1e-8):
+            del mol, occupation_tolerance
+            return jnp.full_like(result.excitation_energies, 0.125)
+
+        def post_tddft_correction(self, mol, result, *, occupation_tolerance=1e-8):
+            del mol, occupation_tolerance
+            return jnp.full_like(result.excitation_energies, -0.0625)
+
+    solver = UnrestrictedCasidaTDDFT(molecule, _PostHocOpenShellXC())
+    tda = solver.tda(nstates=1)
+    casida = solver.kernel(nstates=1)
+
+    assert jnp.allclose(tda.excitation_energies, jnp.array([2.125]), atol=1e-10)
+    assert jnp.allclose(casida.excitation_energies, jnp.array([1.9375]), atol=1e-10)
+    assert jnp.allclose(tda.posthoc_correction, jnp.array([0.125]))
+    assert jnp.allclose(casida.posthoc_correction, jnp.array([-0.0625]))
+
+
+def test_unrestricted_cisd_correction_is_zero_for_single_electron_reference():
+    molecule = _make_open_shell_toy_molecule()
+    solver = UnrestrictedCasidaTDDFT(molecule)
+    result = solver.tda(nstates=1)
+    correction = unrestricted_cisd_second_order_correction(molecule, result, ac=0.4)
+
+    assert correction.shape == (1,)
+    assert jnp.allclose(correction, jnp.zeros((1,), dtype=correction.dtype), atol=1e-10)
+
+
 def test_restricted_cisd_correction_is_root_specific_and_scaled_by_ac():
     nmo = 3
     ao = jnp.eye(nmo, dtype=jnp.float64)
@@ -748,6 +827,100 @@ def test_nonlocal_response_action_contributes_to_dense_and_operator_paths():
     assert jnp.allclose(matrices.b_matrix[0, 0, 0, 0], 0.5, atol=1e-8)
     assert jnp.allclose(diagonal, jnp.array([1.5]), atol=1e-8)
     assert jnp.allclose(vind(x), x * 1.5, atol=1e-8)
+
+
+def test_tda_operator_prefers_nonlocal_response_action_over_matrix_pair():
+    molecule = _make_toy_molecule()
+
+    class _ActionFirstXC:
+        exact_exchange_fraction = 0.0
+        nonlocal_response_matrices_fn = True
+
+        def local_kernel(self, density):
+            return jnp.zeros_like(density)
+
+        def local_potential(self, density):
+            return jnp.zeros_like(density)
+
+        def nonlocal_response_action(self, mol, amplitudes, *, occupation_tolerance=1e-8):
+            del mol, occupation_tolerance
+            return 0.25 * jnp.asarray(amplitudes)
+
+        def nonlocal_response_diagonal(self, mol, *, occupation_tolerance=1e-8):
+            del mol, occupation_tolerance
+            return jnp.asarray([[0.25]])
+
+        def nonlocal_response_matrices(self, mol, *, occupation_tolerance=1e-8):
+            del mol, occupation_tolerance
+            raise AssertionError("operator path must not materialize matrix pair")
+
+    vind, diagonal, _, _ = build_restricted_tda_operator(
+        molecule,
+        _ActionFirstXC(),
+        materialize_matrix=False,
+    )
+    x = jnp.array([[0.4], [1.2]])
+
+    assert jnp.allclose(diagonal, jnp.array([1.25]), atol=1e-8)
+    assert jnp.allclose(vind(x), x * 1.25, atol=1e-8)
+
+
+def test_tda_operator_prefers_strict_tda_xc_matrix_over_grid_response_tensor():
+    molecule = _make_toy_molecule()
+
+    class _ChunkedStrictXC:
+        exact_exchange_fraction = 0.0
+        response_feature_kind = "MGGA"
+
+        def __init__(self, scale):
+            self.scale = scale
+
+        def strict_tda_xc_matrix(self, mol, *, occupation_tolerance=1e-8):
+            del mol, occupation_tolerance
+            return jnp.asarray([[self.scale]])
+
+        def grid_response_tensor(self, mol):
+            del mol
+            raise AssertionError("operator path must use strict_tda_xc_matrix")
+
+    vind, diagonal, _, _ = build_restricted_tda_operator(
+        molecule,
+        _ChunkedStrictXC(jnp.asarray(0.4)),
+        materialize_matrix=False,
+    )
+    x = jnp.asarray([[2.0]])
+
+    assert jnp.allclose(diagonal, jnp.asarray([1.4]), atol=1e-8)
+    assert jnp.allclose(vind(x), jnp.asarray([[2.8]]), atol=1e-8)
+
+
+def test_tda_operator_backward_uses_strict_tda_xc_matrix_over_grid_response_tensor():
+    molecule = _make_toy_molecule()
+
+    class _ChunkedStrictXC:
+        exact_exchange_fraction = 0.0
+        response_feature_kind = "MGGA"
+
+        def __init__(self, scale):
+            self.scale = scale
+
+        def strict_tda_xc_matrix(self, mol, *, occupation_tolerance=1e-8):
+            del mol, occupation_tolerance
+            return jnp.asarray([[self.scale]])
+
+        def grid_response_tensor(self, mol):
+            del mol
+            raise AssertionError("backward path must use strict_tda_xc_matrix")
+
+    def loss(scale):
+        vind, diagonal, _, _ = build_restricted_tda_operator(
+            molecule,
+            _ChunkedStrictXC(scale),
+            materialize_matrix=False,
+        )
+        return jnp.sum(vind(jnp.asarray([[2.0]]))) + jnp.sum(diagonal)
+
+    assert jnp.allclose(jax.grad(loss)(jnp.asarray(0.4)), jnp.asarray(3.0), atol=1e-8)
 
 
 def test_nonlocal_response_matrix_pair_contributes_to_casida_a_minus_b_metric():

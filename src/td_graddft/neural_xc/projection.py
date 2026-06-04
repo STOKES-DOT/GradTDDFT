@@ -14,10 +14,26 @@ from ..data.integrals.jax.packed_eri import _metadata_arrays, _mo_pair_products
 from ..features import (
     grid_features_for_molecule,
 )
+from .inputs import (
+    _local_pt2_feature_from_unrestricted_orbitals,
+    has_hfx_nu_source,
+    hfx_nu_grid_chunk,
+    hfx_nu_grid_chunk_padded,
+    hfx_nu_shape,
+    hfx_nu_source,
+    is_chunked_hfx_nu,
+)
 from ..xc_backend.jax_libxc import RestrictedFeatureBundle
 
 
 class NeuralXCProjectionMixin:
+    @staticmethod
+    def _uses_unrestricted_pt2_projection(molecule: Any) -> bool:
+        return (
+            getattr(molecule, "nocc_alpha", None) is not None
+            or getattr(molecule, "nocc_beta", None) is not None
+        )
+
     def scf_molecule_with_density(self, molecule: Any, density: Array) -> Any:
         """Return a restricted molecule view with a new spin-summed density."""
 
@@ -188,19 +204,28 @@ class NeuralXCProjectionMixin:
                     "molecule.hfx_local must have shape (2, ngrids, n_omega), "
                     f"got {hfx_local.shape}."
                 )
+        nu_source = hfx_nu_source(molecule)
+        if nu_source is None:
+            if hfx_local is None:
+                zeros = jnp.zeros((int(chunk_size), 1), dtype=dtype)
+                return zeros[:, 0], zeros[:, 0], zeros[:, 0]
             hfx_a = self._take_grid_chunk(hfx_local[0], start, chunk_size, axis=0)
             hfx_b = self._take_grid_chunk(hfx_local[1], start, chunk_size, axis=0)
         else:
-            nu = getattr(molecule, "hfx_nu", None)
-            if nu is None:
-                zeros = jnp.zeros((int(chunk_size), 1), dtype=dtype)
-                return zeros[:, 0], zeros[:, 0], zeros[:, 0]
-            nu_chunk = self._take_grid_chunk(
-                jnp.asarray(nu, dtype=dtype),
-                start,
-                chunk_size,
-                axis=1,
-            )
+            if is_chunked_hfx_nu(nu_source):
+                nu_chunk = hfx_nu_grid_chunk_padded(
+                    nu_source,
+                    int(start),
+                    chunk_size,
+                    dtype=dtype,
+                )
+            else:
+                nu_chunk = self._take_grid_chunk(
+                    jnp.asarray(nu_source, dtype=dtype),
+                    start,
+                    chunk_size,
+                    axis=1,
+                )
             e_a = jnp.einsum("gp,pq->gq", ao, rdm1[0], precision=Precision.HIGHEST)
             e_b = jnp.einsum("gp,pq->gq", ao, rdm1[1], precision=Precision.HIGHEST)
             fxx_a = jnp.einsum("wgbc,gc->wgb", nu_chunk, e_a, precision=Precision.HIGHEST)
@@ -210,19 +235,19 @@ class NeuralXCProjectionMixin:
             hfx_a = exx_a.T
             hfx_b = exx_b.T
 
-        if hfx_a.ndim == 1:
-            hfx_a = hfx_a[:, None]
-        if hfx_b.ndim == 1:
-            hfx_b = hfx_b[:, None]
         target = max(int(getattr(self, "hfx_channels", 1)), 1)
-        if hfx_a.shape[-1] < target and hfx_a.shape[-1] == 1:
-            hfx_a = jnp.repeat(hfx_a, target, axis=-1)
-        if hfx_b.shape[-1] < target and hfx_b.shape[-1] == 1:
-            hfx_b = jnp.repeat(hfx_b, target, axis=-1)
-        hfx_a = hfx_a[:, :target]
-        hfx_b = hfx_b[:, :target]
+
+        def _fit_channels(values):
+            values = values[:, None] if values.ndim == 1 else values
+            return jnp.repeat(values, target, axis=-1) if values.shape[-1] < target and values.shape[-1] == 1 else values[:, :target]
+
+        hfx_a = _fit_channels(hfx_a)
+        hfx_b = _fit_channels(hfx_b)
         hf_projected = hfx_a[:, 0] + hfx_b[:, 0]
         if getattr(self, "input_feature_mode", "enhanced") == "canonical":
+            if hfx_local is not None and nu_source is not None:
+                hfx_a = _fit_channels(self._take_grid_chunk(hfx_local[0], start, chunk_size, axis=0))
+                hfx_b = _fit_channels(self._take_grid_chunk(hfx_local[1], start, chunk_size, axis=0))
             return hf_projected, hfx_a, hfx_b
         return hf_projected, hfx_a[:, 0], hfx_b[:, 0]
 
@@ -278,15 +303,23 @@ class NeuralXCProjectionMixin:
         grad_b: Array,
         dtype: Any,
     ) -> Array:
-        nu = getattr(molecule, "hfx_nu", None)
-        if nu is None:
+        nu_source = hfx_nu_source(molecule)
+        if nu_source is None:
             return jnp.zeros((ao.shape[1], ao.shape[1]), dtype=dtype)
-        nu_chunk = self._take_grid_chunk(
-            jnp.asarray(nu, dtype=dtype),
-            start,
-            chunk_size,
-            axis=1,
-        )
+        if is_chunked_hfx_nu(nu_source):
+            nu_chunk = hfx_nu_grid_chunk_padded(
+                nu_source,
+                int(start),
+                chunk_size,
+                dtype=dtype,
+            )
+        else:
+            nu_chunk = self._take_grid_chunk(
+                jnp.asarray(nu_source, dtype=dtype),
+                start,
+                chunk_size,
+                axis=1,
+            )
         grad_a = jnp.asarray(grad_a, dtype=dtype)
         grad_b = jnp.asarray(grad_b, dtype=dtype)
         if grad_a.ndim == 1:
@@ -432,8 +465,6 @@ class NeuralXCProjectionMixin:
             )
             return vxc_matrix, extra_fock, energy, alpha_num, alpha_den
 
-        chunk_terms = jax.checkpoint(chunk_terms)
-
         def body(
             carry: tuple[Array, Array, Array, Array, Array],
             chunk_idx: Array,
@@ -449,17 +480,32 @@ class NeuralXCProjectionMixin:
                 den_sum + alpha_den,
             ), None
 
-        (vxc_matrix, extra_fock, energy, alpha_num, alpha_den), _ = jax.lax.scan(
-            body,
-            (matrix_zero, matrix_zero, scalar_zero, scalar_zero, scalar_zero),
-            jnp.arange(n_chunks),
-        )
+        if is_chunked_hfx_nu(hfx_nu_source(molecule)):
+            vxc_matrix = matrix_zero
+            extra_fock = matrix_zero
+            energy = scalar_zero
+            alpha_num = scalar_zero
+            alpha_den = scalar_zero
+            for chunk_idx in range(n_chunks):
+                start = chunk_idx * chunk_size
+                vxc_chunk, extra_chunk, energy_chunk, num_chunk, den_chunk = chunk_terms(start)
+                vxc_matrix = vxc_matrix + vxc_chunk
+                extra_fock = extra_fock + extra_chunk
+                energy = energy + energy_chunk
+                alpha_num = alpha_num + num_chunk
+                alpha_den = alpha_den + den_chunk
+        else:
+            (vxc_matrix, extra_fock, energy, alpha_num, alpha_den), _ = jax.lax.scan(
+                body,
+                (matrix_zero, matrix_zero, scalar_zero, scalar_zero, scalar_zero),
+                jnp.arange(n_chunks),
+            )
         alpha = alpha_num / jnp.maximum(alpha_den, self.density_floor)
         alpha = jnp.nan_to_num(alpha, nan=0.0, posinf=1.0, neginf=0.0)
         alpha = jnp.clip(alpha, 0.0, 1.0)
         alpha = self._alpha_for_scf_fock(
             alpha,
-            uses_explicit_hfx_fock=getattr(molecule, "hfx_nu", None) is not None,
+            uses_explicit_hfx_fock=has_hfx_nu_source(molecule),
         )
         vxc_matrix = jnp.nan_to_num(vxc_matrix, nan=0.0, posinf=0.0, neginf=0.0)
         extra_fock = jnp.nan_to_num(extra_fock, nan=0.0, posinf=0.0, neginf=0.0)
@@ -497,41 +543,118 @@ class NeuralXCProjectionMixin:
         features: RestrictedFeatureBundle | None = None,
     ) -> tuple[Array, Array, Array]:
         del features
-        hfx_local = getattr(molecule, "hfx_local", None)
-        if hfx_local is not None:
-            hfx_local = jnp.asarray(hfx_local)
-        else:
-            if getattr(molecule, "hfx_nu", None) is None:
-                raise AttributeError(
-                    "local HF channel requires molecule.hfx_local or molecule.hfx_nu."
-                )
+        nu_source = hfx_nu_source(molecule)
+        if nu_source is not None:
             if getattr(molecule, "ao", None) is None:
                 raise AttributeError("Molecule-like object must define ao.")
             ao = jnp.asarray(molecule.ao)
-            nu = jnp.asarray(molecule.hfx_nu)
-            if nu.ndim != 4:
+            n_omega, nu_ngrids, nao, nao2 = hfx_nu_shape(nu_source)
+            if n_omega < 1:
+                raise ValueError("HFX nu source must contain at least one omega channel.")
+            if nu_ngrids != int(ao.shape[0]):
                 raise ValueError(
-                    "molecule.hfx_nu must have shape (n_omega, ngrids, nao, nao), "
-                    f"got {nu.shape}."
+                    "HFX nu source grid axis must match molecule.ao first axis "
+                    f"(got {nu_ngrids} vs {ao.shape[0]})."
+                )
+            if nao != int(ao.shape[1]) or nao2 != int(ao.shape[1]):
+                raise ValueError(
+                    "HFX nu source AO dimensions must match molecule.ao second axis "
+                    f"(got {(nao, nao2)} vs {(ao.shape[1], ao.shape[1])})."
                 )
             dm_a, dm_b = self._restricted_spin_density_blocks(molecule)
-            e_a = jnp.einsum(
-                "rp,pq->rq",
-                ao,
-                dm_a,
-                precision=Precision.HIGHEST,
-            )
-            e_b = jnp.einsum(
-                "rp,pq->rq",
-                ao,
-                dm_b,
-                precision=Precision.HIGHEST,
-            )
-            fxx_a = jnp.einsum("wgbc,gc->wgb", nu, e_a, precision=Precision.HIGHEST)
-            fxx_b = jnp.einsum("wgbc,gc->wgb", nu, e_b, precision=Precision.HIGHEST)
-            exx_a = -0.5 * jnp.einsum("gq,wgq->wg", e_a, fxx_a, precision=Precision.HIGHEST)
-            exx_b = -0.5 * jnp.einsum("gq,wgq->wg", e_b, fxx_b, precision=Precision.HIGHEST)
-            hfx_local = jnp.stack([exx_a.T, exx_b.T], axis=0)
+            ngrids = int(ao.shape[0])
+            chunk_size = self._effective_response_grid_chunk_size(ngrids)
+
+            def chunk_energy(ao_chunk: Array, nu_chunk: Array) -> tuple[Array, Array]:
+                e_a_chunk = jnp.einsum(
+                    "gp,pq->gq",
+                    ao_chunk,
+                    dm_a,
+                    precision=Precision.HIGHEST,
+                )
+                e_b_chunk = jnp.einsum(
+                    "gp,pq->gq",
+                    ao_chunk,
+                    dm_b,
+                    precision=Precision.HIGHEST,
+                )
+                fxx_a_chunk = jnp.einsum(
+                    "gbc,gc->gb",
+                    nu_chunk,
+                    e_a_chunk,
+                    precision=Precision.HIGHEST,
+                )
+                fxx_b_chunk = jnp.einsum(
+                    "gbc,gc->gb",
+                    nu_chunk,
+                    e_b_chunk,
+                    precision=Precision.HIGHEST,
+                )
+                exx_a_chunk = -0.5 * jnp.einsum(
+                    "gq,gq->g",
+                    e_a_chunk,
+                    fxx_a_chunk,
+                    precision=Precision.HIGHEST,
+                )
+                exx_b_chunk = -0.5 * jnp.einsum(
+                    "gq,gq->g",
+                    e_b_chunk,
+                    fxx_b_chunk,
+                    precision=Precision.HIGHEST,
+                )
+                return exx_a_chunk, exx_b_chunk
+
+            chunk_energy = jax.checkpoint(chunk_energy)
+            if is_chunked_hfx_nu(nu_source):
+                e_hf_a_chunks = []
+                e_hf_b_chunks = []
+                for start in range(0, ngrids, chunk_size):
+                    end = min(start + chunk_size, ngrids)
+                    ao_chunk = ao[start:end]
+                    nu_chunk = hfx_nu_grid_chunk(
+                        nu_source,
+                        start,
+                        end,
+                        n_omega=1,
+                        dtype=ao.dtype,
+                    )[0]
+                    exx_a_chunk, exx_b_chunk = chunk_energy(ao_chunk, nu_chunk)
+                    e_hf_a_chunks.append(exx_a_chunk)
+                    e_hf_b_chunks.append(exx_b_chunk)
+                e_hf_a = jnp.concatenate(e_hf_a_chunks, axis=0)
+                e_hf_b = jnp.concatenate(e_hf_b_chunks, axis=0)
+            else:
+                nu = jnp.asarray(nu_source, dtype=ao.dtype)
+                n_chunks = (ngrids + chunk_size - 1) // chunk_size
+                zero = jnp.zeros((ngrids,), dtype=ao.dtype)
+
+                def body(
+                    carry: tuple[Array, Array],
+                    chunk_idx: Array,
+                ) -> tuple[tuple[Array, Array], None]:
+                    hfx_a, hfx_b = carry
+                    start = chunk_idx * chunk_size
+                    ao_chunk = self._take_grid_chunk(ao, start, chunk_size, axis=0)
+                    nu_chunk = self._take_grid_chunk(nu[:1], start, chunk_size, axis=1)[0]
+                    exx_a_chunk, exx_b_chunk = chunk_energy(ao_chunk, nu_chunk)
+                    hfx_a = jax.lax.dynamic_update_slice(hfx_a, exx_a_chunk, (start,))
+                    hfx_b = jax.lax.dynamic_update_slice(hfx_b, exx_b_chunk, (start,))
+                    return (hfx_a, hfx_b), None
+
+                (e_hf_a, e_hf_b), _ = jax.lax.scan(
+                    body,
+                    (zero, zero),
+                    jnp.arange(n_chunks),
+                )
+            hfx_local = jnp.stack([e_hf_a[:, None], e_hf_b[:, None]], axis=0)
+        else:
+            hfx_local = getattr(molecule, "hfx_local", None)
+            if hfx_local is None:
+                raise AttributeError(
+                    "local HF channel requires molecule.hfx_local, molecule.hfx_nu, "
+                    "or molecule.hfx_nu_api."
+                )
+            hfx_local = jnp.asarray(hfx_local)
 
         if hfx_local.ndim != 3 or hfx_local.shape[0] != 2:
             raise ValueError(
@@ -720,6 +843,31 @@ class NeuralXCProjectionMixin:
         total_energy = jnp.nan_to_num(total_energy, nan=0.0, posinf=0.0, neginf=0.0)
         return local_energy, total_energy
 
+    def _unrestricted_mp2_projection_components(
+        self,
+        molecule: Any,
+        *,
+        occupation_tolerance: float = 1e-8,
+        cached_local: Array | None = None,
+    ) -> tuple[Array, Array]:
+        local_energy, total_energy = _local_pt2_feature_from_unrestricted_orbitals(
+            molecule.ao,
+            molecule.mo_coeff,
+            molecule.mo_occ,
+            molecule.mo_energy,
+            rep_tensor=getattr(molecule, "rep_tensor", None),
+            eri_pair_matrix=getattr(molecule, "eri_pair_matrix", None),
+            df_factors=getattr(molecule, "df_factors", None),
+            occupation_tolerance=occupation_tolerance,
+            density_floor=self.density_floor,
+            return_total_energy=True,
+        )
+        if cached_local is not None:
+            local_energy = jnp.asarray(cached_local)
+        local_energy = jnp.nan_to_num(local_energy, nan=0.0, posinf=0.0, neginf=0.0)
+        total_energy = jnp.nan_to_num(total_energy, nan=0.0, posinf=0.0, neginf=0.0)
+        return local_energy, total_energy
+
     def _local_exact_pt2_grid_contribution(
         self,
         molecule: Any,
@@ -727,16 +875,22 @@ class NeuralXCProjectionMixin:
         features: RestrictedFeatureBundle | None = None,
         occupation_tolerance: float = 1e-8,
     ) -> Array:
-        """Restricted closed-shell MP2 local pair gauge without global rescaling."""
+        """Local MP2 pair gauge without global rescaling."""
         cached = getattr(molecule, "pt2_local", None)
         if cached is not None:
             cached_arr = jnp.asarray(cached)
             return jnp.nan_to_num(cached_arr, nan=0.0, posinf=0.0, neginf=0.0)
-        local_energy, _ = self._restricted_mp2_projection_components(
-            molecule,
-            features=features,
-            occupation_tolerance=occupation_tolerance,
-        )
+        if self._uses_unrestricted_pt2_projection(molecule):
+            local_energy, _ = self._unrestricted_mp2_projection_components(
+                molecule,
+                occupation_tolerance=occupation_tolerance,
+            )
+        else:
+            local_energy, _ = self._restricted_mp2_projection_components(
+                molecule,
+                features=features,
+                occupation_tolerance=occupation_tolerance,
+            )
         return local_energy
 
     def _legacy_projected_pt2_grid_contribution(
@@ -750,12 +904,19 @@ class NeuralXCProjectionMixin:
             raise AttributeError("Molecule-like object must define grid.weights.")
         weights = jnp.asarray(molecule.grid.weights)
         cached = getattr(molecule, "pt2_local", None)
-        projected, total_energy = self._restricted_mp2_projection_components(
-            molecule,
-            features=features,
-            occupation_tolerance=occupation_tolerance,
-            cached_local=None if cached is None else jnp.asarray(cached),
-        )
+        if self._uses_unrestricted_pt2_projection(molecule):
+            projected, total_energy = self._unrestricted_mp2_projection_components(
+                molecule,
+                occupation_tolerance=occupation_tolerance,
+                cached_local=None if cached is None else jnp.asarray(cached),
+            )
+        else:
+            projected, total_energy = self._restricted_mp2_projection_components(
+                molecule,
+                features=features,
+                occupation_tolerance=occupation_tolerance,
+                cached_local=None if cached is None else jnp.asarray(cached),
+            )
         projected_energy = jnp.tensordot(weights, projected, axes=(0, 0))
         scale = jnp.where(
             jnp.abs(projected_energy) > self.density_floor,
@@ -1032,7 +1193,7 @@ class NeuralXCProjectionMixin:
         )
         return energy, self._alpha_for_scf_fock(
             alpha,
-            uses_explicit_hfx_fock=getattr(molecule, "hfx_nu", None) is not None,
+            uses_explicit_hfx_fock=has_hfx_nu_source(molecule),
         )
 
     def scf_xc_energy_for_density(
@@ -1073,7 +1234,7 @@ class NeuralXCProjectionMixin:
     ) -> Array:
         """DM21-style explicit local-HFX contribution to the SCF Fock."""
 
-        if getattr(molecule, "hfx_nu", None) is None:
+        if not has_hfx_nu_source(molecule):
             density_arr = jnp.asarray(density)
             return jnp.zeros_like(density_arr)
         molecule_iter = self.scf_molecule_with_density(molecule, density)

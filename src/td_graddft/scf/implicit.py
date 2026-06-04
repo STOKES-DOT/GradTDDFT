@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Literal
+from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
-from jax.scipy.sparse.linalg import bicgstab as jax_bicgstab
-from jax.scipy.sparse.linalg import cg as jax_cg
 from jaxtyping import Array, PyTree
 
 
@@ -14,31 +12,19 @@ from jaxtyping import Array, PyTree
 class ImplicitFixedPointConfig:
     """Controls the adjoint solve for an implicit fixed-point state."""
 
-    solver_name: Literal["normal_cg", "gmres", "bicgstab"] = "gmres"
     tolerance: float = 1e-6
     max_iter: int = 6
-    restart: int = 12
     regularization: float = 0.0
     clip: float = 1e4
-
-
-FixedPointFn = Callable[..., Array]
-TransposeFn = Callable[..., Array]
-TransposeFactoryFn = Callable[..., Callable[[Array], Array]]
-ParamsVjpFn = Callable[..., PyTree]
 
 
 def implicit_fixed_point_solution(
     params: PyTree,
     *,
     solution: Array,
-    fixed_point: FixedPointFn,
+    fixed_point: Callable[..., Array],
     fixed_point_args: PyTree | None = None,
     config: ImplicitFixedPointConfig | None = None,
-    apply_fixed_point_transpose: TransposeFn | None = None,
-    apply_fixed_point_transpose_factory: TransposeFactoryFn | None = None,
-    params_vjp_from_adjoint: ParamsVjpFn | None = None,
-    callback_aux: Any | None = None,
 ) -> Array:
     """Return a primal fixed-point solution with an implicit VJP w.r.t. params.
 
@@ -67,45 +53,23 @@ def implicit_fixed_point_solution(
         params_local: PyTree,
         solution_local: Array,
         args_local: PyTree,
-    ) -> tuple[Array, tuple[PyTree, Array, PyTree, Any | None]]:
-        return solution_local, (params_local, solution_local, args_local, callback_aux)
+    ) -> tuple[Array, tuple[PyTree, Array, PyTree]]:
+        return solution_local, (params_local, solution_local, args_local)
 
     def _bwd(
-        res: tuple[PyTree, Array, PyTree, Any | None],
+        res: tuple[PyTree, Array, PyTree],
         cotangent_solution: Array,
     ) -> tuple[PyTree, Array, PyTree]:
-        params_local, solution_local, args_local, aux = res
+        params_local, solution_local, args_local = res
         rhs = _clean_and_clip(cotangent_solution, cfg.clip)
 
-        if apply_fixed_point_transpose_factory is not None:
-            if aux is None:
-                _apply_fixed_point_transpose = apply_fixed_point_transpose_factory(
-                    solution_local,
-                    params_local,
-                )
-            else:
-                _apply_fixed_point_transpose = apply_fixed_point_transpose_factory(
-                    solution_local,
-                    params_local,
-                    aux,
-                )
-        elif apply_fixed_point_transpose is None:
-            _, solution_vjp = jax.vjp(
-                lambda solution_var: _call_fixed_point(solution_var, params_local, args_local),
-                solution_local,
-            )
-
-            def _apply_fixed_point_transpose(vec: Array) -> Array:
-                return solution_vjp(vec)[0]
-        else:
-
-            def _apply_fixed_point_transpose(vec: Array) -> Array:
-                if aux is None:
-                    return apply_fixed_point_transpose(solution_local, params_local, vec)
-                return apply_fixed_point_transpose(solution_local, params_local, vec, aux)
+        _, solution_vjp = jax.vjp(
+            lambda solution_var: _call_fixed_point(solution_var, params_local, args_local),
+            solution_local,
+        )
 
         def _optimality_transpose(vec: Array) -> Array:
-            cot = _apply_fixed_point_transpose(vec) - vec
+            cot = solution_vjp(vec)[0] - vec
             return _clean_and_clip(cot, cfg.clip)
 
         regularization = jnp.asarray(
@@ -121,30 +85,17 @@ def implicit_fixed_point_solution(
         lambda_flat = solve_implicit_linear_system(
             _adjoint_op,
             -jax.lax.stop_gradient(rhs.reshape(-1)),
-            solver_name=cfg.solver_name,
             tol=cfg.tolerance,
             max_iter=cfg.max_iter,
-            restart=cfg.restart,
         )
         adjoint = jax.lax.stop_gradient(lambda_flat).reshape(solution_local.shape)
         adjoint = _clean_and_clip(adjoint, cfg.clip)
 
-        if params_vjp_from_adjoint is not None:
-            if aux is None:
-                grad_params = params_vjp_from_adjoint(solution_local, params_local, adjoint)
-            else:
-                grad_params = params_vjp_from_adjoint(
-                    solution_local,
-                    params_local,
-                    adjoint,
-                    aux,
-                )
-        else:
-            _, params_vjp = jax.vjp(
-                lambda params_var: _call_fixed_point(solution_local, params_var, args_local),
-                params_local,
-            )
-            grad_params = params_vjp(adjoint)[0]
+        _, params_vjp = jax.vjp(
+            lambda params_var: _call_fixed_point(solution_local, params_var, args_local),
+            params_local,
+        )
+        grad_params = params_vjp(adjoint)[0]
 
         grad_params = jax.tree_util.tree_map(
             lambda x: jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0),
@@ -164,43 +115,18 @@ def solve_implicit_linear_system(
     matvec: Callable[[Array], Array],
     b_flat: Array,
     *,
-    solver_name: str,
     tol: float,
     max_iter: int,
-    restart: int,
 ) -> Array:
-    if solver_name not in {"normal_cg", "gmres", "bicgstab"}:
-        raise ValueError(f"Unsupported implicit fixed-point solver: {solver_name}")
-    x0 = jnp.zeros_like(b_flat)
-
     def _matvec(vec: Array) -> Array:
         return jnp.nan_to_num(matvec(vec), nan=0.0, posinf=0.0, neginf=0.0)
 
-    if solver_name == "gmres":
-        sol = _solve_implicit_gmres(
-            _matvec,
-            b_flat,
-            tol=float(tol),
-            maxiter=max(1, int(max_iter)),
-        )
-    elif solver_name == "bicgstab":
-        sol, _ = jax_bicgstab(
-            _matvec,
-            b_flat,
-            x0=x0,
-            tol=float(tol),
-            atol=0.0,
-            maxiter=max(1, int(max_iter)),
-        )
-    else:
-        sol, _ = jax_cg(
-            _matvec,
-            b_flat,
-            x0=x0,
-            tol=float(tol),
-            atol=0.0,
-            maxiter=max(1, int(max_iter)),
-        )
+    sol = _solve_implicit_gmres(
+        _matvec,
+        b_flat,
+        tol=float(tol),
+        maxiter=max(1, int(max_iter)),
+    )
     return jnp.nan_to_num(sol, nan=0.0, posinf=0.0, neginf=0.0)
 
 

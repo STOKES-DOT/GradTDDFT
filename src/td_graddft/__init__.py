@@ -36,7 +36,6 @@ _PUBLIC_EXPORTS = {
     "CartesianAO": "data",
     "CartesianBasis": "data",
     "CoordinateUnit": "geomopt",
-    "SimpleMixingMLP": "neural_xc",
     "DifferentiableSCF": "scf",
     "DifferentiableSCFConfig": "scf",
     "DifferentiableSCFInfo": "scf",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -11,6 +13,15 @@ from ..data.integrals.jax.packed_eri import _metadata_arrays, _mo_pair_products
 from ..df import df_factors_to_mo_eri_slices
 from ..xc_backend.jax_libxc import RestrictedFeatureBundle
 
+_DM21_BETA = 1.0 / 1024.0
+
+
+def _bounded_ratio(numerator: Any, denominator: Any) -> jnp.ndarray:
+    ratio = jnp.asarray(numerator) / jnp.maximum(jnp.asarray(denominator), 1e-30)
+    ratio = jnp.nan_to_num(ratio, nan=0.0, posinf=1e30, neginf=0.0)
+    beta = jnp.asarray(_DM21_BETA, dtype=ratio.dtype)
+    return beta * ratio / (1.0 + beta * ratio)
+
 
 def canonical_input_features(
     features: RestrictedFeatureBundle,
@@ -21,11 +32,18 @@ def canonical_input_features(
 ) -> jnp.ndarray:
     rho_a = jnp.maximum(features.rho_a, density_floor)
     rho_b = jnp.maximum(features.rho_b, density_floor)
+    rho = jnp.maximum(features.rho, density_floor)
     tau_a = jnp.maximum(features.tau_a, 0.0)
     tau_b = jnp.maximum(features.tau_b, 0.0)
     norm_grad_a = jnp.maximum(features.sigma_aa, 0.0)
     norm_grad_b = jnp.maximum(features.sigma_bb, 0.0)
     norm_grad = jnp.maximum(features.sigma, 0.0)
+    tau_prefactor = (3.0 / 5.0) * (6.0 * jnp.pi**2) ** (2.0 / 3.0)
+    reduced_grad = _bounded_ratio(jnp.sqrt(norm_grad), rho ** (4.0 / 3.0))
+    reduced_grad_a = _bounded_ratio(jnp.sqrt(norm_grad_a), rho_a ** (4.0 / 3.0))
+    reduced_grad_b = _bounded_ratio(jnp.sqrt(norm_grad_b), rho_b ** (4.0 / 3.0))
+    reduced_tau_a = _bounded_ratio(tau_a, tau_prefactor * rho_a ** (5.0 / 3.0))
+    reduced_tau_b = _bounded_ratio(tau_b, tau_prefactor * rho_b ** (5.0 / 3.0))
     hfx_a = jnp.asarray(hfx_a)
     hfx_b = jnp.asarray(hfx_b)
     if hfx_a.ndim == rho_a.ndim:
@@ -41,11 +59,11 @@ def canonical_input_features(
         [
             rho_a,
             rho_b,
-            norm_grad,
-            norm_grad_a,
-            norm_grad_b,
-            tau_a,
-            tau_b,
+            reduced_grad,
+            reduced_grad_a,
+            reduced_grad_b,
+            reduced_tau_a,
+            reduced_tau_b,
         ],
         axis=-1,
     )
@@ -239,6 +257,207 @@ def _int1e_grids_name(mol: Any) -> str:
 
 def _int1e_rinv_name(mol: Any) -> str:
     return "int1e_rinv_cart" if bool(getattr(mol, "cart", False)) else "int1e_rinv_sph"
+
+
+@dataclass(frozen=True)
+class ChunkedHFXNu:
+    """Lazy grid-chunk API for local HFX ``nu`` matrices.
+
+    The dense equivalent has shape ``(n_omega, ngrids, nao, nao)``.  This API
+    keeps the same public shape contract while exposing only concrete grid
+    slices through :meth:`grid_chunk`.
+    """
+
+    shape: tuple[int, int, int, int]
+    chunk_size: int
+    _grid_chunk_fn: Any
+
+    @property
+    def ndim(self) -> int:
+        return 4
+
+    @classmethod
+    def from_dense(cls, dense: Any, *, chunk_size: int = 512) -> "ChunkedHFXNu":
+        array = np.asarray(dense)
+        if array.ndim != 4:
+            raise ValueError(
+                "dense HFX nu cache must have shape (n_omega, ngrids, nao, nao), "
+                f"got {array.shape}."
+            )
+
+        def grid_chunk(start: int, stop: int) -> np.ndarray:
+            return np.asarray(array[:, int(start) : int(stop)])
+
+        return cls(
+            shape=tuple(int(dim) for dim in array.shape),
+            chunk_size=int(chunk_size),
+            _grid_chunk_fn=grid_chunk,
+        )
+
+    @classmethod
+    def from_hdf5_dataset(
+        cls,
+        filename: str,
+        dataset_path: str,
+        *,
+        chunk_size: int = 512,
+    ) -> "ChunkedHFXNu":
+        try:
+            import h5py
+        except ModuleNotFoundError as exc:
+            raise ImportError("h5py is required for HDF5-backed HFX nu chunks.") from exc
+
+        filename = str(Path(filename).resolve())
+        dataset_path = str(dataset_path)
+        with h5py.File(filename, "r") as handle:
+            dataset = handle[dataset_path]
+            shape = tuple(int(dim) for dim in dataset.shape)
+        if len(shape) != 4:
+            raise ValueError(
+                "HDF5 HFX nu dataset must have shape (n_omega, ngrids, nao, nao), "
+                f"got {shape}."
+            )
+
+        def grid_chunk(start: int, stop: int) -> np.ndarray:
+            with h5py.File(filename, "r") as handle:
+                return np.asarray(handle[dataset_path][:, int(start) : int(stop)])
+
+        return cls(
+            shape=shape,
+            chunk_size=int(chunk_size),
+            _grid_chunk_fn=grid_chunk,
+        )
+
+    @classmethod
+    def from_pyscf_mol(
+        cls,
+        mol: Any,
+        coords: Any,
+        *,
+        omega_values: tuple[float, ...],
+        nao: int,
+        chunk_size: int = 512,
+    ) -> "ChunkedHFXNu":
+        coords_arr = np.asarray(coords)
+        omega_values = tuple(float(omega) for omega in omega_values)
+        shape = (
+            len(omega_values),
+            int(coords_arr.shape[0]),
+            int(nao),
+            int(nao),
+        )
+        int1e_grids = _int1e_grids_name(mol)
+        int1e_rinv = _int1e_rinv_name(mol)
+
+        def grid_chunk(start: int, stop: int) -> np.ndarray:
+            start_i = int(start)
+            stop_i = int(stop)
+            coords_chunk = coords_arr[start_i:stop_i]
+            chunks = []
+            for omega in omega_values:
+                try:
+                    with mol.with_range_coulomb(omega=float(omega)):
+                        nu = mol.intor(int1e_grids, hermi=1, grids=coords_chunk)
+                except TypeError:
+                    nu_list = []
+                    with mol.with_rinv_zeta(zeta=float(omega) * float(omega)):
+                        for coord in coords_chunk:
+                            with mol.with_rinv_origin(coord):
+                                nu_list.append(mol.intor(int1e_rinv, hermi=1))
+                    nu = np.asarray(nu_list)
+                chunks.append(np.asarray(nu))
+            return np.stack(chunks, axis=0)
+
+        return cls(
+            shape=shape,
+            chunk_size=int(chunk_size),
+            _grid_chunk_fn=grid_chunk,
+        )
+
+    def grid_chunk(self, start: int, stop: int) -> np.ndarray:
+        return np.asarray(self._grid_chunk_fn(int(start), int(stop)))
+
+    def materialize(self) -> np.ndarray:
+        chunks = [
+            self.grid_chunk(start, min(start + int(self.chunk_size), self.shape[1]))
+            for start in range(0, self.shape[1], int(self.chunk_size))
+        ]
+        if not chunks:
+            return np.zeros(self.shape, dtype=np.float64)
+        return np.concatenate(chunks, axis=1)
+
+
+def hfx_nu_source(molecule: Any | None) -> Any | None:
+    if molecule is None:
+        return None
+    nu = getattr(molecule, "hfx_nu", None)
+    if nu is not None:
+        return nu
+    return getattr(molecule, "hfx_nu_api", None)
+
+
+def has_hfx_nu_source(molecule: Any | None) -> bool:
+    return hfx_nu_source(molecule) is not None
+
+
+def is_chunked_hfx_nu(source: Any | None) -> bool:
+    return source is not None and callable(getattr(source, "grid_chunk", None))
+
+
+def hfx_nu_shape(source: Any) -> tuple[int, int, int, int]:
+    shape = getattr(source, "shape", None)
+    if shape is None:
+        shape = jnp.asarray(source).shape
+    if len(shape) != 4:
+        raise ValueError(
+            "HFX nu source must have shape (n_omega, ngrids, nao, nao), "
+            f"got {shape}."
+        )
+    return tuple(int(dim) for dim in shape)
+
+
+def hfx_nu_grid_chunk(
+    source: Any,
+    start: int,
+    stop: int,
+    *,
+    n_omega: int | None = None,
+    dtype: Any | None = None,
+) -> jnp.ndarray:
+    start_i = int(start)
+    stop_i = int(stop)
+    if is_chunked_hfx_nu(source):
+        chunk = source.grid_chunk(start_i, stop_i)
+    else:
+        chunk = jnp.asarray(source)[:, start_i:stop_i]
+    if n_omega is not None:
+        chunk = chunk[: int(n_omega)]
+    return jnp.asarray(chunk, dtype=dtype)
+
+
+def hfx_nu_grid_chunk_padded(
+    source: Any,
+    start: int,
+    chunk_size: int,
+    *,
+    n_omega: int | None = None,
+    dtype: Any | None = None,
+) -> jnp.ndarray:
+    _, ngrids, _, _ = hfx_nu_shape(source)
+    start_i = int(start)
+    chunk_size_i = int(chunk_size)
+    stop_i = min(start_i + chunk_size_i, ngrids)
+    chunk = hfx_nu_grid_chunk(
+        source,
+        start_i,
+        stop_i,
+        n_omega=n_omega,
+        dtype=dtype,
+    )
+    pad = chunk_size_i - int(chunk.shape[1])
+    if pad <= 0:
+        return chunk
+    return jnp.pad(chunk, ((0, 0), (0, pad), (0, 0), (0, 0)))
 
 
 def _local_hfx_features_from_dm(
@@ -513,10 +732,208 @@ def _local_pt2_feature_from_restricted_orbitals(
     return jnp.nan_to_num(local_energy, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def _local_pt2_feature_from_unrestricted_orbitals(
+    ao: Any,
+    mo_coeff: Any,
+    mo_occ: Any,
+    mo_energy: Any,
+    *,
+    rep_tensor: Any | None = None,
+    eri_pair_matrix: Any | None = None,
+    df_factors: Any | None = None,
+    occupation_tolerance: float = 1e-8,
+    density_floor: float = 1e-12,
+    return_total_energy: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
+    ao_arr = jnp.asarray(ao)
+    mo_coeff_arr = jnp.asarray(mo_coeff)
+    mo_occ_arr = jnp.asarray(mo_occ)
+    mo_energy_arr = jnp.asarray(mo_energy)
+
+    if mo_coeff_arr.ndim != 3 or mo_coeff_arr.shape[0] != 2:
+        raise ValueError(
+            "Unrestricted PT2 local feature expects mo_coeff with shape (2, nao, nmo)."
+        )
+    if mo_occ_arr.ndim != 2 or mo_occ_arr.shape[0] != 2:
+        raise ValueError(
+            "Unrestricted PT2 local feature expects mo_occ with shape (2, nmo)."
+        )
+    if mo_energy_arr.ndim != 2 or mo_energy_arr.shape[0] != 2:
+        raise ValueError(
+            "Unrestricted PT2 local feature expects mo_energy with shape (2, nmo)."
+        )
+
+    occ_a = jnp.where(mo_occ_arr[0] > occupation_tolerance)[0]
+    vir_a = jnp.where(mo_occ_arr[0] <= occupation_tolerance)[0]
+    occ_b = jnp.where(mo_occ_arr[1] > occupation_tolerance)[0]
+    vir_b = jnp.where(mo_occ_arr[1] <= occupation_tolerance)[0]
+
+    occ_coeff = jnp.concatenate(
+        [mo_coeff_arr[0][:, occ_a], mo_coeff_arr[1][:, occ_b]],
+        axis=1,
+    )
+    vir_coeff = jnp.concatenate(
+        [mo_coeff_arr[0][:, vir_a], mo_coeff_arr[1][:, vir_b]],
+        axis=1,
+    )
+    occ_spin = jnp.concatenate(
+        [
+            jnp.zeros((occ_a.shape[0],), dtype=jnp.int32),
+            jnp.ones((occ_b.shape[0],), dtype=jnp.int32),
+        ]
+    )
+    vir_spin = jnp.concatenate(
+        [
+            jnp.zeros((vir_a.shape[0],), dtype=jnp.int32),
+            jnp.ones((vir_b.shape[0],), dtype=jnp.int32),
+        ]
+    )
+    eps_occ = jnp.concatenate([mo_energy_arr[0][occ_a], mo_energy_arr[1][occ_b]])
+    eps_vir = jnp.concatenate([mo_energy_arr[0][vir_a], mo_energy_arr[1][vir_b]])
+
+    nocc_total = int(occ_coeff.shape[1])
+    nvir_total = int(vir_coeff.shape[1])
+    zero_local = jnp.zeros((int(ao_arr.shape[0]),), dtype=ao_arr.dtype)
+    zero_total = jnp.asarray(0.0, dtype=ao_arr.dtype)
+    if nocc_total < 2 or nvir_total < 2:
+        if return_total_energy:
+            return zero_local, zero_total
+        return zero_local
+
+    pair = None if eri_pair_matrix is None else jnp.asarray(eri_pair_matrix)
+    factors = None if df_factors is None else jnp.asarray(df_factors)
+    rep = None if rep_tensor is None else jnp.asarray(rep_tensor)
+
+    if factors is not None and factors.size != 0:
+        b_ov = jnp.einsum(
+            "Qpq,pi,qa->Qia",
+            factors,
+            occ_coeff,
+            vir_coeff,
+            precision=Precision.HIGHEST,
+        )
+        direct_spatial = jnp.einsum("Qia,Qjb->iajb", b_ov, b_ov, precision=Precision.HIGHEST)
+    elif pair is not None and pair.size != 0:
+        rows, cols, _, _ = _metadata_arrays(int(mo_coeff_arr.shape[1]), ao_arr.dtype)
+        ov = _mo_pair_products(occ_coeff, vir_coeff, rows, cols)
+        direct_spatial = jnp.einsum(
+            "iaP,PQ,jbQ->iajb",
+            ov,
+            pair,
+            ov,
+            precision=Precision.HIGHEST,
+        )
+    else:
+        if rep is None or rep.size == 0:
+            raise ValueError(
+                "Unrestricted PT2 local feature requires rep_tensor, eri_pair_matrix, or df_factors."
+            )
+        direct_spatial = jnp.einsum(
+            "pqrs,pi,qa,rj,sb->iajb",
+            rep,
+            occ_coeff,
+            vir_coeff,
+            occ_coeff,
+            vir_coeff,
+            precision=Precision.HIGHEST,
+        )
+
+    exchange_spatial = jnp.transpose(direct_spatial, (0, 3, 2, 1))
+    mask_direct = (
+        (occ_spin[:, None, None, None] == vir_spin[None, :, None, None])
+        & (occ_spin[None, None, :, None] == vir_spin[None, None, None, :])
+    )
+    mask_exchange = (
+        (occ_spin[:, None, None, None] == vir_spin[None, None, None, :])
+        & (occ_spin[None, None, :, None] == vir_spin[None, :, None, None])
+    )
+    direct = direct_spatial * mask_direct.astype(direct_spatial.dtype)
+    exchange = exchange_spatial * mask_exchange.astype(exchange_spatial.dtype)
+
+    denom = (
+        eps_occ[:, None, None, None]
+        + eps_occ[None, None, :, None]
+        - eps_vir[None, :, None, None]
+        - eps_vir[None, None, None, :]
+    )
+    denom = jnp.where(jnp.abs(denom) > density_floor, denom, -density_floor)
+    amplitudes = (direct - exchange) / denom
+    pair_weights = 0.5 * amplitudes
+    total_energy = jnp.sum(direct * pair_weights)
+
+    rho_o = jnp.einsum("rp,pi->ri", ao_arr, occ_coeff, precision=Precision.HIGHEST)
+    rho_v = jnp.einsum("rp,pa->ra", ao_arr, vir_coeff, precision=Precision.HIGHEST)
+    rho_ov = jnp.einsum("ri,ra->ria", rho_o, rho_v, precision=Precision.HIGHEST)
+
+    if factors is not None and factors.size != 0:
+        grid_aux = jnp.einsum(
+            "Qpq,gp,gq->gQ",
+            factors,
+            ao_arr,
+            ao_arr,
+            precision=Precision.HIGHEST,
+        )
+        qjb = jnp.einsum(
+            "Qrs,rj,sb->Qjb",
+            factors,
+            occ_coeff,
+            vir_coeff,
+            precision=Precision.HIGHEST,
+        )
+        pair_potential = jnp.einsum(
+            "gQ,Qjb->gjb",
+            grid_aux,
+            qjb,
+            precision=Precision.HIGHEST,
+        )
+    elif pair is not None and pair.size != 0:
+        rows, cols, _, multiplicity = _metadata_arrays(int(mo_coeff_arr.shape[1]), ao_arr.dtype)
+        grid_pair = ao_arr[:, rows] * ao_arr[:, cols] * multiplicity[None, :]
+        ov = _mo_pair_products(occ_coeff, vir_coeff, rows, cols)
+        pair_potential = jnp.einsum(
+            "gP,PQ,jbQ->gjb",
+            grid_pair,
+            pair,
+            ov,
+            precision=Precision.HIGHEST,
+        )
+    else:
+        pair_potential = jnp.einsum(
+            "gp,gq,pqrs,rj,sb->gjb",
+            ao_arr,
+            ao_arr,
+            rep,
+            occ_coeff,
+            vir_coeff,
+            precision=Precision.HIGHEST,
+        )
+
+    local_energy = jnp.einsum(
+        "ria,rjb,iajb->r",
+        rho_ov,
+        pair_potential,
+        pair_weights,
+        precision=Precision.HIGHEST,
+    )
+    local_energy = jnp.nan_to_num(local_energy, nan=0.0, posinf=0.0, neginf=0.0)
+    total_energy = jnp.nan_to_num(total_energy, nan=0.0, posinf=0.0, neginf=0.0)
+    if return_total_energy:
+        return local_energy, total_energy
+    return local_energy
+
+
 __all__ = [
+    "ChunkedHFXNu",
     "canonical_input_features",
     "enhanced_input_features",
+    "has_hfx_nu_source",
+    "hfx_nu_grid_chunk",
+    "hfx_nu_grid_chunk_padded",
+    "hfx_nu_shape",
+    "hfx_nu_source",
+    "is_chunked_hfx_nu",
     "_local_hfx_features_from_basis_dm",
     "_local_hfx_features_from_dm",
     "_local_pt2_feature_from_restricted_orbitals",
+    "_local_pt2_feature_from_unrestricted_orbitals",
 ]

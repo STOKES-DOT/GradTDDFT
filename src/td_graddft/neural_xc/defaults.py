@@ -15,16 +15,12 @@ DEFAULT_NEURAL_XC_RESPONSE_HF_MODE = "strict"
 DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE = "approx"
 
 DEFAULT_INPUT_FEATURE_MODE: Literal["enhanced", "canonical"] = "canonical"
-DEFAULT_NETWORK_ARCHITECTURE: Literal["simple_mlp", "graddft_residual"] = (
-    "graddft_residual"
-)
+DEFAULT_NETWORK_ARCHITECTURE = "graddft_residual"
 DEFAULT_NETWORK_HIDDEN_DIMS: tuple[int, ...] = (
-    256,
-    256,
-    256,
-    256,
-    256,
-    256,
+    192,
+    192,
+    192,
+    192,
 )
 
 def _normalize_semilocal_xc(semilocal_xc: str | Sequence[str]) -> tuple[str, ...]:

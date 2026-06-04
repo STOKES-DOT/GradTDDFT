@@ -64,7 +64,58 @@ def test_rks_module_exposes_one_shared_integrals_entry():
 
 
 def test_spin_density_gradient_helper_is_shared():
+    assert rks._spin_density_and_gradient is features._spin_density_and_gradient
     assert uks._spin_density_and_gradient is features._spin_density_and_gradient
+
+
+def test_rks_integral_path_does_not_build_restricted_spin_view(monkeypatch):
+    def _fail_restricted_spin_view(**_kwargs):
+        raise AssertionError("RKS fock construction should use direct density features")
+
+    monkeypatch.setattr(rks, "_restricted_spin_view", _fail_restricted_spin_view)
+
+    result = rks.run_rks_from_integrals(
+        overlap=jnp.eye(1),
+        hcore=jnp.zeros((1, 1)),
+        eri=jnp.zeros((1, 1, 1, 1)),
+        nelectron=2,
+        nuclear_repulsion=0.0,
+        ao=jnp.ones((1, 1)),
+        ao_deriv1=jnp.zeros((4, 1, 1)),
+        grid_weights=jnp.ones((1,)),
+        config=rks.RKSConfig(xc_spec="hf", max_cycle=1),
+    )
+
+    assert result.density_matrix.shape == (1, 1)
+
+
+def test_rks_direct_density_features_match_restricted_spin_view():
+    nao = 2
+    ngrids = 3
+    ao = jnp.asarray([[1.0, 0.2], [0.4, 1.2], [0.8, -0.3]])
+    ao_deriv1 = jnp.ones((4, ngrids, nao)) * 0.25
+    weights = jnp.ones((ngrids,))
+    density = jnp.asarray([[1.0, 0.1], [0.1, 0.4]])
+    mo_coeff = jnp.eye(nao)
+    mo_occ = jnp.asarray([2.0, 0.0])
+    mo_energy = jnp.asarray([-0.5, 0.2])
+
+    restricted_state = rks._restricted_spin_view(
+        ao=ao,
+        ao_deriv1=ao_deriv1,
+        weights=weights,
+        density=density,
+        mo_coeff=mo_coeff,
+        mo_occ=mo_occ,
+        mo_energy=mo_energy,
+    )
+    restricted_features, restricted_grad = features.restricted_grid_features_with_gradients(
+        restricted_state
+    )
+    direct_rho, direct_grad = rks._spin_density_and_gradient(ao, ao_deriv1, density)
+
+    assert jnp.allclose(direct_rho, restricted_features.rho)
+    assert jnp.allclose(direct_grad, restricted_grad)
 
 
 def test_rks_and_uks_build_molecule_like_pytree_states():

@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.lax import Precision
 from jaxtyping import Array, PyTree
 
@@ -15,8 +16,61 @@ from ..features import (
     has_explicit_spin_axis,
     restricted_transition_response_features,
 )
-from ..tddft.cisd import restricted_cisd_second_order_correction
+from ..tddft.cisd import (
+    restricted_cisd_second_order_correction,
+    unrestricted_cisd_second_order_correction,
+)
+from .inputs import (
+    has_hfx_nu_source,
+    hfx_nu_grid_chunk,
+    hfx_nu_shape,
+    hfx_nu_source,
+    is_chunked_hfx_nu,
+)
 from ..xc_backend.jax_libxc import RestrictedFeatureBundle
+
+
+def _requires_unrestricted_response_binding(molecule: Any) -> bool:
+    if not has_explicit_spin_axis(molecule):
+        return False
+    nocc_alpha = getattr(molecule, "nocc_alpha", None)
+    nocc_beta = getattr(molecule, "nocc_beta", None)
+    if nocc_alpha is not None and nocc_beta is not None:
+        try:
+            if int(nocc_alpha) != int(nocc_beta):
+                return True
+        except (TypeError, ValueError):
+            pass
+    for name in ("mo_occ", "rdm1"):
+        value = getattr(molecule, name, None)
+        if value is None:
+            continue
+        arr = jnp.asarray(value)
+        if isinstance(arr, jax.core.Tracer):
+            continue
+        host_arr = np.asarray(jax.device_get(arr))
+        if host_arr.ndim >= 1 and int(host_arr.shape[0]) == 2 and not np.allclose(host_arr[0], host_arr[1]):
+            return True
+    return False
+
+
+def _restricted_response_shape_from_molecule(
+    molecule: Any,
+    *,
+    occupation_tolerance: float,
+) -> tuple[int, int]:
+    mo_coeff = jnp.asarray(molecule.mo_coeff)
+    mo_occ = jnp.asarray(molecule.mo_occ)
+    if mo_coeff.ndim == 3:
+        mo_coeff = mo_coeff[0]
+        mo_occ = mo_occ[0]
+    nocc = getattr(molecule, "nocc", None)
+    if nocc is None:
+        nocc = int(jnp.count_nonzero(mo_occ > occupation_tolerance))
+    else:
+        nocc = int(nocc)
+    return nocc, int(mo_coeff.shape[-1]) - nocc
+
 
 @dataclass(frozen=True)
 class BoundNeuralXCFunctional:
@@ -35,10 +89,16 @@ class BoundNeuralXCFunctional:
     local_hf_fraction_values: Array | None = None
     response_feature_kind: str | None = None
     grid_response_tensor_fn: Callable[[], Array] | None = None
+    spin_local_kernel_fn: Callable[[Array, Array], Any] | None = None
     grid_hfx_feature_gradients_fn: Callable[[], tuple[Array, Array]] | None = None
     strict_tda_xc_matrix_fn: Callable[..., Array] | None = None
+    strict_tda_xc_action_fn: Callable[..., Array] | None = None
+    strict_tda_xc_diagonal_fn: Callable[..., Array] | None = None
     nonlocal_response_matrix_fn: Callable[..., Array] | None = None
     nonlocal_response_matrices_fn: Callable[..., tuple[Array, Array]] | None = None
+    nonlocal_response_action_fn: Callable[..., Array] | None = None
+    nonlocal_response_b_action_fn: Callable[..., Array] | None = None
+    nonlocal_response_diagonal_fn: Callable[..., Array] | None = None
     post_tda_correction_fn: Callable[..., Array] | None = None
     post_tddft_correction_fn: Callable[..., Array] | None = None
 
@@ -141,6 +201,13 @@ class BoundNeuralXCFunctional:
             raise AttributeError("This bound functional does not expose a strict response tensor.")
         return self.grid_response_tensor_fn()
 
+    def spin_local_kernel(self, density_alpha: Array, density_beta: Array) -> Any:
+        if self.spin_local_kernel_fn is None:
+            raise AttributeError(
+                "This bound functional does not expose a spin-resolved local kernel."
+            )
+        return self.spin_local_kernel_fn(density_alpha, density_beta)
+
     def grid_hfx_feature_gradients(self, molecule: Any) -> tuple[Array, Array]:
         del molecule
         if self.grid_hfx_feature_gradients_fn is None:
@@ -161,6 +228,53 @@ class BoundNeuralXCFunctional:
             molecule,
             occupation_tolerance=occupation_tolerance,
         )
+
+    def strict_tda_xc_action(
+        self,
+        molecule: Any,
+        amplitudes: Array,
+        *,
+        occupation_tolerance: float = 1e-8,
+    ) -> Array:
+        if self.strict_tda_xc_action_fn is not None:
+            return self.strict_tda_xc_action_fn(
+                molecule,
+                amplitudes,
+                occupation_tolerance=occupation_tolerance,
+            )
+        matrix = self.strict_tda_xc_matrix(
+            molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+        nocc, nvir = _restricted_response_shape_from_molecule(
+            molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+        values = jnp.asarray(amplitudes, dtype=matrix.dtype)
+        flat = values.reshape(-1, int(nocc * nvir))
+        out = flat @ jnp.asarray(matrix, dtype=values.dtype).T
+        return out.reshape(values.shape)
+
+    def strict_tda_xc_diagonal(
+        self,
+        molecule: Any,
+        *,
+        occupation_tolerance: float = 1e-8,
+    ) -> Array:
+        if self.strict_tda_xc_diagonal_fn is not None:
+            return self.strict_tda_xc_diagonal_fn(
+                molecule,
+                occupation_tolerance=occupation_tolerance,
+            )
+        matrix = self.strict_tda_xc_matrix(
+            molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+        nocc, nvir = _restricted_response_shape_from_molecule(
+            molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+        return jnp.diag(jnp.asarray(matrix)).reshape(nocc, nvir)
 
     def nonlocal_response_matrix(
         self,
@@ -197,6 +311,104 @@ class BoundNeuralXCFunctional:
             molecule,
             occupation_tolerance=occupation_tolerance,
         )
+
+    def nonlocal_response_action(
+        self,
+        molecule: Any,
+        amplitudes: Array,
+        *,
+        occupation_tolerance: float = 1e-8,
+    ) -> Array:
+        if self.nonlocal_response_action_fn is not None:
+            return self.nonlocal_response_action_fn(
+                molecule,
+                amplitudes,
+                occupation_tolerance=occupation_tolerance,
+            )
+        if self.nonlocal_response_matrix_fn is None and self.nonlocal_response_matrices_fn is None:
+            raise AttributeError("This bound functional does not expose a nonlocal response action.")
+        matrix = self.nonlocal_response_matrix(
+            molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+        nocc, nvir = _restricted_response_shape_from_molecule(
+            molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+        values = jnp.asarray(amplitudes, dtype=matrix.dtype)
+        flat = values.reshape(-1, int(nocc * nvir))
+        out = flat @ jnp.asarray(matrix, dtype=values.dtype).T
+        return out.reshape(values.shape)
+
+    def nonlocal_response_a_action(
+        self,
+        molecule: Any,
+        amplitudes: Array,
+        *,
+        occupation_tolerance: float = 1e-8,
+    ) -> Array:
+        return self.nonlocal_response_action(
+            molecule,
+            amplitudes,
+            occupation_tolerance=occupation_tolerance,
+        )
+
+    def nonlocal_response_b_action(
+        self,
+        molecule: Any,
+        amplitudes: Array,
+        *,
+        occupation_tolerance: float = 1e-8,
+    ) -> Array:
+        if self.nonlocal_response_b_action_fn is not None:
+            return self.nonlocal_response_b_action_fn(
+                molecule,
+                amplitudes,
+                occupation_tolerance=occupation_tolerance,
+            )
+        if self.nonlocal_response_matrices_fn is not None:
+            _, matrix = self.nonlocal_response_matrices(
+                molecule,
+                occupation_tolerance=occupation_tolerance,
+            )
+        elif self.nonlocal_response_matrix_fn is not None:
+            matrix = self.nonlocal_response_matrix(
+                molecule,
+                occupation_tolerance=occupation_tolerance,
+            )
+        else:
+            raise AttributeError("This bound functional does not expose a B nonlocal response action.")
+        nocc, nvir = _restricted_response_shape_from_molecule(
+            molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+        values = jnp.asarray(amplitudes, dtype=matrix.dtype)
+        flat = values.reshape(-1, int(nocc * nvir))
+        out = flat @ jnp.asarray(matrix, dtype=values.dtype).T
+        return out.reshape(values.shape)
+
+    def nonlocal_response_diagonal(
+        self,
+        molecule: Any,
+        *,
+        occupation_tolerance: float = 1e-8,
+    ) -> Array:
+        if self.nonlocal_response_diagonal_fn is not None:
+            return self.nonlocal_response_diagonal_fn(
+                molecule,
+                occupation_tolerance=occupation_tolerance,
+            )
+        if self.nonlocal_response_matrix_fn is None and self.nonlocal_response_matrices_fn is None:
+            raise AttributeError("This bound functional does not expose a nonlocal response diagonal.")
+        matrix = self.nonlocal_response_matrix(
+            molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+        nocc, nvir = _restricted_response_shape_from_molecule(
+            molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+        return jnp.diag(jnp.asarray(matrix)).reshape(nocc, nvir)
 
     def post_tda_correction(
         self,
@@ -242,52 +454,21 @@ class NeuralXCBindingMixin:
         pt2_projected: Array | None = None,
         grid_weights: Array,
     ) -> tuple[Array, Array]:
-        """Gradient of weighted XC energy with respect to local HF features.
-
-        The derivative includes both uses of the local HF quantity: coefficient
-        inputs and the explicit HF basis channel. That makes the result suitable
-        for a DM21-style contraction back to a Fock contribution.
-        """
-
         semilocal_total = jnp.sum(semilocal_channels, axis=-1)
-        semilocal_local_channels = self._semilocal_local_contribution_channels(
-            features,
-            semilocal_channels,
-        )
         weights = jnp.asarray(grid_weights)
-
-        def _omega0_total(hfx_a: Array, hfx_b: Array) -> Array:
-            hfx_a = jnp.asarray(hfx_a)
-            hfx_b = jnp.asarray(hfx_b)
-            if hfx_a.ndim == jnp.asarray(hf_projected).ndim:
-                return hfx_a + hfx_b
-            return hfx_a[..., 0] + hfx_b[..., 0]
-
-        def weighted_energy_from_hfx(hfx_a: Array, hfx_b: Array) -> Array:
-            hfx_total = _omega0_total(hfx_a, hfx_b)
-            coefficients = self.channel_coefficients(
-                params,
-                features,
-                semilocal_energy_density=semilocal_total,
-                hf_energy_density=hfx_total,
-                pt2_energy_density=pt2_projected,
-                hf_spin_energy_density=(hfx_a, hfx_b),
-            )
-            basis = self._assemble_basis_channels(
-                semilocal_local_channels,
-                hf_projected=hfx_total,
-                pt2_projected=pt2_projected,
-            )
-            channels = self._assemble_channel_contributions(coefficients, basis)
-            local_xc = jnp.sum(channels, axis=-1)
-            return jnp.tensordot(weights, local_xc, axes=(0, 0))
-
-        grad_a, grad_b = jax.grad(weighted_energy_from_hfx, argnums=(0, 1))(
-            hf_feature_a,
-            hf_feature_b,
+        coefficients = self.channel_coefficients(
+            params,
+            features,
+            semilocal_energy_density=semilocal_total,
+            hf_energy_density=jax.lax.stop_gradient(hf_projected),
+            pt2_energy_density=pt2_projected,
+            hf_spin_energy_density=(
+                jax.lax.stop_gradient(hf_feature_a),
+                jax.lax.stop_gradient(hf_feature_b),
+            ),
         )
-        grad_a = jnp.nan_to_num(grad_a, nan=0.0, posinf=0.0, neginf=0.0)
-        grad_b = jnp.nan_to_num(grad_b, nan=0.0, posinf=0.0, neginf=0.0)
+        grad_a = weights * self._local_hf_fraction_from_coefficients(coefficients)
+        grad_b = grad_a
         grad_a = self._maybe_clip_response(grad_a)
         grad_b = self._maybe_clip_response(grad_b)
         return grad_a, grad_b
@@ -298,7 +479,7 @@ class NeuralXCBindingMixin:
         return jnp.zeros((ao.shape[1], ao.shape[1]), dtype=matrix_dtype)
 
     def uses_explicit_hfx_fock_for_scf(self, molecule: Any) -> bool:
-        return getattr(molecule, "hfx_nu", None) is not None
+        return has_hfx_nu_source(molecule)
 
     def _contract_hfx_feature_gradients_to_restricted_fock(
         self,
@@ -308,24 +489,18 @@ class NeuralXCBindingMixin:
         *,
         dtype: Any | None = None,
     ) -> tuple[Array, bool]:
-        nu_cache = getattr(molecule, "hfx_nu", None)
-        if nu_cache is None:
+        nu_source = hfx_nu_source(molecule)
+        if nu_source is None:
             return self._zero_hfx_fock(molecule, dtype), False
 
         ao = jnp.asarray(molecule.ao)
         matrix_dtype = ao.dtype if dtype is None else dtype
         ao = jnp.asarray(ao, dtype=matrix_dtype)
-        nu = jnp.asarray(nu_cache, dtype=matrix_dtype)
-        if nu.ndim != 4:
-            raise ValueError(
-                "molecule.hfx_nu must have shape (n_omega, ngrids, nao, nao), "
-                f"got {nu.shape}."
-            )
-        n_omega, ngrid, nao, nao2 = nu.shape
+        n_omega, ngrid, nao, nao2 = hfx_nu_shape(nu_source)
         if nao != ao.shape[1] or nao2 != ao.shape[1]:
             raise ValueError(
-                "molecule.hfx_nu AO dimensions must match molecule.ao second axis "
-                f"(got {nu.shape[-2:]} vs {(ao.shape[1], ao.shape[1])})."
+                "HFX nu source AO dimensions must match molecule.ao second axis "
+                f"(got {(nao, nao2)} vs {(ao.shape[1], ao.shape[1])})."
             )
 
         grad_a = jnp.asarray(grad_a, dtype=matrix_dtype)
@@ -350,7 +525,6 @@ class NeuralXCBindingMixin:
                 "HFX feature gradient omega axis cannot exceed hfx_nu omega axis "
                 f"(got {n_grad_channels} vs {n_omega})."
             )
-        nu = nu[:n_grad_channels]
         grad = 0.5 * (grad_a[:, :n_grad_channels] + grad_b[:, :n_grad_channels])
         grad = jnp.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -364,10 +538,45 @@ class NeuralXCBindingMixin:
                 "Restricted HFX Fock contraction expects rdm1 with shape "
                 "(nao, nao) or (2, nao, nao)."
             )
-        e = jnp.einsum("gp,pq->gq", ao, density_half, precision=Precision.HIGHEST)
-        fxx = jnp.einsum("wgbc,gc->wgb", nu, e, precision=Precision.HIGHEST)
-        aow = -0.5 * fxx * jnp.transpose(grad, (1, 0))[:, :, None]
-        vmat = jnp.einsum("gp,wgq->pq", ao, aow, precision=Precision.HIGHEST)
+        if is_chunked_hfx_nu(nu_source):
+            vmat = jnp.zeros((ao.shape[1], ao.shape[1]), dtype=matrix_dtype)
+            chunk_size = self._effective_response_grid_chunk_size(int(ngrid))
+            for start in range(0, int(ngrid), chunk_size):
+                end = min(start + chunk_size, int(ngrid))
+                ao_chunk = ao[start:end]
+                grad_chunk = grad[start:end]
+                nu_chunk = hfx_nu_grid_chunk(
+                    nu_source,
+                    start,
+                    end,
+                    n_omega=n_grad_channels,
+                    dtype=matrix_dtype,
+                )
+                e = jnp.einsum(
+                    "gp,pq->gq",
+                    ao_chunk,
+                    density_half,
+                    precision=Precision.HIGHEST,
+                )
+                fxx = jnp.einsum(
+                    "wgbc,gc->wgb",
+                    nu_chunk,
+                    e,
+                    precision=Precision.HIGHEST,
+                )
+                aow = -0.5 * fxx * jnp.transpose(grad_chunk, (1, 0))[:, :, None]
+                vmat = vmat + jnp.einsum(
+                    "gp,wgq->pq",
+                    ao_chunk,
+                    aow,
+                    precision=Precision.HIGHEST,
+                )
+        else:
+            nu = jnp.asarray(nu_source, dtype=matrix_dtype)[:n_grad_channels]
+            e = jnp.einsum("gp,pq->gq", ao, density_half, precision=Precision.HIGHEST)
+            fxx = jnp.einsum("wgbc,gc->wgb", nu, e, precision=Precision.HIGHEST)
+            aow = -0.5 * fxx * jnp.transpose(grad, (1, 0))[:, :, None]
+            vmat = jnp.einsum("gp,wgq->pq", ao, aow, precision=Precision.HIGHEST)
         correction = vmat + vmat.T
         correction = jnp.nan_to_num(correction, nan=0.0, posinf=0.0, neginf=0.0)
         return 0.5 * (correction + correction.T), True
@@ -385,7 +594,7 @@ class NeuralXCBindingMixin:
         pt2_projected: Array | None,
         grid_weights: Array,
     ) -> tuple[Array, bool]:
-        if getattr(molecule, "hfx_nu", None) is None:
+        if not has_hfx_nu_source(molecule):
             return self._zero_hfx_fock(molecule), False
         grad_a, grad_b = self._grid_hfx_feature_gradients(
             params,
@@ -408,7 +617,7 @@ class NeuralXCBindingMixin:
         params: PyTree,
         molecule: Any,
     ) -> tuple[Array, bool]:
-        if getattr(molecule, "hfx_nu", None) is None:
+        if not has_hfx_nu_source(molecule):
             return self._zero_hfx_fock(molecule), False
         features = grid_features_for_molecule(molecule)
         semilocal_channels = self.semilocal_energy_density_channels(features)
@@ -506,6 +715,60 @@ class NeuralXCBindingMixin:
         )
         return matrix_a, matrix_b
 
+    def _strict_nonlocal_response_actions_from_molecule(
+        self,
+        params: PyTree,
+        response_molecule: Any,
+        amplitudes: Array,
+        *,
+        occupation_tolerance: float,
+    ) -> tuple[Array, Array]:
+        (
+            response_features,
+            response_total_gradient,
+            response_hf,
+            response_hfx_a,
+            response_hfx_b,
+            response_pt2,
+        ) = self._nonlocal_response_components(response_molecule)
+        return self._strict_hf_nonlocal_response_actions(
+            params,
+            response_molecule,
+            response_features,
+            response_total_gradient,
+            response_hf,
+            amplitudes,
+            hf_spin_energy_density=(response_hfx_a, response_hfx_b),
+            pt2_projected=response_pt2,
+            occupation_tolerance=occupation_tolerance,
+        )
+
+    def _strict_nonlocal_response_diagonal_from_molecule(
+        self,
+        params: PyTree,
+        response_molecule: Any,
+        *,
+        occupation_tolerance: float,
+    ) -> Array:
+        (
+            response_features,
+            response_total_gradient,
+            response_hf,
+            response_hfx_a,
+            response_hfx_b,
+            response_pt2,
+        ) = self._nonlocal_response_components(response_molecule)
+        return self._strict_hf_nonlocal_response_diagonal(
+            params,
+            response_molecule,
+            response_features,
+            response_total_gradient,
+            response_hf,
+            hf_spin_energy_density=(response_hfx_a, response_hfx_b),
+            pt2_projected=response_pt2,
+            occupation_tolerance=occupation_tolerance,
+        )
+
     def _nonlocal_response_callbacks(
         self,
         params: PyTree,
@@ -523,6 +786,115 @@ class NeuralXCBindingMixin:
 
         return None, nonlocal_response_matrices_fn
 
+    def _nonlocal_response_action_callbacks(
+        self,
+        params: PyTree,
+    ) -> tuple[Callable[..., Array], Callable[..., Array], Callable[..., Array]]:
+        def nonlocal_response_action_fn(
+            response_molecule: Any,
+            amplitudes: Array,
+            *,
+            occupation_tolerance: float = 1e-8,
+        ) -> Array:
+            action_a, _ = self._strict_nonlocal_response_actions_from_molecule(
+                params,
+                response_molecule,
+                amplitudes,
+                occupation_tolerance=occupation_tolerance,
+            )
+            return action_a
+
+        def nonlocal_response_b_action_fn(
+            response_molecule: Any,
+            amplitudes: Array,
+            *,
+            occupation_tolerance: float = 1e-8,
+        ) -> Array:
+            _, action_b = self._strict_nonlocal_response_actions_from_molecule(
+                params,
+                response_molecule,
+                amplitudes,
+                occupation_tolerance=occupation_tolerance,
+            )
+            return action_b
+
+        def nonlocal_response_diagonal_fn(
+            response_molecule: Any,
+            *,
+            occupation_tolerance: float = 1e-8,
+        ) -> Array:
+            return self._strict_nonlocal_response_diagonal_from_molecule(
+                params,
+                response_molecule,
+                occupation_tolerance=occupation_tolerance,
+            )
+
+        return (
+            nonlocal_response_action_fn,
+            nonlocal_response_b_action_fn,
+            nonlocal_response_diagonal_fn,
+        )
+
+    def _unrestricted_spin_local_kernel_components(
+        self,
+        params: PyTree,
+        features: RestrictedFeatureBundle,
+        grad_a: Array,
+        grad_b: Array,
+        hf_projected: Array,
+        *,
+        pt2_projected: Array | None = None,
+        hf_spin_energy_density: tuple[Array, Array],
+        response_hf_mode: str | None = None,
+        response_pt2_mode: str | None = None,
+    ) -> tuple[Array, Array, Array]:
+        response_variables, active = self._unrestricted_response_variables(
+            features,
+            grad_a,
+            grad_b,
+        )
+        hf_feature_a, hf_feature_b = hf_spin_energy_density
+        pt2_feature = (
+            jnp.zeros_like(hf_projected)
+            if pt2_projected is None
+            else jnp.asarray(pt2_projected)
+        )
+        point_hessian_fn = jax.hessian(
+            self._total_point_local_energy_from_unrestricted_variables,
+            argnums=1,
+        )
+
+        def point_spin_tensor(
+            variables: Array,
+            hf_point: Array,
+            hf_point_a: Array,
+            hf_point_b: Array,
+            pt2_point: Array,
+        ) -> Array:
+            tensor = point_hessian_fn(
+                params,
+                variables,
+                hf_point,
+                hf_point_a,
+                hf_point_b,
+                pt2_point=pt2_point,
+                response_hf_mode=response_hf_mode,
+                response_pt2_mode=response_pt2_mode,
+            )
+            tensor = jnp.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+            tensor = self._maybe_clip_response(tensor)
+            return 0.5 * (tensor[:2, :2] + tensor[:2, :2].T)
+
+        spin_tensor = jax.vmap(point_spin_tensor)(
+            response_variables,
+            hf_projected,
+            hf_feature_a,
+            hf_feature_b,
+            pt2_feature,
+        )
+        spin_tensor = spin_tensor * active[:, None, None].astype(spin_tensor.dtype)
+        return spin_tensor[:, 0, 0], spin_tensor[:, 0, 1], spin_tensor[:, 1, 1]
+
     def _strict_pt2_posthoc_correction_callbacks(
         self,
         rho: Array,
@@ -530,6 +902,8 @@ class NeuralXCBindingMixin:
         coefficients: Array,
         pt2_projected: Array | None,
         grid_weights: Array,
+        *,
+        unrestricted: bool = False,
     ) -> tuple[Callable[..., Array] | None, Callable[..., Array] | None]:
         if (
             not self.include_pt2_channel
@@ -541,7 +915,10 @@ class NeuralXCBindingMixin:
         n_semilocal = int(jnp.asarray(semilocal_channels).shape[-1])
         pt2_coefficients = jnp.asarray(coefficients)[..., n_semilocal]
         weights = jnp.asarray(grid_weights)
-        density = jnp.maximum(jnp.asarray(rho), self.density_floor)
+        density = jnp.asarray(rho)
+        if density.ndim > 1:
+            density = jnp.sum(density, axis=-1)
+        density = jnp.maximum(density, self.density_floor)
         numerator = jnp.tensordot(weights, density * pt2_coefficients, axes=(0, 0))
         denominator = jnp.tensordot(weights, density, axes=(0, 0))
         ac = numerator / jnp.maximum(denominator, self.density_floor)
@@ -554,7 +931,12 @@ class NeuralXCBindingMixin:
             *,
             occupation_tolerance: float = 1e-8,
         ) -> Array:
-            return restricted_cisd_second_order_correction(
+            correction_fn = (
+                unrestricted_cisd_second_order_correction
+                if unrestricted
+                else restricted_cisd_second_order_correction
+            )
+            return correction_fn(
                 molecule,
                 result,
                 ac=ac,
@@ -618,7 +1000,7 @@ class NeuralXCBindingMixin:
         ao = self._take_grid_chunk(molecule.ao, start, chunk_size, axis=0)
         rho_o = jnp.einsum("rp,pi->ri", ao, orbo, precision=Precision.HIGHEST)
         rho_v = jnp.einsum("rp,pa->ra", ao, orbv, precision=Precision.HIGHEST)
-        rho_ov = jnp.einsum("ri,ra->ria", rho_o, rho_v, precision=Precision.HIGHEST)
+        rho_ov = rho_o[:, :, None] * rho_v[:, None, :]
         if kind == "LDA":
             return rho_ov[None, ...]
 
@@ -643,28 +1025,16 @@ class NeuralXCBindingMixin:
             orbv,
             precision=Precision.HIGHEST,
         )
-        gga_features = jnp.einsum(
-            "xri,ra->xria",
-            rho_o_full,
-            rho_v_full[0],
-            precision=Precision.HIGHEST,
-        )
+        gga_features = rho_o_full[:, :, :, None] * rho_v_full[0][None, :, None, :]
         gga_features = gga_features.at[1:4].add(
-            jnp.einsum(
-                "ri,xra->xria",
-                rho_o_full[0],
-                rho_v_full[1:4],
-                precision=Precision.HIGHEST,
-            )
+            rho_o_full[0][None, :, :, None] * rho_v_full[1:4, :, None, :]
         )
         if kind == "GGA":
             return gga_features
 
-        tau_ov = 0.5 * jnp.einsum(
-            "xri,xra->ria",
-            rho_o_full[1:4],
-            rho_v_full[1:4],
-            precision=Precision.HIGHEST,
+        tau_ov = 0.5 * jnp.sum(
+            rho_o_full[1:4, :, :, None] * rho_v_full[1:4, :, None, :],
+            axis=0,
         )
         mgga_features = jnp.concatenate([gga_features, tau_ov[None, ...]], axis=0)
         if kind == "MGGA":
@@ -686,15 +1056,13 @@ class NeuralXCBindingMixin:
         lapl_o = jnp.einsum("rp,pi->ri", ao_laplacian, orbo, precision=Precision.HIGHEST)
         lapl_v = jnp.einsum("rp,pa->ra", ao_laplacian, orbv, precision=Precision.HIGHEST)
         lapl_ov = (
-            jnp.einsum("ri,ra->ria", lapl_o, rho_v, precision=Precision.HIGHEST)
+            lapl_o[:, :, None] * rho_v[:, None, :]
             + 2.0
-            * jnp.einsum(
-                "xri,xra->ria",
-                rho_o_full[1:4],
-                rho_v_full[1:4],
-                precision=Precision.HIGHEST,
+            * jnp.sum(
+                rho_o_full[1:4, :, :, None] * rho_v_full[1:4, :, None, :],
+                axis=0,
             )
-            + jnp.einsum("ri,ra->ria", rho_o, lapl_v, precision=Precision.HIGHEST)
+            + rho_o[:, :, None] * lapl_v[:, None, :]
         )
         return jnp.concatenate([mgga_features, lapl_ov[None, ...]], axis=0)
 
@@ -896,6 +1264,202 @@ class NeuralXCBindingMixin:
         matrix, _ = jax.lax.scan(body, zero, jnp.arange(n_chunks))
         return matrix
 
+    def _strict_tda_xc_action_chunked(
+        self,
+        params: PyTree,
+        molecule: Any,
+        features: RestrictedFeatureBundle,
+        total_gradient: Array,
+        hf_projected: Array,
+        amplitudes: Array,
+        *,
+        pt2_projected: Array | None,
+        hf_spin_energy_density: tuple[Array, Array],
+        response_hf_mode: str | None,
+        strict_payload: tuple[Array, Array, Array, Array, Array],
+        occupation_tolerance: float,
+    ) -> Array:
+        weights = jnp.asarray(molecule.grid.weights)
+        ngrids = int(weights.shape[0])
+        chunk_size = self._effective_response_grid_chunk_size(ngrids)
+        n_chunks = (ngrids + chunk_size - 1) // chunk_size
+        feature_kind = self._response_feature_kind_label()
+        response_variables, active, hf_feature_a, hf_feature_b, pt2_feature = strict_payload
+
+        mo_coeff = jnp.asarray(molecule.mo_coeff)
+        mo_occ = jnp.asarray(molecule.mo_occ)
+        if mo_coeff.ndim == 3:
+            mo_coeff = mo_coeff[0]
+            mo_occ = mo_occ[0]
+        nocc = getattr(molecule, "nocc", None)
+        if nocc is None:
+            nocc = int(jnp.count_nonzero(mo_occ > occupation_tolerance))
+        else:
+            nocc = int(nocc)
+        nmo = int(mo_coeff.shape[1])
+        if nocc <= 0 or nocc >= nmo:
+            raise ValueError("Need at least one occupied and one virtual orbital.")
+        orbo = mo_coeff[:, :nocc]
+        orbv = mo_coeff[:, nocc:]
+        nvir = int(nmo - nocc)
+        values = jnp.asarray(amplitudes)
+        leading_shape = values.shape[:-2]
+        flat_values = values.reshape(-1, nocc, nvir)
+        zero = jnp.zeros_like(flat_values)
+
+        def chunk_action(local_params: PyTree, start: Array) -> Array:
+            response_chunk = self._transition_response_features_chunk(
+                molecule,
+                start,
+                chunk_size,
+                feature_kind=feature_kind,
+                occupation_tolerance=occupation_tolerance,
+                orbo=orbo,
+                orbv=orbv,
+            )
+            strict_payload_chunk = (
+                self._take_grid_chunk(response_variables, start, chunk_size, axis=0),
+                self._take_grid_chunk(active, start, chunk_size, axis=0),
+                self._take_grid_chunk(hf_feature_a, start, chunk_size, axis=0),
+                self._take_grid_chunk(hf_feature_b, start, chunk_size, axis=0),
+                self._take_grid_chunk(pt2_feature, start, chunk_size, axis=0),
+            )
+            tensor_chunk = self._strict_total_response_tensor(
+                local_params,
+                features,
+                total_gradient,
+                self._take_grid_chunk(hf_projected, start, chunk_size, axis=0),
+                pt2_projected=None,
+                hf_spin_energy_density=(
+                    strict_payload_chunk[2],
+                    strict_payload_chunk[3],
+                ),
+                response_hf_mode=response_hf_mode,
+                response_pt2_mode=self.response_pt2_mode,
+                strict_payload=strict_payload_chunk,
+            )
+            projected = jnp.einsum(
+                "xria,nia->nxr",
+                response_chunk,
+                flat_values,
+                precision=Precision.HIGHEST,
+            )
+            weighted = jnp.einsum(
+                "xyr,nyr->nxr",
+                tensor_chunk * self._take_grid_chunk(weights, start, chunk_size, axis=0)[
+                    None,
+                    None,
+                    :,
+                ],
+                projected,
+                precision=Precision.HIGHEST,
+            )
+            return 2.0 * jnp.einsum(
+                "xria,nxr->nia",
+                response_chunk,
+                weighted,
+                precision=Precision.HIGHEST,
+            )
+
+        chunk_action = jax.checkpoint(chunk_action)
+
+        def body(acc: Array, chunk_idx: Array) -> tuple[Array, None]:
+            return acc + chunk_action(params, chunk_idx * chunk_size), None
+
+        out, _ = jax.lax.scan(body, zero, jnp.arange(n_chunks))
+        return out.reshape(leading_shape + (nocc, nvir))
+
+    def _strict_tda_xc_diagonal_chunked(
+        self,
+        params: PyTree,
+        molecule: Any,
+        features: RestrictedFeatureBundle,
+        total_gradient: Array,
+        hf_projected: Array,
+        *,
+        pt2_projected: Array | None,
+        hf_spin_energy_density: tuple[Array, Array],
+        response_hf_mode: str | None,
+        strict_payload: tuple[Array, Array, Array, Array, Array],
+        occupation_tolerance: float,
+    ) -> Array:
+        weights = jnp.asarray(molecule.grid.weights)
+        ngrids = int(weights.shape[0])
+        chunk_size = self._effective_response_grid_chunk_size(ngrids)
+        n_chunks = (ngrids + chunk_size - 1) // chunk_size
+        feature_kind = self._response_feature_kind_label()
+        response_variables, active, hf_feature_a, hf_feature_b, pt2_feature = strict_payload
+
+        mo_coeff = jnp.asarray(molecule.mo_coeff)
+        mo_occ = jnp.asarray(molecule.mo_occ)
+        if mo_coeff.ndim == 3:
+            mo_coeff = mo_coeff[0]
+            mo_occ = mo_occ[0]
+        nocc = getattr(molecule, "nocc", None)
+        if nocc is None:
+            nocc = int(jnp.count_nonzero(mo_occ > occupation_tolerance))
+        else:
+            nocc = int(nocc)
+        nmo = int(mo_coeff.shape[1])
+        if nocc <= 0 or nocc >= nmo:
+            raise ValueError("Need at least one occupied and one virtual orbital.")
+        orbo = mo_coeff[:, :nocc]
+        orbv = mo_coeff[:, nocc:]
+        zero = jnp.zeros((nocc, int(nmo - nocc)), dtype=weights.dtype)
+
+        def chunk_diagonal(local_params: PyTree, start: Array) -> Array:
+            response_chunk = self._transition_response_features_chunk(
+                molecule,
+                start,
+                chunk_size,
+                feature_kind=feature_kind,
+                occupation_tolerance=occupation_tolerance,
+                orbo=orbo,
+                orbv=orbv,
+            )
+            strict_payload_chunk = (
+                self._take_grid_chunk(response_variables, start, chunk_size, axis=0),
+                self._take_grid_chunk(active, start, chunk_size, axis=0),
+                self._take_grid_chunk(hf_feature_a, start, chunk_size, axis=0),
+                self._take_grid_chunk(hf_feature_b, start, chunk_size, axis=0),
+                self._take_grid_chunk(pt2_feature, start, chunk_size, axis=0),
+            )
+            tensor_chunk = self._strict_total_response_tensor(
+                local_params,
+                features,
+                total_gradient,
+                self._take_grid_chunk(hf_projected, start, chunk_size, axis=0),
+                pt2_projected=None,
+                hf_spin_energy_density=(
+                    strict_payload_chunk[2],
+                    strict_payload_chunk[3],
+                ),
+                response_hf_mode=response_hf_mode,
+                response_pt2_mode=self.response_pt2_mode,
+                strict_payload=strict_payload_chunk,
+            )
+            weighted_tensor = tensor_chunk * self._take_grid_chunk(
+                weights,
+                start,
+                chunk_size,
+                axis=0,
+            )[None, None, :]
+            return 2.0 * jnp.einsum(
+                "xyr,xria,yria->ia",
+                weighted_tensor,
+                response_chunk,
+                response_chunk,
+                precision=Precision.HIGHEST,
+            )
+
+        chunk_diagonal = jax.checkpoint(chunk_diagonal)
+
+        def body(acc: Array, chunk_idx: Array) -> tuple[Array, None]:
+            return acc + chunk_diagonal(params, chunk_idx * chunk_size), None
+
+        diagonal, _ = jax.lax.scan(body, zero, jnp.arange(n_chunks))
+        return diagonal
+
     def _alpha_for_scf_fock(
         self,
         alpha: Array,
@@ -1059,6 +1623,11 @@ class NeuralXCBindingMixin:
         _, nonlocal_response_matrices_fn = self._nonlocal_response_callbacks(
             params
         )
+        (
+            nonlocal_response_action_fn,
+            nonlocal_response_b_action_fn,
+            nonlocal_response_diagonal_fn,
+        ) = self._nonlocal_response_action_callbacks(params)
         post_tda_correction_fn, post_tddft_correction_fn = (
             self._strict_pt2_posthoc_correction_callbacks(
                 features.rho,
@@ -1092,6 +1661,21 @@ class NeuralXCBindingMixin:
                 if self.response_hf_mode == "strict"
                 else None
             ),
+            nonlocal_response_action_fn=(
+                nonlocal_response_action_fn
+                if self.response_hf_mode == "strict"
+                else None
+            ),
+            nonlocal_response_b_action_fn=(
+                nonlocal_response_b_action_fn
+                if self.response_hf_mode == "strict"
+                else None
+            ),
+            nonlocal_response_diagonal_fn=(
+                nonlocal_response_diagonal_fn
+                if self.response_hf_mode == "strict"
+                else None
+            ),
             post_tda_correction_fn=post_tda_correction_fn,
             post_tddft_correction_fn=post_tddft_correction_fn,
         )
@@ -1102,6 +1686,104 @@ class NeuralXCBindingMixin:
         molecule: Any,
     ) -> BoundNeuralXCFunctional:
         """TD-response-only binding that avoids assembling strict potential terms."""
+
+        if _requires_unrestricted_response_binding(molecule):
+            features, grad_a, grad_b = grid_features_with_spin_gradients_for_molecule(molecule)
+            semilocal_channels = self.semilocal_energy_density_channels(features)
+            semilocal = jnp.sum(semilocal_channels, axis=-1)
+            hf_projected, hf_projected_a, hf_projected_b = (
+                self.projected_hf_grid_contribution_components(
+                    molecule,
+                    features=features,
+                )
+            )
+            if self.input_feature_mode == "canonical":
+                hfx_feature_a, hfx_feature_b = self._canonical_hfx_feature_channels(
+                    molecule,
+                    features,
+                    hf_energy_density=hf_projected,
+                    hf_spin_energy_density=(hf_projected_a, hf_projected_b),
+                )
+            else:
+                hfx_feature_a, hfx_feature_b = hf_projected_a, hf_projected_b
+            pt2_projected = (
+                self.projected_pt2_grid_contribution(molecule, features=features)
+                if self.include_pt2_channel
+                else None
+            )
+            coefficient_inputs = self.coefficient_inputs(
+                features,
+                semilocal,
+                hf_projected,
+                pt2_energy_density=pt2_projected,
+                molecule=molecule,
+                hf_spin_energy_density=(hf_projected_a, hf_projected_b),
+            )
+            coefficients = self.channel_coefficients_from_inputs(
+                params,
+                coefficient_inputs,
+            )
+            hf_field = self._local_hf_fraction_from_coefficients(coefficients)
+            rho = jnp.maximum(features.rho, self.density_floor)
+            grid_weights = jnp.asarray(molecule.grid.weights)
+            numerator = jnp.tensordot(grid_weights, rho * hf_field, axes=(0, 0))
+            denominator = jnp.tensordot(grid_weights, rho, axes=(0, 0))
+            alpha = numerator / jnp.maximum(denominator, self.density_floor)
+            alpha = jnp.nan_to_num(alpha, nan=0.0, posinf=1.0, neginf=0.0)
+            alpha = jnp.clip(alpha, 0.0, 1.0)
+
+            def spin_local_kernel_fn(
+                density_alpha: Array,
+                density_beta: Array,
+            ) -> tuple[Array, Array, Array]:
+                del density_alpha, density_beta
+                return self._unrestricted_spin_local_kernel_components(
+                    params,
+                    features,
+                    grad_a,
+                    grad_b,
+                    hf_projected,
+                    pt2_projected=pt2_projected,
+                    hf_spin_energy_density=(hfx_feature_a, hfx_feature_b),
+                    response_hf_mode=self.response_hf_mode,
+                    response_pt2_mode=self.response_pt2_mode,
+                )
+
+            response_alpha = (
+                jnp.zeros_like(jnp.asarray(alpha))
+                if self.response_hf_mode == "strict"
+                else alpha
+            )
+            post_tda_correction_fn, post_tddft_correction_fn = (
+                self._strict_pt2_posthoc_correction_callbacks(
+                    features.rho,
+                    semilocal_channels,
+                    coefficients,
+                    pt2_projected,
+                    molecule.grid.weights,
+                    unrestricted=True,
+                )
+            )
+            return BoundNeuralXCFunctional(
+                name=self.name,
+                projected_local_potential_values=jnp.zeros_like(features.rho),
+                projected_local_kernel_values=jnp.zeros_like(features.rho),
+                exact_exchange_fraction=response_alpha,
+                projected_local_potential_gradient_values=None,
+                projected_local_potential_tau_values=None,
+                projected_local_potential_laplacian_values=None,
+                projected_energy_density_values=None,
+                local_hf_fraction_values=None,
+                response_feature_kind=self._response_feature_kind_label(),
+                grid_response_tensor_fn=None,
+                spin_local_kernel_fn=spin_local_kernel_fn,
+                grid_hfx_feature_gradients_fn=None,
+                strict_tda_xc_matrix_fn=None,
+                nonlocal_response_matrix_fn=None,
+                nonlocal_response_matrices_fn=None,
+                post_tda_correction_fn=post_tda_correction_fn,
+                post_tddft_correction_fn=post_tddft_correction_fn,
+            )
 
         features, total_gradient = grid_features_with_gradients_for_molecule(molecule)
         semilocal_channels = self.semilocal_energy_density_channels(features)
@@ -1184,9 +1866,54 @@ class NeuralXCBindingMixin:
                 occupation_tolerance=occupation_tolerance,
             )
 
+        def strict_tda_xc_action_fn(
+            response_molecule: Any,
+            amplitudes: Array,
+            *,
+            occupation_tolerance: float = 1e-8,
+        ) -> Array:
+            del response_molecule
+            return self._strict_tda_xc_action_chunked(
+                params,
+                molecule,
+                features,
+                total_gradient,
+                hf_projected,
+                amplitudes,
+                pt2_projected=pt2_projected,
+                hf_spin_energy_density=(hfx_feature_a, hfx_feature_b),
+                response_hf_mode=self.response_hf_mode,
+                strict_payload=strict_payload,
+                occupation_tolerance=occupation_tolerance,
+            )
+
+        def strict_tda_xc_diagonal_fn(
+            response_molecule: Any,
+            *,
+            occupation_tolerance: float = 1e-8,
+        ) -> Array:
+            del response_molecule
+            return self._strict_tda_xc_diagonal_chunked(
+                params,
+                molecule,
+                features,
+                total_gradient,
+                hf_projected,
+                pt2_projected=pt2_projected,
+                hf_spin_energy_density=(hfx_feature_a, hfx_feature_b),
+                response_hf_mode=self.response_hf_mode,
+                strict_payload=strict_payload,
+                occupation_tolerance=occupation_tolerance,
+            )
+
         _, nonlocal_response_matrices_fn = self._nonlocal_response_callbacks(
             params
         )
+        (
+            nonlocal_response_action_fn,
+            nonlocal_response_b_action_fn,
+            nonlocal_response_diagonal_fn,
+        ) = self._nonlocal_response_action_callbacks(params)
         post_tda_correction_fn, post_tddft_correction_fn = (
             self._strict_pt2_posthoc_correction_callbacks(
                 features.rho,
@@ -1215,11 +1942,29 @@ class NeuralXCBindingMixin:
             local_hf_fraction_values=None,
             response_feature_kind=self._response_feature_kind_label(),
             grid_response_tensor_fn=grid_response_tensor_fn,
+            spin_local_kernel_fn=None,
             grid_hfx_feature_gradients_fn=None,
             strict_tda_xc_matrix_fn=strict_tda_xc_matrix_fn,
+            strict_tda_xc_action_fn=strict_tda_xc_action_fn,
+            strict_tda_xc_diagonal_fn=strict_tda_xc_diagonal_fn,
             nonlocal_response_matrix_fn=None,
             nonlocal_response_matrices_fn=(
                 nonlocal_response_matrices_fn
+                if self.response_hf_mode == "strict"
+                else None
+            ),
+            nonlocal_response_action_fn=(
+                nonlocal_response_action_fn
+                if self.response_hf_mode == "strict"
+                else None
+            ),
+            nonlocal_response_b_action_fn=(
+                nonlocal_response_b_action_fn
+                if self.response_hf_mode == "strict"
+                else None
+            ),
+            nonlocal_response_diagonal_fn=(
+                nonlocal_response_diagonal_fn
                 if self.response_hf_mode == "strict"
                 else None
             ),
@@ -1472,6 +2217,7 @@ class NeuralXCBindingMixin:
             local_hf_fraction_values=None,
             response_feature_kind=self._response_feature_kind_label(),
             grid_response_tensor_fn=None,
+            spin_local_kernel_fn=None,
             grid_hfx_feature_gradients_fn=None,
             nonlocal_response_matrix_fn=None,
         )

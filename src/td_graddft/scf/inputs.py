@@ -948,6 +948,7 @@ def _build_uks_inputs_from_cpu_backbone(
     mol_kwargs: dict[str, Any],
 ) -> UKSIntegralInputs:
     skip_cpu_eri = integral_backend_mode == "gpu"
+    mol = None
     if isinstance(atom, MoleculeSpec):
         if not isinstance(basis, str):
             raise TypeError("Traceable libcint geometry currently supports named basis strings only.")

@@ -1,26 +1,13 @@
 from __future__ import annotations
 
-from typing import Any, Callable, Literal, Sequence
+from typing import Any, Callable, Sequence
 
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from jaxtyping import Array
 
-from .defaults import (
-    DEFAULT_NETWORK_ARCHITECTURE,
-    DEFAULT_NETWORK_HIDDEN_DIMS,
-)
-
-
-ResolvedArchitecture = Literal["simple_mlp", "graddft_residual"]
-
-_ARCHITECTURE_ALIASES = {
-    "residual": "graddft_residual",
-    "graddft_residual": "graddft_residual",
-    "mlp": "simple_mlp",
-    "simple_mlp": "simple_mlp",
-}
+from .defaults import DEFAULT_NETWORK_HIDDEN_DIMS
 
 _ACTIVATION_ALIASES: dict[str, Callable[..., Any]] = {
     "tanh": nn.tanh,
@@ -29,18 +16,6 @@ _ACTIVATION_ALIASES: dict[str, Callable[..., Any]] = {
     "gelu": nn.gelu,
     "silu": nn.silu,
 }
-
-
-def normalize_architecture(architecture: str) -> ResolvedArchitecture:
-    key = str(architecture).lower()
-    try:
-        return _ARCHITECTURE_ALIASES[key]  # type: ignore[return-value]
-    except KeyError as exc:
-        raise ValueError(
-            f"Unsupported architecture={architecture!r}. "
-            "Expected 'residual', 'graddft_residual', 'mlp', or 'simple_mlp'."
-        ) from exc
-
 
 def resolve_activation(activation: str | Callable[..., Any]) -> Callable[..., Any]:
     if callable(activation):
@@ -62,29 +37,6 @@ def normalize_hidden_dims(hidden_dims: Sequence[int]) -> tuple[int, ...]:
     if any(width <= 0 for width in dims):
         raise ValueError("All hidden_dims entries must be positive integers.")
     return dims
-
-
-class SimpleMixingMLP(nn.Module):
-    hidden_dims: Sequence[int]
-    output_dim: int = 2
-    activation: Callable[[Array], Array] = nn.tanh
-    squash_offset: float = 1e-4
-    sigmoid_scale_factor: float = 2.0
-
-    @nn.compact
-    def __call__(self, inputs: Array) -> Array:
-        # Use a smooth even transform so TDDFT mixed second derivatives stay finite
-        # when local response features pass through zero.
-        offset = jnp.asarray(self.squash_offset, dtype=jnp.asarray(inputs).dtype)
-        x = 0.5 * jnp.log(jnp.square(inputs) + offset * offset)
-        for width in self.hidden_dims:
-            x = nn.Dense(width)(x)
-            x = self.activation(x)
-        x = nn.Dense(self.output_dim)(x)
-        if self.sigmoid_scale_factor > 0.0:
-            scale = jnp.asarray(self.sigmoid_scale_factor, dtype=x.dtype)
-            x = scale * jax.nn.sigmoid(x / scale)
-        return x
 
 
 class ResidualMixingMLP(nn.Module):
@@ -124,17 +76,13 @@ class ResidualMixingMLP(nn.Module):
         return x
 
 
-NeuralXCMixingMLP = SimpleMixingMLP
+NeuralXCMixingMLP = ResidualMixingMLP
 
 
 __all__ = [
-    "DEFAULT_NETWORK_ARCHITECTURE",
     "DEFAULT_NETWORK_HIDDEN_DIMS",
     "NeuralXCMixingMLP",
-    "ResolvedArchitecture",
     "ResidualMixingMLP",
-    "SimpleMixingMLP",
-    "normalize_architecture",
     "normalize_hidden_dims",
     "resolve_activation",
 ]

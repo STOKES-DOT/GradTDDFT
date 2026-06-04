@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--input-feature-mode",
-        choices=("enhanced", "dm21_original"),
+        choices=("enhanced", "canonical", "dm21_original"),
         default=DEFAULT_INPUT_FEATURE_MODE,
     )
     p.add_argument("--include-pt2-channel", action=argparse.BooleanOptionalAction, default=False)
@@ -91,6 +91,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--grids-level", type=int, default=0)
     p.add_argument("--reference-scf-max-cycle", type=int, default=100)
     p.add_argument("--reference-scf-conv-tol", type=float, default=1e-10)
+    p.add_argument(
+        "--reference-cache",
+        default="outputs/reference_cache/closed_shell_s1_references.h5",
+        help=(
+            "HDF5 cache for prepared RKS/HFX reference molecules. Pass an empty "
+            "string to disable."
+        ),
+    )
+    p.add_argument("--rebuild-reference-cache", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument(
+        "--host-reference-cache",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Keep prepared reference arrays on host memory during evaluation.",
+    )
     p.add_argument("--train-scf-max-cycle", type=int, default=16)
     p.add_argument("--train-scf-damping", type=float, default=0.25)
     p.add_argument("--train-scf-conv-tol-density", type=float, default=1e-8)
@@ -114,8 +129,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scf-implicit-diff-regularization", type=float, default=1e-3)
     p.add_argument("--scf-implicit-diff-restart", type=int, default=12)
     p.add_argument("--scf-require-convergence", action=argparse.BooleanOptionalAction, default=False)
-    p.add_argument("--scf-stop-gradient-on-unconverged", action=argparse.BooleanOptionalAction, default=False)
-    p.add_argument("--scf-stop-gradient-rms-threshold", type=float, default=None)
     p.add_argument("--scf-warm-start", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--scf-warm-start-update-interval", type=int, default=1)
     p.add_argument("--outdir", required=True)
@@ -138,8 +151,6 @@ def _apply_checkpoint_metadata(args: argparse.Namespace) -> argparse.Namespace:
         "scf_implicit_diff_tolerance": 1e-6,
         "scf_implicit_diff_regularization": 1e-3,
         "scf_implicit_diff_restart": 12,
-        "scf_stop_gradient_on_unconverged": False,
-        "scf_stop_gradient_rms_threshold": None,
         "scf_warm_start": False,
         "scf_warm_start_update_interval": 1,
     }
@@ -154,8 +165,6 @@ def _apply_checkpoint_metadata(args: argparse.Namespace) -> argparse.Namespace:
         "scf_implicit_diff_tolerance",
         "scf_implicit_diff_regularization",
         "scf_implicit_diff_restart",
-        "scf_stop_gradient_on_unconverged",
-        "scf_stop_gradient_rms_threshold",
         "scf_warm_start",
         "scf_warm_start_update_interval",
     ):
@@ -218,8 +227,6 @@ def main() -> None:
         scf_vxc_clip=float(args.train_scf_vxc_clip),
         scf_iterate_selection=str(args.scf_iterate_selection),
         scf_require_convergence=bool(args.scf_require_convergence),
-        scf_stop_gradient_on_unconverged=bool(args.scf_stop_gradient_on_unconverged),
-        scf_stop_gradient_rms_threshold=args.scf_stop_gradient_rms_threshold,
         scf_gradient_mode=str(args.scf_gradient_mode),
         scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),

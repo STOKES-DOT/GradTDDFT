@@ -14,6 +14,7 @@ from ..xc_backend.jax_libxc import hybrid_coeff, parse_xc
 from ..neural_xc.inputs import (
     _local_hfx_features_from_basis_dm,
     _local_pt2_feature_from_restricted_orbitals,
+    _local_pt2_feature_from_unrestricted_orbitals,
 )
 from .core import _contains_jax_tracer, _host_float_unless_traced
 from .features import _restricted_response_eri_slices_from_mo_tensor
@@ -447,6 +448,7 @@ def unrestricted_molecule_from_spec_with_jax_uks(
     energy_target: float | None = None,
     compute_local_hfx_features: bool = False,
     compute_local_hfx_aux: bool = False,
+    compute_local_pt2_features: bool = False,
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
     hfx_chunk_size: int = 512,
     init_guess: Any = "minao",
@@ -539,6 +541,7 @@ def unrestricted_molecule_from_spec_with_jax_uks(
 
     hfx_local = None
     hfx_nu = None
+    pt2_local = None
     if compute_local_hfx_features:
         hfx_result = _local_hfx_features_from_basis_dm(
             basis_cart,
@@ -553,6 +556,15 @@ def unrestricted_molecule_from_spec_with_jax_uks(
             hfx_local, hfx_nu = hfx_result
         else:
             hfx_local = hfx_result
+    if compute_local_pt2_features:
+        pt2_local = _local_pt2_feature_from_unrestricted_orbitals(
+            ao,
+            jnp.stack([uks.mo_coeff_alpha, uks.mo_coeff_beta], axis=0),
+            jnp.stack([uks.mo_occ_alpha, uks.mo_occ_beta], axis=0),
+            jnp.stack([uks.mo_energy_alpha, uks.mo_energy_beta], axis=0),
+            rep_tensor=jnp.asarray(eri),
+            density_floor=cfg.density_floor,
+        )
 
     mf_energy = (
         _host_float_unless_traced(uks.total_energy)
@@ -588,6 +600,7 @@ def unrestricted_molecule_from_spec_with_jax_uks(
         ),
         hfx_local=hfx_local,
         hfx_nu=hfx_nu,
+        pt2_local=pt2_local,
     )
 
 
@@ -606,8 +619,15 @@ def build_unrestricted_reference_from_facade(
     chkfile: str | None,
     sap_basis: Any | None,
     init_guess_chkfile_project: bool | None,
-    reference_builder: Any,
+    compute_local_hfx_features: bool = False,
+    compute_local_hfx_aux: bool = False,
+    compute_local_pt2_features: bool = False,
+    hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
+    hfx_chunk_size: int = 512,
+    reference_builder: Any | None = None,
 ) -> Any:
+    if reference_builder is None:
+        raise ValueError("reference_builder must be provided for unrestricted facade references.")
     return reference_builder(
         atom=spec,
         basis=mol.basis,
@@ -622,6 +642,11 @@ def build_unrestricted_reference_from_facade(
         grid_ao_backend=grid_ao_backend,
         integral_backend=integral_backend,
         libcint_geometry_grad_policy=geometry_grad_policy,
+        compute_local_hfx_features=compute_local_hfx_features,
+        compute_local_hfx_aux=compute_local_hfx_aux,
+        compute_local_pt2_features=compute_local_pt2_features,
+        hfx_omega_values=hfx_omega_values,
+        hfx_chunk_size=hfx_chunk_size,
         init_guess=init_guess,
         chkfile=chkfile,
         init_guess_sap_basis=sap_basis,

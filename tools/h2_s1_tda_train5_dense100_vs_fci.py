@@ -65,6 +65,7 @@ build_reference_curve = _HELPERS.build_reference_curve
 write_dense_csv = _HELPERS.write_dense_csv
 
 _DEFAULT_SEMILOCAL_XC = ("lda_x", "gga_x_b88", "lda_c_vwn_rpa", "gga_c_lyp")
+_OBJECTIVE_CHOICES = ("auto", "e0_only", "s1_only", "joint")
 
 
 def _get_plt():
@@ -98,9 +99,86 @@ def _normalize_scf_gradient_mode(value: str) -> str:
     )
 
 
+def _normalize_objective(value: str) -> str:
+    objective = str(value).strip().lower()
+    if objective in _OBJECTIVE_CHOICES:
+        return objective
+    raise ValueError(
+        f"Unsupported objective {value!r}. Expected one of {', '.join(_OBJECTIVE_CHOICES)}."
+    )
+
+
+def _has_ground_supervision(args: argparse.Namespace) -> bool:
+    return any(
+        float(weight) > 0.0
+        for weight in (
+            args.energy_mse_weight,
+            args.energy_mae_weight,
+            args.density_constraint_weight,
+        )
+    )
+
+
+def _has_s1_supervision(args: argparse.Namespace) -> bool:
+    return float(args.s1_weight) > 0.0
+
+
+def _resolved_objective_kind(args: argparse.Namespace) -> str:
+    objective = str(args.objective)
+    if objective != "auto":
+        return objective
+    has_ground = _has_ground_supervision(args)
+    has_s1 = _has_s1_supervision(args)
+    if has_ground and has_s1:
+        return "joint"
+    if has_ground:
+        return "e0_only"
+    if has_s1:
+        return "s1_only"
+    raise ValueError(
+        "No active supervision terms remain. Enable S1 supervision, ground-state supervision, or set --objective explicitly."
+    )
+
+
+def _objective_solver_name(args: argparse.Namespace) -> str:
+    return "tda" if bool(args.s1_use_tda) else "casida"
+
+
+def _objective_name(args: argparse.Namespace) -> str:
+    kind = _resolved_objective_kind(args)
+    if kind == "e0_only":
+        return "e0_only"
+    return f"{kind}_{_objective_solver_name(args)}"
+
+
+def _objective_display_label(args: argparse.Namespace) -> str:
+    kind = _resolved_objective_kind(args)
+    if kind == "e0_only":
+        return "E0-only"
+    solver_label = "TDA" if bool(args.s1_use_tda) else "Casida"
+    if kind == "s1_only":
+        return f"S1-only {solver_label}"
+    return f"Joint {solver_label}"
+
+
 def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.input_feature_mode = _normalize_input_feature_mode(args.input_feature_mode)
     args.scf_gradient_mode = _normalize_scf_gradient_mode(args.scf_gradient_mode)
+    args.objective = _normalize_objective(args.objective)
+    if str(args.objective) == "e0_only":
+        args.s1_weight = 0.0
+        if not _has_ground_supervision(args):
+            args.energy_mae_weight = 1.0
+    elif str(args.objective) == "s1_only":
+        args.s1_weight = 1.0 if float(args.s1_weight) <= 0.0 else float(args.s1_weight)
+        args.energy_mse_weight = 0.0
+        args.energy_mae_weight = 0.0
+        args.density_constraint_weight = 0.0
+    elif str(args.objective) == "joint":
+        args.s1_weight = 1.0 if float(args.s1_weight) <= 0.0 else float(args.s1_weight)
+        if not _has_ground_supervision(args):
+            args.energy_mae_weight = 1.0
+    _resolved_objective_kind(args)
     return args
 
 
@@ -237,6 +315,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Use TDA for dense-curve evaluation and equilibrium spectrum. Defaults to the S1 supervision mode.",
     )
     p.add_argument(
+        "--objective",
+        choices=_OBJECTIVE_CHOICES,
+        default="auto",
+        help=(
+            "Training objective selection. 'auto' infers the mode from the active "
+            "loss weights; explicit modes disable or backfill supervision weights "
+            "to match E0-only, S1-only, or joint training."
+        ),
+    )
+    p.add_argument(
         "--energy-mse-weight",
         type=float,
         default=0.0,
@@ -326,12 +414,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
     )
     p.add_argument("--grad-clip-norm", type=float, default=None)
-    p.add_argument(
-        "--scf-stop-gradient-on-unconverged",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-    )
-    p.add_argument("--scf-stop-gradient-rms-threshold", type=float, default=None)
     p.add_argument(
         "--scf-warm-start",
         action=argparse.BooleanOptionalAction,
@@ -495,7 +577,7 @@ def build_s1_training_data(
                 point.molecule,
                 core=GroundStateCoreDatum(
                     target_total_energy=jnp.asarray(point.fci_energy_h, dtype=jnp.float64),
-                    target_density_matrix=jnp.asarray(point.fci_dm_ao, dtype=jnp.float64),
+                    target_density=jnp.asarray(point.fci_density_grid, dtype=jnp.float64),
                     density_constraint_weight=float(density_constraint_weight),
                 ),
                 excited_state=ExcitedStateDatum(
@@ -655,8 +737,6 @@ def _self_consistent_prediction_config(args: argparse.Namespace) -> GroundStateT
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
         scf_implicit_diff_restart=int(args.scf_implicit_diff_restart),
-        scf_stop_gradient_on_unconverged=bool(args.scf_stop_gradient_on_unconverged),
-        scf_stop_gradient_rms_threshold=args.scf_stop_gradient_rms_threshold,
     )
 
 
@@ -780,7 +860,7 @@ def _train_functional_streaming(
         f"steps={int(args.steps)} "
         f"lr={float(args.learning_rate):.6g} "
         f"mode={str(args.training_mode)} "
-        f"objective=s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'} "
+        f"objective={_objective_name(args)} "
         f"s1_weight={float(args.s1_weight):.6g} "
         "train_step_mode=stream_single_geometry"
     )
@@ -950,8 +1030,6 @@ def train_functional(
         scf_vxc_clip=float(args.train_scf_vxc_clip),
         scf_iterate_selection=str(args.scf_iterate_selection),
         scf_require_convergence=bool(args.scf_require_convergence),
-        scf_stop_gradient_on_unconverged=bool(args.scf_stop_gradient_on_unconverged),
-        scf_stop_gradient_rms_threshold=args.scf_stop_gradient_rms_threshold,
         scf_gradient_mode=str(args.scf_gradient_mode),
         scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
@@ -1072,7 +1150,7 @@ def train_functional(
                 f"[train_init] finished jit compilation for train_kernel in {time.perf_counter() - jit_compile_t0:.2f} s"
             )
         except Exception as exc:  # pragma: no cover - best effort runtime path
-            logger.log(f"[train] jit compilation failed for S1-only train kernel: {exc!r}")
+            logger.log(f"[train] jit compilation failed for objective train kernel: {exc!r}")
             compiled_train_kernel = make_train_kernel_fn(train_dataset_current)
     elif bool(args.jit_train):
         candidate_train_step = compiled_train_step
@@ -1086,7 +1164,7 @@ def train_functional(
                 f"[train_init] finished jit compilation for train_step in {time.perf_counter() - jit_compile_t0:.2f} s"
             )
         except Exception as exc:  # pragma: no cover - best effort runtime path
-            logger.log(f"[train] jit compilation failed for S1-only train step: {exc!r}")
+            logger.log(f"[train] jit compilation failed for objective train step: {exc!r}")
             compiled_train_step = make_train_step_fn(train_dataset_current)
 
     logger.log("[train_init] evaluating initial loss")
@@ -1142,7 +1220,7 @@ def train_functional(
         f"steps={int(args.steps)} "
         f"lr={float(args.learning_rate):.6g} "
         f"mode={str(args.training_mode)} "
-        f"objective=s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'} "
+        f"objective={_objective_name(args)} "
         f"s1_weight={float(args.s1_weight):.6g} "
         f"train_step_mode={train_step_mode}"
     )
@@ -1264,7 +1342,6 @@ def train_functional(
                 f"s1_mae={train_s1_mae_val:.8e} "
                 f"s1_pred_h={_metric_mean(train_metrics, 's1_predicted', float('nan')):.8e} "
                 f"s1_target_h={_metric_mean(train_metrics, 's1_target', float('nan')):.8e} "
-                f"scf_stop_grad_frac={_metric_mean(train_metrics, 'scf_stop_gradient_fraction', float('nan')):.8e} "
                 f"grad_norm={grad_norm_val:.8e} "
                 f"grad_abs_max={grad_abs_max_val:.8e} "
                 f"update_norm={param_update_norm_val:.8e} "
@@ -1387,13 +1464,16 @@ def evaluate_dense_curve_tda(
             {
                 "r_angstrom": float(point.r_angstrom),
                 "fci_energy_h": float(point.fci_energy_h),
+                "exact_energy_h": float(point.fci_energy_h),
                 "predicted_energy_h": predicted_energy_h,
                 "energy_abs_err_ev": abs(predicted_energy_h - point.fci_energy_h) * HARTREE_TO_EV,
                 "fci_s1_h": fci_gap,
+                "exact_s1_h": fci_gap,
                 "predicted_s1_h": pred_gap,
                 "s1_gap_abs_err_ev": abs(pred_gap - fci_gap) * HARTREE_TO_EV,
                 "predicted_s1_oscillator_strength": pred_strength,
                 "fci_electron_count": float(point.fci_electron_count),
+                "exact_electron_count": float(point.fci_electron_count),
                 "predicted_electron_count": predicted_electron_count,
                 "electron_count_abs_err": abs(predicted_electron_count - point.fci_electron_count),
                 "density_l1": density_l1,
@@ -1413,9 +1493,11 @@ def evaluate_dense_curve_tda(
                     "solver": solver_name,
                     "state_index": 1,
                     "fci_total_energy_h": fci_total,
+                    "exact_total_energy_h": fci_total,
                     "predicted_total_energy_h": pred_total,
                     "total_abs_err_ev": abs(pred_total - fci_total) * HARTREE_TO_EV,
                     "fci_excitation_h": fci_gap,
+                    "exact_excitation_h": fci_gap,
                     "predicted_excitation_h": pred_gap,
                     "gap_abs_err_ev": abs(pred_gap - fci_gap) * HARTREE_TO_EV,
                     "predicted_oscillator_strength": pred_strength,
@@ -1442,6 +1524,7 @@ def plot_dense_summary(
     basis: str,
     xc: str,
     training_mode: str,
+    objective_label: str,
     use_tda: bool,
 ) -> None:
     plt = _get_plt()
@@ -1511,7 +1594,7 @@ def plot_dense_summary(
     ax.grid(alpha=0.25)
     ax.legend(frameon=False, fontsize=9)
 
-    fig.suptitle(f"H2 S1-only {solver_label} training vs FCI | {xc}/{basis}", y=0.985)
+    fig.suptitle(f"H2 {objective_label} training vs FCI | {xc}/{basis}", y=0.985)
     fig.tight_layout()
     fig.savefig(path, dpi=220)
     plt.close(fig)
@@ -1811,7 +1894,13 @@ def plot_equilibrium_spectrum(
     return sticks_csv, broadened_csv
 
 
-def plot_training_loss(path: Path, training: dict[str, Any], *, title: str) -> None:
+def plot_training_loss(
+    path: Path,
+    training: dict[str, Any],
+    *,
+    title: str,
+    objective_kind: str,
+) -> None:
     plt = _get_plt()
     steps = np.asarray(
         training.get("history_steps", np.arange(len(training["loss_history"]))),
@@ -1856,7 +1945,7 @@ def plot_training_loss(path: Path, training: dict[str, Any], *, title: str) -> N
     axes[1].set_xlabel("Step")
     axes[1].set_ylabel("S1 MAE (Eh)")
     axes[1].set_yscale("log")
-    axes[1].set_title("S1 Supervision")
+    axes[1].set_title("S1 Supervision" if str(objective_kind) != "e0_only" else "S1 Diagnostic")
     axes[1].grid(alpha=0.2)
     axes[1].legend(frameon=False, fontsize=8)
 
@@ -1944,15 +2033,14 @@ def write_summary(
 
     eval_use_tda = bool(args.s1_use_tda) if args.eval_use_tda is None else bool(args.eval_use_tda)
     evaluation_solver = "tda" if eval_use_tda else "casida"
-    objective_name = f"s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'}"
+    objective_name = _objective_name(args)
     summary = {
         "basis": str(args.basis),
         "xc": str(args.xc),
         "training_mode": str(args.training_mode),
         "reference_scf_backend": str(args.reference_scf_backend),
         "objective": objective_name,
-        "scf_stop_gradient_on_unconverged": bool(args.scf_stop_gradient_on_unconverged),
-        "scf_stop_gradient_rms_threshold": args.scf_stop_gradient_rms_threshold,
+        "objective_kind": _resolved_objective_kind(args),
         "scf_warm_start": bool(args.scf_warm_start),
         "scf_warm_start_update_interval": int(args.scf_warm_start_update_interval),
         "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
@@ -1962,6 +2050,9 @@ def write_summary(
             str(args.response_pt2_mode) if bool(args.include_pt2_channel) else None
         ),
         "s1_weight": float(args.s1_weight),
+        "energy_mse_weight": float(args.energy_mse_weight),
+        "energy_mae_weight": float(args.energy_mae_weight),
+        "density_constraint_weight": float(args.density_constraint_weight),
         "s1_use_tda": bool(args.s1_use_tda),
         "eval_use_tda": eval_use_tda,
         "evaluation_solver": evaluation_solver,
@@ -1986,9 +2077,7 @@ def write_summary(
     }
 
     with path.open("w", encoding="utf-8") as handle:
-        handle.write(
-            f"H2 S1-only {evaluation_solver.upper()} Neural_xc vs FCI summary\n"
-        )
+        handle.write(f"H2 {_objective_display_label(args)} Neural_xc vs FCI summary\n")
         for key, value in summary.items():
             handle.write(f"{key} = {value}\n")
     return summary
@@ -2006,11 +2095,12 @@ def main() -> None:
         f"R=[{args.r_min},{args.r_max}], train_points={args.train_points}, "
         f"dense_points={args.dense_points}, steps={args.steps}, "
         f"lr={args.learning_rate}, training_mode={args.training_mode}, "
-        f"objective=s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'}, include_pt2_channel={bool(args.include_pt2_channel)}, "
+        f"objective={_objective_name(args)}, include_pt2_channel={bool(args.include_pt2_channel)}, "
         f"pt2_channel_mode={str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else 'none'}, "
         f"response_pt2_mode={str(args.response_pt2_mode) if bool(args.include_pt2_channel) else 'none'}, "
         f"reference_scf_backend={str(args.reference_scf_backend)}, "
-        f"s1_weight={float(args.s1_weight)}, density_constraint_weight={float(args.density_constraint_weight)}, "
+        f"s1_weight={float(args.s1_weight)}, energy_mse_weight={float(args.energy_mse_weight)}, "
+        f"energy_mae_weight={float(args.energy_mae_weight)}, density_constraint_weight={float(args.density_constraint_weight)}, "
         f"train_solver={'tda' if bool(args.s1_use_tda) else 'casida'}, "
         f"eval_solver={'tda' if (bool(args.s1_use_tda) if args.eval_use_tda is None else bool(args.eval_use_tda)) else 'casida'}"
     )
@@ -2104,8 +2194,35 @@ def main() -> None:
 
     dense_csv = outdir / "h2_s1_tda_dense_curve.csv"
     excited_csv = outdir / "h2_s1_tda_excited_curve.csv"
+    reference_points_csv = outdir / "h2_s1_reference_points.csv"
     write_dense_csv(dense_csv, dense_rows)
     write_dense_csv(excited_csv, excited_rows)
+    write_dense_csv(
+        reference_points_csv,
+        [
+            {
+                "r_angstrom": float(point.r_angstrom),
+                "fci_energy_h": float(point.fci_energy_h),
+                "exact_energy_h": float(point.fci_energy_h),
+                "fci_s1_h": (
+                    float(point.fci_excitation_energies_h[0])
+                    if int(np.asarray(point.fci_excitation_energies_h).size) > 0
+                    else float("nan")
+                ),
+                "exact_s1_h": (
+                    float(point.fci_excitation_energies_h[0])
+                    if int(np.asarray(point.fci_excitation_energies_h).size) > 0
+                    else float("nan")
+                ),
+                "fci_electron_count": float(point.fci_electron_count),
+                "exact_electron_count": float(point.fci_electron_count),
+                "reference_backend": str(getattr(args, "reference_scf_backend", "pyscf")),
+                "reference_converged": 1,
+                "reference_excited_method": "fci",
+            }
+            for point in train_points
+        ],
+    )
 
     curve_png = outdir / "h2_s1_tda_dense_curve.png"
     plot_dense_summary(
@@ -2115,6 +2232,7 @@ def main() -> None:
         basis=str(args.basis),
         xc=str(args.xc),
         training_mode=str(args.training_mode),
+        objective_label=_objective_display_label(args),
         use_tda=eval_use_tda,
     )
 
@@ -2137,7 +2255,8 @@ def main() -> None:
     plot_training_loss(
         training_png,
         training,
-        title=f"H2 S1-only {'TDA' if bool(args.s1_use_tda) else 'Casida'} training loss",
+        title=f"H2 {_objective_display_label(args)} training loss",
+        objective_kind=_resolved_objective_kind(args),
     )
     training_history_csv = outdir / "training_history.csv"
     write_training_history_csv(training_history_csv, training)
@@ -2151,7 +2270,8 @@ def main() -> None:
             "xc": str(args.xc),
             "training_mode": str(args.training_mode),
             "reference_scf_backend": str(args.reference_scf_backend),
-            "objective": f"s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'}",
+            "objective": _objective_name(args),
+            "objective_kind": _resolved_objective_kind(args),
             "include_pt2_channel": bool(args.include_pt2_channel),
             "pt2_channel_mode": (
                 str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None
@@ -2160,10 +2280,11 @@ def main() -> None:
                 str(args.response_pt2_mode) if bool(args.include_pt2_channel) else None
             ),
             "s1_weight": float(args.s1_weight),
+            "energy_mse_weight": float(args.energy_mse_weight),
+            "energy_mae_weight": float(args.energy_mae_weight),
+            "density_constraint_weight": float(args.density_constraint_weight),
             "s1_use_tda": bool(args.s1_use_tda),
             "eval_use_tda": eval_use_tda,
-            "scf_stop_gradient_on_unconverged": bool(args.scf_stop_gradient_on_unconverged),
-            "scf_stop_gradient_rms_threshold": args.scf_stop_gradient_rms_threshold,
             "scf_warm_start": bool(args.scf_warm_start),
             "scf_warm_start_update_interval": int(args.scf_warm_start_update_interval),
             "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
@@ -2195,8 +2316,12 @@ def main() -> None:
     summary.update(
         {
             "dense_csv": str(dense_csv),
+            "dense_curve_csv": str(dense_csv),
             "excited_csv": str(excited_csv),
+            "excited_curve_csv": str(excited_csv),
+            "reference_points_csv": str(reference_points_csv),
             "curve_png": str(curve_png),
+            "figure_png": str(curve_png),
             "spectrum_png": str(spectrum_png),
             "spectrum_json": str(spectrum_json),
             "spectrum_sticks_csv": str(spectrum_sticks_csv),
@@ -2209,16 +2334,23 @@ def main() -> None:
     summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     visualization_manifest = {
         "paper_experiment": "Bond-Scan S0/S1 Benchmarks",
-        "description": "Data files needed to reproduce H2 S1-only TDA training visualizations.",
+        "description": "Data files needed to reproduce H2 bond-scan training visualizations.",
         "figures": [
             {
                 "figure": str(curve_png),
-                "data_files": [str(dense_csv), str(excited_csv)],
+                "data_files": [
+                    str(dense_csv),
+                    str(excited_csv),
+                    str(reference_points_csv),
+                    str(training_history_csv),
+                ],
                 "x": "r_angstrom",
                 "y": [
                     "fci_energy_h",
+                    "exact_energy_h",
                     "predicted_energy_h",
                     "fci_s1_h",
+                    "exact_s1_h",
                     "predicted_s1_h",
                     "energy_abs_err_ev",
                     "s1_gap_abs_err_ev",

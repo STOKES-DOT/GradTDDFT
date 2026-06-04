@@ -70,8 +70,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--db-path", default="/home/yjiao/QH9Stable.db")
     p.add_argument("--sample-count", type=int, default=30)
     p.add_argument("--train-count", type=int, default=20)
+    p.add_argument("--validation-count", type=int, default=0)
     p.add_argument("--max-atoms", type=int, default=5)
+    p.add_argument(
+        "--exclude-elements",
+        nargs="*",
+        default=(),
+        help="Atomic symbols or numbers to exclude from sampled molecules, e.g. F or 9.",
+    )
     p.add_argument("--seed", type=int, default=20260527)
+    p.add_argument(
+        "--sample-order",
+        choices=("random", "size"),
+        default="random",
+        help="Candidate order before taking successful references. 'size' sorts by AO count.",
+    )
     p.add_argument("--basis", default="sto-3g")
     p.add_argument("--nroots", type=int, default=3)
     p.add_argument("--scf-conv-tol", type=float, default=1e-10)
@@ -82,6 +95,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--outcsv", default="outputs/qh9_eomee_s1_sto3g/qh9_30_train20_test10.csv")
     p.add_argument("--overwrite", action=argparse.BooleanOptionalAction, default=False)
     return p.parse_args()
+
+
+def _parse_excluded_atomic_numbers(values: tuple[str, ...] | list[str]) -> set[int]:
+    by_symbol = {symbol.upper(): number for number, symbol in ATOMIC_SYMBOL.items()}
+    excluded: set[int] = set()
+    for raw in values:
+        value = str(raw).strip()
+        if not value:
+            continue
+        if value.isdigit():
+            number = int(value)
+        else:
+            number = by_symbol.get(value.upper())
+            if number is None:
+                raise ValueError(f"Unsupported element in --exclude-elements: {raw!r}")
+        if number not in ATOMIC_SYMBOL:
+            raise ValueError(f"Unsupported atomic number in --exclude-elements: {number}")
+        excluded.add(number)
+    return excluded
 
 
 def _formula_from_z(z: np.ndarray) -> str:
@@ -106,7 +138,13 @@ def _atom_block(z: np.ndarray, pos_ang: np.ndarray) -> str:
     return "\n".join(lines)
 
 
-def _candidate_ids(conn: sqlite3.Connection, *, max_atoms: int) -> list[int]:
+def _candidate_ids(
+    conn: sqlite3.Connection,
+    *,
+    max_atoms: int,
+    excluded_atomic_numbers: set[int] | None = None,
+) -> list[int]:
+    excluded = set() if excluded_atomic_numbers is None else set(excluded_atomic_numbers)
     ids: list[int] = []
     for db_id, z_blob in conn.execute(
         "SELECT id, Z FROM data WHERE N <= ? ORDER BY id",
@@ -115,9 +153,24 @@ def _candidate_ids(conn: sqlite3.Connection, *, max_atoms: int) -> list[int]:
         z = np.frombuffer(z_blob, dtype=np.int32)
         if z.size == 0 or any(int(zi) not in ATOMIC_SYMBOL for zi in z):
             continue
+        if excluded and any(int(zi) in excluded for zi in z):
+            continue
         if int(np.sum(z)) % 2 == 0:
             ids.append(int(db_id))
     return ids
+
+
+def _split_for_success_index(
+    index: int,
+    *,
+    train_count: int,
+    validation_count: int,
+) -> str:
+    if int(index) < int(train_count):
+        return "train"
+    if int(index) < int(train_count) + int(validation_count):
+        return "validation"
+    return "test"
 
 
 def _fetch_molecule(conn: sqlite3.Connection, db_id: int) -> tuple[np.ndarray, np.ndarray]:
@@ -128,6 +181,20 @@ def _fetch_molecule(conn: sqlite3.Connection, db_id: int) -> tuple[np.ndarray, n
     z = np.frombuffer(z_blob, dtype=np.int32).copy()
     pos = np.frombuffer(pos_blob, dtype=np.float64).reshape(int(n), 3).copy()
     return z, pos
+
+
+def _candidate_size_key(conn: sqlite3.Connection, *, db_id: int, basis: str) -> tuple[int, int, int, int]:
+    z, pos = _fetch_molecule(conn, db_id)
+    mol = gto.M(
+        atom=_atom_block(z, pos),
+        basis=str(basis),
+        unit="Angstrom",
+        charge=0,
+        spin=0,
+        cart=True,
+        verbose=0,
+    )
+    return (int(mol.nao_nr()), int(z.size), int(np.sum(z)), int(db_id))
 
 
 def _run_rhf(
@@ -258,19 +325,35 @@ def main() -> None:
     logger = RunLogger(outcsv.parent / "generate_qh9_eomee_s1.log")
     conn = sqlite3.connect(str(args.db_path))
     rng = np.random.default_rng(int(args.seed))
-    candidates = _candidate_ids(conn, max_atoms=int(args.max_atoms))
-    rng.shuffle(candidates)
+    excluded_atomic_numbers = _parse_excluded_atomic_numbers(tuple(args.exclude_elements))
+    candidates = _candidate_ids(
+        conn,
+        max_atoms=int(args.max_atoms),
+        excluded_atomic_numbers=excluded_atomic_numbers,
+    )
+    if str(args.sample_order) == "size":
+        candidates.sort(key=lambda db_id: _candidate_size_key(conn, db_id=int(db_id), basis=str(args.basis)))
+    else:
+        rng.shuffle(candidates)
     logger.log(
         f"[sample] candidates={len(candidates)} sample_count={args.sample_count} "
-        f"train_count={args.train_count} max_atoms={args.max_atoms}"
+        f"train_count={args.train_count} validation_count={args.validation_count} "
+        f"max_atoms={args.max_atoms} excluded_atomic_numbers={sorted(excluded_atomic_numbers)} "
+        f"sample_order={args.sample_order}"
     )
     if int(args.train_count) > int(args.sample_count):
         raise ValueError("--train-count cannot exceed --sample-count.")
+    if int(args.train_count) + int(args.validation_count) > int(args.sample_count):
+        raise ValueError("--train-count + --validation-count cannot exceed --sample-count.")
 
     rows: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
     for db_id in candidates[: max(1, int(args.max_candidates))]:
-        split = "train" if len(rows) < int(args.train_count) else "test"
+        split = _split_for_success_index(
+            len(rows),
+            train_count=int(args.train_count),
+            validation_count=int(args.validation_count),
+        )
         if len(rows) >= int(args.sample_count):
             break
         try:

@@ -11,13 +11,15 @@ import td_graddft.scf.differentiable as scf_differentiable
 import td_graddft.scf.rks as scf_rks
 from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
 from td_graddft.neural_xc import make_neural_xc_functional
+from td_graddft.neural_xc.inputs import ChunkedHFXNu
 from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.scf import DifferentiableSCF, DifferentiableSCFConfig
 from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule, UnrestrictedMolecule
 from td_graddft.scf.differentiable import (
     _replace_molecule,
-    _restricted_hfx_features_from_nu,
     _restricted_iteration_molecule,
+    _restricted_total_occupations,
+    _unrestricted_channel,
 )
 from td_graddft.training import (
     GroundStateCoreDatum,
@@ -48,6 +50,33 @@ def test_replace_molecule_does_not_mutate_namespace_inputs():
     assert np.allclose(np.asarray(molecule.rdm1), np.eye(2))
     assert np.allclose(np.asarray(updated.rdm1), 2.0 * np.eye(2))
     assert updated.mo_coeff is molecule.mo_coeff
+
+
+def test_restricted_total_occupations_jittable_for_spatial_occupations():
+    def _compute(mo_occ):
+        molecule = SimpleNamespace(mo_occ=mo_occ, nelectron=2)
+        return _restricted_total_occupations(molecule, occupation_tolerance=1e-8)
+
+    result = jax.jit(_compute)(jnp.array([1.0, 0.0]))
+
+    assert result.shape == (2,)
+    assert jnp.allclose(result, jnp.array([2.0, 0.0]))
+
+
+def test_unrestricted_channel_jittable_for_spatial_occupations():
+    def _compute(mo_occ):
+        molecule = SimpleNamespace(
+            mo_coeff=jnp.eye(2),
+            mo_occ=mo_occ,
+            mo_energy=jnp.array([0.0, 1.0]),
+        )
+        _, unrestricted_occ, _ = _unrestricted_channel(molecule)
+        return unrestricted_occ
+
+    result = jax.jit(_compute)(jnp.array([1.0, 0.0]))
+
+    assert result.shape == (2, 2)
+    assert jnp.allclose(result, jnp.array([[1.0, 0.0], [1.0, 0.0]]))
 
 
 def _make_h2_reference(*, half_distance_angstrom: float = 0.35):
@@ -236,29 +265,6 @@ def test_unrestricted_scf_components_prefer_direct_hfx_fock_path():
     assert np.allclose(np.asarray(extra_b), np.asarray(extra))
 
 
-def test_restricted_hfx_features_from_nu_recomputes_local_exchange_density():
-    ao = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
-    density = np.array([[2.0, 0.0], [0.0, 0.0]], dtype=np.float32)
-    nu = np.zeros((1, 2, 2, 2), dtype=np.float32)
-    nu[0, 0, 0, 0] = 1.0
-    nu[0, 1, 1, 1] = 1.0
-
-    hfx_local = _restricted_hfx_features_from_nu(
-        ao=ao,
-        density=density,
-        nu_cache=nu,
-    )
-
-    expected = np.array(
-        [
-            [[-0.5], [0.0]],
-            [[-0.5], [0.0]],
-        ],
-        dtype=np.float32,
-    )
-    assert np.allclose(np.asarray(hfx_local), expected, atol=1e-12)
-
-
 def test_restricted_iteration_molecule_prefers_cached_hfx_when_aux_is_present():
     molecule = _make_toy_restricted_reference()
     cached_hfx = jnp.asarray(
@@ -285,12 +291,46 @@ def test_restricted_iteration_molecule_prefers_cached_hfx_when_aux_is_present():
         mo_occ_stacked=mo_occ,
         mo_energy=mo_energy,
         ao=molecule.ao,
-        hfx_nu=molecule.hfx_nu,
-        hfx_local=molecule.hfx_local,
-        stop_gradient_hfx_local=True,
     )
 
     assert np.allclose(np.asarray(molecule_iter.hfx_local), np.asarray(cached_hfx))
+
+
+def test_restricted_iteration_molecule_recomputes_hfx_from_chunked_nu_api():
+    molecule = _make_toy_restricted_reference()
+    dense_nu = jnp.asarray(
+        [
+            [
+                [[1.0, 0.1], [0.1, 0.8]],
+                [[0.7, -0.2], [-0.2, 0.9]],
+                [[0.4, 0.3], [0.3, 0.6]],
+            ]
+        ],
+        dtype=jnp.float32,
+    )
+    molecule.hfx_local = None
+    molecule.hfx_nu = None
+    molecule.hfx_nu_api = ChunkedHFXNu.from_dense(dense_nu, chunk_size=1)
+    density = 2.0 * jnp.eye(2, dtype=jnp.float32)
+    mo_coeff = jnp.eye(2, dtype=jnp.float32)
+    mo_occ = jnp.asarray([[1.0, 0.0], [1.0, 0.0]], dtype=jnp.float32)
+    mo_energy = jnp.asarray([-0.8, 0.2], dtype=jnp.float32)
+
+    expected = scf_differentiable._restricted_hfx_features_from_nu(
+        ao=molecule.ao,
+        density=density,
+        nu_cache=dense_nu,
+    )
+    molecule_iter = _restricted_iteration_molecule(
+        molecule,
+        density=density,
+        mo_coeff=mo_coeff,
+        mo_occ_stacked=mo_occ,
+        mo_energy=mo_energy,
+        ao=molecule.ao,
+    )
+
+    assert np.allclose(np.asarray(molecule_iter.hfx_local), np.asarray(expected))
 
 
 def test_differentiable_scf_fixed_density_returns_same_density():
@@ -364,8 +404,22 @@ def test_restricted_scf_forward_updates_density_and_is_differentiable(gradient_m
     assert jnp.abs(grad) > 1e-8
 
 
-@pytest.mark.parametrize("gradient_mode", ["expl", "impl"])
-def test_restricted_scf_returns_selected_iterate_for_best_rms(monkeypatch, gradient_mode):
+@pytest.mark.parametrize(
+    ("gradient_mode", "converged", "expected_cycle", "expected_density"),
+    [
+        ("expl", True, 2, jnp.asarray([[1.7, 0.0], [0.0, 0.3]], dtype=jnp.float32)),
+        ("impl", True, 2, jnp.asarray([[1.7, 0.0], [0.0, 0.3]], dtype=jnp.float32)),
+        ("expl", False, 4, 4.0 * jnp.eye(2, dtype=jnp.float32)),
+        ("impl", False, 4, 4.0 * jnp.eye(2, dtype=jnp.float32)),
+    ],
+)
+def test_restricted_scf_returns_selected_iterate_for_best_rms(
+    monkeypatch,
+    gradient_mode,
+    converged,
+    expected_cycle,
+    expected_density,
+):
     molecule = _make_toy_restricted_reference()
     selected_density = jnp.asarray([[1.7, 0.0], [0.0, 0.3]], dtype=jnp.float32)
     density_history = jnp.stack(
@@ -402,7 +456,7 @@ def test_restricted_scf_returns_selected_iterate_for_best_rms(monkeypatch, gradi
         del conv_tol
         zero = jnp.zeros((2, 2), dtype=jnp.float32)
         return (
-            jnp.asarray(False),
+            jnp.asarray(converged),
             jnp.asarray(4, dtype=jnp.int32),
             density_history[-1],
             mo_coeff_history[-1],
@@ -432,8 +486,8 @@ def test_restricted_scf_returns_selected_iterate_for_best_rms(monkeypatch, gradi
         {"strength": jnp.asarray(0.1, dtype=jnp.float32)},
     )
 
-    assert int(info.selected_cycle) == 2
-    assert np.allclose(np.asarray(out.rdm1).sum(axis=0), np.asarray(selected_density))
+    assert int(info.selected_cycle) == expected_cycle
+    assert np.allclose(np.asarray(out.rdm1).sum(axis=0), np.asarray(expected_density))
 
 
 @pytest.mark.parametrize("gradient_mode", ["expl", "impl"])
@@ -658,6 +712,62 @@ def test_unrestricted_impl_produces_finite_gradient():
     assert jnp.isfinite(implicit_value)
     assert jnp.isfinite(implicit_grad)
     assert jnp.abs(implicit_grad) > 1e-6
+
+
+def test_unrestricted_impl_gradient_matches_explicit_mode():
+    molecule = _make_toy_unrestricted_reference()
+
+    class _ToyUnrestrictedFunctional:
+        def bind_to_molecule_for_scf(self, params, _molecule):
+            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
+
+            class _Bound:
+                exact_exchange_fraction = jnp.asarray(0.0, dtype=jnp.float32)
+
+                def unrestricted_scf_components(self, molecule_in):
+                    ngrids = int(molecule_in.ao.shape[0])
+                    zeros_grad = jnp.zeros((ngrids, 3), dtype=jnp.float32)
+                    zeros_mat = jnp.zeros(
+                        (molecule_in.ao.shape[1], molecule_in.ao.shape[1]),
+                        dtype=jnp.float32,
+                    )
+                    v_alpha = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
+                    v_beta = -strength * jnp.asarray([0.1, 0.3, -0.5], dtype=jnp.float32)
+                    return (
+                        v_alpha,
+                        v_beta,
+                        zeros_grad,
+                        zeros_grad,
+                        "LDA",
+                        jnp.asarray(0.0),
+                        zeros_mat,
+                        zeros_mat,
+                    )
+
+            return _Bound()
+
+    cfg = DifferentiableSCFConfig(
+        mode="self_consistent",
+        max_cycle=6,
+        damping=0.2,
+        conv_tol_density=1e-8,
+        implicit_diff_max_iter=16,
+        implicit_diff_regularization=1e-3,
+        implicit_diff_tolerance=1e-6,
+        implicit_diff_restart=6,
+    )
+    functional = _ToyUnrestrictedFunctional()
+
+    def objective(gradient_mode, raw_strength):
+        solver = DifferentiableSCF(replace(cfg, gradient_mode=gradient_mode))
+        out, _ = solver.run(molecule, functional, {"strength": raw_strength})
+        return jnp.sum(out.rdm1[0])
+
+    raw_strength = jnp.asarray(0.1, dtype=jnp.float32)
+    expl_grad = jax.grad(lambda x: objective("expl", x))(raw_strength)
+    impl_grad = jax.grad(lambda x: objective("impl", x))(raw_strength)
+
+    assert jnp.allclose(impl_grad, expl_grad, atol=5e-4, rtol=5e-2)
 
 
 def test_unrestricted_impl_forward_uses_self_consistent_density():
@@ -1095,127 +1205,6 @@ def test_self_consistent_loss_can_hard_gate_unconverged_scf(monkeypatch):
     assert np.isclose(float(strict_metrics["scf_converged_fraction"][0]), 0.0, atol=1e-12)
 
 
-def test_self_consistent_loss_can_stop_gradient_on_unconverged_scf(monkeypatch):
-    _pyscf_or_skip()
-    molecule = _make_h2_reference()
-    functional, params = _make_functional_and_params(molecule)
-
-    fake_info = SimpleNamespace(
-        mode="self_consistent",
-        converged=jnp.asarray(False),
-        cycles=jnp.asarray(4),
-        selected_cycle=jnp.asarray(4),
-        best_cycle=jnp.asarray(3),
-        final_rms_density=jnp.asarray(1e-2),
-        selected_rms_density=jnp.asarray(1e-3),
-        best_rms_density=jnp.asarray(1e-3),
-    )
-
-    def _fake_run(self, molecule_in, functional_in, params_in):
-        del self, functional_in, params_in
-        return molecule_in, fake_info
-
-    monkeypatch.setattr(DifferentiableSCF, "run", _fake_run)
-
-    datum = GroundStateDatum(
-        molecule=molecule,
-        target_total_energy=np.asarray(molecule.mf_energy + 1.0),
-    )
-    loose_cfg = GroundStateTrainingConfig(
-        mode="self_consistent",
-        scf_max_cycle=4,
-        scf_stop_gradient_on_unconverged=False,
-    )
-    guarded_cfg = GroundStateTrainingConfig(
-        mode="self_consistent",
-        scf_max_cycle=4,
-        scf_stop_gradient_on_unconverged=True,
-    )
-
-    def _loss_grad_norm(cfg):
-        grad = jax.grad(
-            lambda p: ground_state_mse_loss(
-                p,
-                functional,
-                datum,
-                training_config=cfg,
-            )[0]
-        )(params)
-        leaves = jax.tree_util.tree_leaves(grad)
-        return float(sum(float(jnp.sum(jnp.abs(jnp.asarray(leaf)))) for leaf in leaves))
-
-    loose_norm = _loss_grad_norm(loose_cfg)
-    guarded_loss, guarded_metrics = ground_state_mse_loss(
-        params,
-        functional,
-        datum,
-        training_config=guarded_cfg,
-    )
-    guarded_norm = _loss_grad_norm(guarded_cfg)
-
-    assert loose_norm > 1e-10
-    assert np.isclose(float(guarded_loss), float(ground_state_mse_loss(params, functional, datum, training_config=loose_cfg)[0]))
-    assert guarded_norm < 1e-12
-    assert np.isclose(float(guarded_metrics["scf_stop_gradient_fraction"][0]), 1.0, atol=1e-12)
-
-
-def test_self_consistent_loss_can_stop_gradient_on_large_selected_rms(monkeypatch):
-    _pyscf_or_skip()
-    molecule = _make_h2_reference()
-    functional, params = _make_functional_and_params(molecule)
-
-    fake_info = SimpleNamespace(
-        mode="self_consistent",
-        converged=jnp.asarray(True),
-        cycles=jnp.asarray(4),
-        selected_cycle=jnp.asarray(4),
-        best_cycle=jnp.asarray(3),
-        final_rms_density=jnp.asarray(5e-3),
-        selected_rms_density=jnp.asarray(5e-3),
-        best_rms_density=jnp.asarray(1e-4),
-    )
-
-    def _fake_run(self, molecule_in, functional_in, params_in):
-        del self, functional_in, params_in
-        return molecule_in, fake_info
-
-    monkeypatch.setattr(DifferentiableSCF, "run", _fake_run)
-
-    datum = GroundStateDatum(
-        molecule=molecule,
-        target_total_energy=np.asarray(molecule.mf_energy + 1.0),
-    )
-    cfg = GroundStateTrainingConfig(
-        mode="self_consistent",
-        scf_max_cycle=4,
-        scf_stop_gradient_rms_threshold=1e-3,
-    )
-
-    grad = jax.grad(
-        lambda p: ground_state_mse_loss(
-            p,
-            functional,
-            datum,
-            training_config=cfg,
-        )[0]
-    )(params)
-    grad_norm = float(
-        sum(
-            float(jnp.sum(jnp.abs(jnp.asarray(leaf))))
-            for leaf in jax.tree_util.tree_leaves(grad)
-        )
-    )
-    _, metrics = ground_state_mse_loss(
-        params,
-        functional,
-        datum,
-        training_config=cfg,
-    )
-
-    assert grad_norm < 1e-12
-    assert np.isclose(float(metrics["scf_stop_gradient_fraction"][0]), 1.0, atol=1e-12)
-
-
 def test_ground_state_datum_preserves_scf_initial_density_and_stores_target_density():
     _pyscf_or_skip()
     molecule = _make_h2_reference()
@@ -1624,7 +1613,7 @@ def test_expl_restricted_scf_uses_shared_rks_diis_loop(monkeypatch):
     assert diis_calls
 
 
-def test_expl_unrestricted_scf_uses_fixed_cycle_loop_without_level_shift(monkeypatch):
+def test_expl_unrestricted_scf_passes_level_shift_to_fixed_cycle_loop(monkeypatch):
     molecule = _make_toy_unrestricted_reference()
 
     class _ToyUnrestrictedFunctional:
@@ -1656,16 +1645,14 @@ def test_expl_unrestricted_scf_uses_fixed_cycle_loop_without_level_shift(monkeyp
 
             return _Bound()
 
-    def _unexpected_level_shift(*args, **kwargs):
-        del args, kwargs
-        raise AssertionError("GradDFT-style explicit SCF loop must not use level shift.")
+    level_shift_calls = []
+    original_scan = scf_differentiable.run_unrestricted_scf_scan
 
-    monkeypatch.setattr(
-        scf_differentiable,
-        "_apply_level_shift_spin",
-        _unexpected_level_shift,
-        raising=False,
-    )
+    def _recording_scan(*args, **kwargs):
+        level_shift_calls.append(float(kwargs["level_shift"]))
+        return original_scan(*args, **kwargs)
+
+    monkeypatch.setattr(scf_differentiable, "run_unrestricted_scf_scan", _recording_scan)
 
     solver = DifferentiableSCF(
         DifferentiableSCFConfig(
@@ -1685,6 +1672,7 @@ def test_expl_unrestricted_scf_uses_fixed_cycle_loop_without_level_shift(monkeyp
     assert int(info.cycles) == 1
     assert int(info.selected_cycle) == 3
     assert np.asarray(info.rms_density_history).shape == (3,)
+    assert level_shift_calls == [0.7]
 
 
 def test_expl_mode_gradient_is_finite():

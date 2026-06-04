@@ -18,7 +18,6 @@ from td_graddft.neural_xc import (
     DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
     DEFAULT_INPUT_FEATURE_MODE,
-    DEFAULT_NETWORK_ARCHITECTURE,
     DEFAULT_NETWORK_HIDDEN_DIMS,
 )
 
@@ -70,9 +69,6 @@ class NeuralXCTrainingConfig:
     spectrum_mae_weight: float = 1.0
     seed: int = 0
     hidden_dims: tuple[int, ...] = DEFAULT_NETWORK_HIDDEN_DIMS
-    network_architecture: Literal["simple_mlp", "graddft_residual"] = (
-        DEFAULT_NETWORK_ARCHITECTURE
-    )
     semilocal_xc: str | tuple[str, ...] = DEFAULT_NEURAL_XC_SEMILOCAL_XC
     n_semilocal_channels: int | None = None
     input_feature_mode: Literal["enhanced", "canonical"] = DEFAULT_INPUT_FEATURE_MODE
@@ -111,16 +107,11 @@ class NeuralXCTrainingConfig:
     scf_vxc_clip: float = 20.0
     scf_iterate_selection: Literal["final", "best_rms", "first_converged"] = "final"
     scf_require_convergence: bool = False
-    scf_stop_gradient_on_unconverged: bool = False
-    scf_stop_gradient_rms_threshold: float | None = None
     scf_gradient_mode: Literal["impl"] = "impl"
     scf_implicit_diff_max_iter: int = 24
-    scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
-    scf_implicit_diff_solver: Literal["normal_cg", "gmres", "bicgstab"] = "gmres"
     scf_implicit_diff_tolerance: float = 1e-6
     scf_implicit_diff_regularization: float = 0.0
-    scf_implicit_diff_restart: int = 12
     recover_nonfinite_steps: bool = True
 
 
