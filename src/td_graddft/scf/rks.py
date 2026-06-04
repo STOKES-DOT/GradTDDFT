@@ -167,10 +167,6 @@ def _orthonormal_diis_error(fock: Array, density: Array, overlap: Array, corth: 
     return corth.T @ error @ corth
 
 
-def _scf_residual_norm(fock: Array, density: Array, overlap: Array) -> Array:
-    return jnp.linalg.norm(_commutator_error(fock, density, overlap))
-
-
 def _orbital_gradient_norm(fock: Array, mo_coeff: Array, mo_occ: Array) -> Array:
     occ = jnp.asarray(mo_occ) > jnp.asarray(1e-12, dtype=mo_occ.dtype)
     vir = jnp.logical_not(occ)
@@ -497,40 +493,6 @@ def _restricted_spin_view(
         mo_occ=occ_spin,
         mo_energy=energy_spin,
     )
-
-
-@lru_cache(maxsize=64)
-def _point_xc_value_and_grad_kernel(
-    xc_spec: str,
-    xc_kind: str,
-    density_floor: float,
-) -> Callable[[Array], tuple[Array, Array]]:
-    xc_spec_norm = str(xc_spec)
-    xc_kind_norm = str(xc_kind)
-    density_floor_value = float(density_floor)
-
-    def point_energy(variables: Array) -> Array:
-        rho_point = jnp.maximum(variables[0], density_floor_value)
-        if xc_kind_norm == "LDA":
-            grad_point = jnp.zeros((3,), dtype=variables.dtype)
-            tau_point = jnp.asarray(0.0, dtype=variables.dtype)
-        elif xc_kind_norm == "GGA":
-            grad_point = variables[1:4]
-            tau_point = jnp.asarray(0.0, dtype=variables.dtype)
-        elif xc_kind_norm == "MGGA":
-            grad_point = variables[1:4]
-            tau_point = jnp.maximum(variables[4], 0.0)
-        else:
-            raise ValueError(f"Unsupported XC kind={xc_kind_norm!r}.")
-        point_features = restricted_feature_bundle_from_rho_grad_tau(
-            rho_point,
-            grad_point,
-            tau_point,
-            density_floor=density_floor_value,
-        )
-        return eval_xc_energy_density(xc_spec_norm, point_features)
-
-    return jax.jit(jax.vmap(jax.value_and_grad(point_energy)))
 
 
 @lru_cache(maxsize=64)

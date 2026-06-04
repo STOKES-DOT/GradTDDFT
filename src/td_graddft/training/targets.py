@@ -10,6 +10,7 @@ import numpy as np
 from jaxtyping import Array, PyTree
 
 from ..features import grid_features_for_molecule
+from .. import tdscf
 from ..scf import (
     DifferentiableSCF,
     DifferentiableSCFConfig,
@@ -19,7 +20,6 @@ from ..scf import (
 from ..data.integrals import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix
 from ..scf.rks import _vxc_matrix_from_grid_potential
 from ..spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
-from ..tddft import RestrictedCasidaTDDFT
 from .config import (
     ExcitedStateDatum,
     ExcitedStateTrainingConfig,
@@ -32,29 +32,6 @@ def _as_dataset(data: GroundStateDatum | Sequence[GroundStateDatum]) -> list[Gro
     if isinstance(data, GroundStateDatum):
         return [data]
     return list(data)
-
-
-def _scf_stop_gradient_mask(
-    core_cfg: Any,
-    scf_info: Any | None,
-) -> Array:
-    if scf_info is None or not str(getattr(scf_info, "mode", "")).startswith("self_consistent"):
-        return jnp.asarray(False)
-    mask = jnp.asarray(False)
-    if bool(getattr(core_cfg, "scf_stop_gradient_on_unconverged", False)):
-        mask = jnp.logical_or(mask, jnp.logical_not(jnp.asarray(scf_info.converged)))
-    rms_threshold = getattr(core_cfg, "scf_stop_gradient_rms_threshold", None)
-    if rms_threshold is not None:
-        mask = jnp.logical_or(
-            mask,
-            jnp.asarray(scf_info.selected_rms_density) > float(rms_threshold),
-        )
-    return mask
-
-
-def _preserve_value_stop_gradient(value: Array, mask: Array) -> Array:
-    detached = jax.lax.stop_gradient(value)
-    return jnp.where(jnp.asarray(mask), detached, value)
 
 
 def _excited_state_extension_terms(
@@ -316,6 +293,123 @@ def _needs_predicted_ground_state_energy(
     )
 
 
+_GROUND_STATE_LOSS_METRIC_KEYS = (
+    "energy_mse",
+    "energy_mae",
+    "normalized_energy_mse",
+    "normalized_energy_mae",
+    "density_penalty",
+    "density_mse",
+    "density_matrix_penalty",
+    "density_matrix_mse",
+    "xc_potential_penalty",
+    "xc_potential_mse",
+    "xc_kernel_penalty",
+    "xc_kernel_mse",
+    "self_consistent_energy_penalty",
+    "self_consistent_energy_mse",
+    "self_consistent_energy_mae",
+    "orbital_energy_penalty",
+    "orbital_energy_mse",
+    "orbital_energy_mae",
+    "janak_frontier_penalty",
+    "janak_frontier_mse",
+    "janak_frontier_mae",
+    "coefficient_prior_penalty",
+    "coefficient_prior_mse",
+    "stationarity_penalty",
+    "dm21_scf_penalty",
+    "dm21_scf_mse",
+    "dm21_scf_delta_energy",
+    "fractional_penalty",
+    "s1_penalty",
+    "s1_mse",
+    "s1_mae",
+    "s1_predicted",
+    "s1_target",
+    "first_excited_total_penalty",
+    "first_excited_total_mse",
+    "first_excited_total_predicted",
+    "first_excited_total_target",
+    "excitation_penalty",
+    "excitation_mse",
+    "excitation_mae",
+    "excitation_predicted",
+    "excitation_target",
+    "oscillator_strength_penalty",
+    "oscillator_strength_mse",
+    "oscillator_strength_mae",
+    "oscillator_strength_predicted",
+    "oscillator_strength_target",
+    "spectrum_penalty",
+    "spectrum_mse",
+    "spectrum_mae",
+    "predicted_total_energies",
+)
+
+_SCF_METRIC_ATTRS = (
+    ("scf_converged", "converged"),
+    ("scf_cycles", "cycles"),
+    ("scf_selected_cycle", "selected_cycle"),
+    ("scf_best_cycle", "best_cycle"),
+    ("scf_final_rms_density", "final_rms_density"),
+    ("scf_selected_rms_density", "selected_rms_density"),
+    ("scf_best_rms_density", "best_rms_density"),
+)
+_SCF_METRIC_KEYS = tuple(key for key, _ in _SCF_METRIC_ATTRS)
+_SCF_SUMMARY_METRICS = (
+    ("scf_converged_fraction", "scf_converged", "mean"),
+    ("scf_cycles_mean", "scf_cycles", "mean"),
+    ("scf_cycles_max", "scf_cycles", "max"),
+    ("scf_selected_cycle_mean", "scf_selected_cycle", "mean"),
+    ("scf_best_cycle_mean", "scf_best_cycle", "mean"),
+    ("scf_final_rms_mean", "scf_final_rms_density", "mean"),
+    ("scf_final_rms_max", "scf_final_rms_density", "max"),
+    ("scf_selected_rms_mean", "scf_selected_rms_density", "mean"),
+    ("scf_selected_rms_max", "scf_selected_rms_density", "max"),
+    ("scf_best_rms_mean", "scf_best_rms_density", "mean"),
+    ("scf_best_rms_max", "scf_best_rms_density", "max"),
+)
+
+
+def _new_metric_terms(keys: Sequence[str]) -> dict[str, list[Array]]:
+    return {key: [] for key in keys}
+
+
+def _append_metric_term(
+    terms: dict[str, list[Array]],
+    key: str,
+    value: Any,
+) -> None:
+    terms[key].append(jnp.atleast_1d(value))
+
+
+def _append_metric_terms(
+    terms: dict[str, list[Array]],
+    values: dict[str, Any],
+) -> None:
+    for key, value in values.items():
+        _append_metric_term(terms, key, value)
+
+
+def _concat_metric_terms(terms: Sequence[Array], *, empty_dtype: Any) -> Array:
+    if not terms:
+        return jnp.array([], dtype=empty_dtype)
+    return jnp.concatenate(terms)
+
+
+def _mean_or_nan(values: Array, *, dtype: Any) -> Array:
+    if int(values.size) <= 0:
+        return jnp.asarray([jnp.nan], dtype=dtype)
+    return jnp.asarray([jnp.mean(values)], dtype=dtype)
+
+
+def _max_or_nan(values: Array, *, dtype: Any) -> Array:
+    if int(values.size) <= 0:
+        return jnp.asarray([jnp.nan], dtype=dtype)
+    return jnp.asarray([jnp.max(values)], dtype=dtype)
+
+
 def density_on_grid(molecule: Any) -> Array:
     """Return spin-summed density sampled on the integration grid."""
 
@@ -441,15 +535,6 @@ def _replace_molecule_copy(molecule: Any, **updates: Any) -> Any:
     for key, value in updates.items():
         setattr(cloned, key, value)
     return cloned
-
-
-def _scale_molecule_electron_count(molecule: Any, scale: Array) -> Any:
-    """Create a shallow molecule copy with scaled (fractional) occupations."""
-
-    updates = {"rdm1": jnp.asarray(molecule.rdm1) * scale}
-    if getattr(molecule, "mo_occ", None) is not None:
-        updates["mo_occ"] = jnp.asarray(molecule.mo_occ) * scale
-    return _replace_molecule_copy(molecule, **updates)
 
 
 def _electron_count(molecule: Any) -> Array:
@@ -2463,6 +2548,7 @@ def density_matching_penalty(
     training_config: GroundStateTrainingConfig | None = None,
     self_consistent_molecule: Any | None = None,
     spin_resolved: bool | None = None,
+    target_density: Array | None = None,
     target_density_matrix: Array | None = None,
 ) -> Array:
     """Weighted grid-density MSE between the reference and model self-consistent densities."""
@@ -2476,7 +2562,9 @@ def density_matching_penalty(
         if spin_resolved is None
         else bool(spin_resolved)
     )
-    if target_density_matrix is None:
+    if target_density is not None:
+        reference_density = jnp.asarray(target_density)
+    elif target_density_matrix is None:
         reference_density = density_on_grid(molecule)
     else:
         reference_density = _density_on_grid_from_density_matrix(molecule, target_density_matrix)
@@ -2485,7 +2573,11 @@ def density_matching_penalty(
         scf_cfg = cfg if cfg.mode == "self_consistent" else replace(cfg, mode="self_consistent")
         model_molecule = _resolve_training_molecule_with_mode(params, functional, molecule, scf_cfg)
     if use_spin_resolved:
-        if target_density_matrix is None:
+        if target_density is not None:
+            reference_density = jnp.asarray(target_density)
+            if reference_density.ndim == 1:
+                reference_density = reference_density[:, None]
+        elif target_density_matrix is None:
             reference_density = density_on_grid_spin_resolved(molecule)
         else:
             density_matrix = jnp.asarray(target_density_matrix)
@@ -2792,14 +2884,10 @@ def _make_differentiable_scf(
             eigenvalue_jitter=cfg.scf_eigenvalue_jitter,
             vxc_clip=cfg.scf_vxc_clip,
             iterate_selection=cfg.scf_iterate_selection,
-            require_converged_iterates=cfg.scf_require_convergence,
             implicit_diff_max_iter=cfg.scf_implicit_diff_max_iter,
-            implicit_diff_step_size=cfg.scf_implicit_diff_step_size,
             implicit_diff_clip=cfg.scf_implicit_diff_clip,
-            implicit_diff_solver=cfg.scf_implicit_diff_solver,
             implicit_diff_tolerance=cfg.scf_implicit_diff_tolerance,
             implicit_diff_regularization=cfg.scf_implicit_diff_regularization,
-            implicit_diff_restart=cfg.scf_implicit_diff_restart,
         )
     )
 
@@ -2944,7 +3032,10 @@ def _can_use_batched_self_consistent_ground_state_path(
         )
         or (
             any(float(datum.density_constraint_weight) != 0.0 for datum in dataset)
-            and any(datum.target_density_matrix is None for datum in dataset)
+            and any(
+                datum.target_density is None and datum.target_density_matrix is None
+                for datum in dataset
+            )
         )
         or (
             any(float(datum.density_matrix_constraint_weight) != 0.0 for datum in dataset)
@@ -2957,7 +3048,13 @@ def _can_use_batched_self_consistent_ground_state_path(
     molecule_signature = _pytree_batch_signature(dataset[0].molecule)
     if any(_pytree_batch_signature(datum.molecule) != molecule_signature for datum in dataset[1:]):
         return False
-    density_targets = [datum.target_density_matrix for datum in dataset if datum.target_density_matrix is not None]
+    density_targets = [
+        datum.target_density
+        if datum.target_density is not None
+        else datum.target_density_matrix
+        for datum in dataset
+        if datum.target_density is not None or datum.target_density_matrix is not None
+    ]
     if density_targets:
         density_signature = _pytree_batch_signature(density_targets[0])
         if any(_pytree_batch_signature(target) != density_signature for target in density_targets[1:]):
@@ -2981,13 +3078,22 @@ def _ground_state_mse_loss_batched_self_consistent(
         [datum.density_matrix_constraint_weight for datum in dataset]
     )
     use_density_targets = any(float(datum.density_constraint_weight) != 0.0 for datum in dataset)
+    use_grid_density_targets = use_density_targets and all(
+        datum.target_density is not None for datum in dataset
+    )
+    use_density_matrix_for_density_targets = use_density_targets and not use_grid_density_targets
     use_density_matrix_targets = any(
         float(datum.density_matrix_constraint_weight) != 0.0 for datum in dataset
     )
     use_density_targets_any = use_density_targets or use_density_matrix_targets
     density_targets = (
+        _stack_pytree_batch([datum.target_density for datum in dataset])
+        if use_grid_density_targets
+        else None
+    )
+    density_matrix_targets = (
         _stack_pytree_batch([datum.target_density_matrix for datum in dataset])
-        if use_density_targets_any
+        if use_density_matrix_targets or use_density_matrix_for_density_targets
         else None
     )
     scf = _make_differentiable_scf(training_config)
@@ -2998,6 +3104,7 @@ def _ground_state_mse_loss_batched_self_consistent(
         weight,
         density_weight,
         density_matrix_weight,
+        target_density,
         target_density_matrix,
     ):
         eval_molecule, scf_info = scf.run(molecule, functional, params)
@@ -3017,7 +3124,6 @@ def _ground_state_mse_loss_batched_self_consistent(
             core_cfg.energy_mse_weight * datum_mse
             + core_cfg.energy_mae_weight * datum_mae
         )
-        stop_gradient_mask = _scf_stop_gradient_mask(core_cfg, scf_info)
         if bool(core_cfg.scf_require_convergence) and scf_info.mode == "self_consistent":
             weight = weight * jnp.asarray(scf_info.converged, dtype=predicted.dtype)
         density_weight = jnp.asarray(density_weight, dtype=predicted.dtype)
@@ -3028,6 +3134,7 @@ def _ground_state_mse_loss_batched_self_consistent(
                 molecule,
                 training_config=training_config,
                 self_consistent_molecule=eval_molecule,
+                target_density=target_density,
                 target_density_matrix=target_density_matrix,
             )
         else:
@@ -3044,7 +3151,6 @@ def _ground_state_mse_loss_batched_self_consistent(
             density_matrix_mse = jnp.asarray(0.0, dtype=predicted.dtype)
         density_matrix_penalty = density_matrix_weight * density_matrix_mse
         loss_contrib = weight * (datum_loss + density_penalty + density_matrix_penalty)
-        loss_contrib = _preserve_value_stop_gradient(loss_contrib, stop_gradient_mask)
         return {
             "loss_contrib": loss_contrib,
             "weight": weight,
@@ -3057,10 +3163,6 @@ def _ground_state_mse_loss_batched_self_consistent(
             "density_mse": density_mse,
             "density_matrix_penalty": density_matrix_penalty,
             "density_matrix_mse": density_matrix_mse,
-            "scf_stop_gradient_applied": jnp.asarray(
-                stop_gradient_mask,
-                dtype=predicted.dtype,
-            ),
             "scf_converged": jnp.asarray(scf_info.converged, dtype=predicted.dtype),
             "scf_cycles": jnp.asarray(scf_info.cycles, dtype=predicted.dtype),
             "scf_selected_cycle": jnp.asarray(scf_info.selected_cycle, dtype=predicted.dtype),
@@ -3084,11 +3186,12 @@ def _ground_state_mse_loss_batched_self_consistent(
                     density_weights,
                     density_matrix_weights,
                     density_targets,
+                    density_matrix_targets,
                 ),
             )
         else:
             batch = jax.lax.map(
-                lambda args: _per_datum(*args, None),
+                lambda args: _per_datum(*args, None, None),
                 (
                     batched_molecule,
                     targets,
@@ -3100,7 +3203,17 @@ def _ground_state_mse_loss_batched_self_consistent(
     else:
         batch = jax.vmap(
             _per_datum,
-            in_axes=(0, 0, 0, 0, 0, 0 if use_density_targets_any else None),
+            in_axes=(
+                0,
+                0,
+                0,
+                0,
+                0,
+                0 if use_grid_density_targets else None,
+                0
+                if (use_density_matrix_targets or use_density_matrix_for_density_targets)
+                else None,
+            ),
         )(
             batched_molecule,
             targets,
@@ -3108,6 +3221,7 @@ def _ground_state_mse_loss_batched_self_consistent(
             density_weights,
             density_matrix_weights,
             density_targets,
+            density_matrix_targets,
         )
     dtype = batch["predicted"].dtype
     total_weight = jnp.sum(batch["weight"])
@@ -3128,7 +3242,6 @@ def _ground_state_mse_loss_batched_self_consistent(
         "density_matrix_penalty": batch["density_matrix_penalty"],
         "density_matrix_mse": batch["density_matrix_mse"],
         "scf_converged": batch["scf_converged"],
-        "scf_stop_gradient_applied": batch["scf_stop_gradient_applied"],
         "scf_cycles": batch["scf_cycles"],
         "scf_selected_cycle": batch["scf_selected_cycle"],
         "scf_best_cycle": batch["scf_best_cycle"],
@@ -3136,7 +3249,6 @@ def _ground_state_mse_loss_batched_self_consistent(
         "scf_selected_rms_density": batch["scf_selected_rms"],
         "scf_best_rms_density": batch["scf_best_rms"],
         "scf_converged_fraction": _mean(batch["scf_converged"]),
-        "scf_stop_gradient_fraction": _mean(batch["scf_stop_gradient_applied"]),
         "scf_cycles_mean": _mean(batch["scf_cycles"]),
         "scf_cycles_max": _max(batch["scf_cycles"]),
         "scf_selected_cycle_mean": _mean(batch["scf_selected_cycle"]),
@@ -3203,9 +3315,7 @@ def ground_state_mse_loss_pointwise_dataset(
             and int(jnp.asarray(metrics_i["scf_converged"]).size) > 0
         ):
             weight_i = weight_i * jnp.asarray(metrics_i["scf_converged"]).reshape(-1)[0]
-        weighted_losses.append(
-            loss_i * jnp.maximum(weight_i, jnp.asarray(1.0, dtype=loss_i.dtype))
-        )
+        weighted_losses.append(loss_i * weight_i)
         effective_weights.append(weight_i)
         per_datum.append(metrics_i)
     if not weighted_losses:
@@ -3223,7 +3333,6 @@ def ground_state_mse_loss_pointwise_dataset(
     summary_keys = {
         "loss",
         "scf_converged_fraction",
-        "scf_stop_gradient_fraction",
         "scf_cycles_mean",
         "scf_cycles_max",
         "scf_selected_cycle_mean",
@@ -3266,7 +3375,6 @@ def ground_state_mse_loss_pointwise_dataset(
         return jnp.asarray([jnp.max(values)], dtype=loss_dtype)
 
     metrics["scf_converged_fraction"] = _mean_or_nan("scf_converged")
-    metrics["scf_stop_gradient_fraction"] = _mean_or_nan("scf_stop_gradient_applied")
     metrics["scf_cycles_mean"] = _mean_or_nan("scf_cycles")
     metrics["scf_cycles_max"] = _max_or_nan("scf_cycles")
     metrics["scf_selected_cycle_mean"] = _mean_or_nan("scf_selected_cycle")
@@ -3303,65 +3411,9 @@ def ground_state_mse_loss(
         )
     total_loss = 0.0
     total_weight = 0.0
-    predictions = []
-    mse_terms = []
-    mae_terms = []
-    normalized_mse_terms = []
-    normalized_mae_terms = []
-    density_penalties = []
-    density_mse_terms = []
-    density_matrix_penalties = []
-    density_matrix_mse_terms = []
-    xc_potential_penalties = []
-    xc_potential_mse_terms = []
-    xc_kernel_penalties = []
-    xc_kernel_mse_terms = []
-    self_consistent_energy_penalties = []
-    self_consistent_energy_mse_terms = []
-    self_consistent_energy_mae_terms = []
-    orbital_energy_penalties = []
-    orbital_energy_mse_terms = []
-    orbital_energy_mae_terms = []
-    janak_frontier_penalties = []
-    janak_frontier_mse_terms = []
-    janak_frontier_mae_terms = []
-    coefficient_prior_penalties = []
-    coefficient_prior_mse_terms = []
-    stationarity_penalties = []
-    dm21_scf_penalties = []
-    dm21_scf_mse_terms = []
-    dm21_scf_delta_terms = []
-    fractional_penalties = []
-    s1_penalties = []
-    s1_mse_terms = []
-    s1_mae_terms = []
-    s1_predicted_terms = []
-    s1_target_terms = []
-    first_excited_total_penalties = []
-    first_excited_total_mse_terms = []
-    first_excited_total_predicted_terms = []
-    first_excited_total_target_terms = []
-    excitation_penalties = []
-    excitation_mse_terms = []
-    excitation_mae_terms = []
-    excitation_predicted_terms = []
-    excitation_target_terms = []
-    oscillator_strength_penalties = []
-    oscillator_strength_mse_terms = []
-    oscillator_strength_mae_terms = []
-    oscillator_strength_predicted_terms = []
-    oscillator_strength_target_terms = []
-    spectrum_penalties = []
-    spectrum_mse_terms = []
-    spectrum_mae_terms = []
-    scf_stop_gradient_terms = []
-    scf_converged_terms = []
-    scf_cycles_terms = []
-    scf_selected_cycle_terms = []
-    scf_best_cycle_terms = []
-    scf_final_rms_terms = []
-    scf_selected_rms_terms = []
-    scf_best_rms_terms = []
+    metric_terms = _new_metric_terms(
+        (*_GROUND_STATE_LOSS_METRIC_KEYS, *_SCF_METRIC_KEYS)
+    )
     predictor_fn = predictor
     for datum in dataset:
         core_datum = datum.ground_state_core()
@@ -3483,6 +3535,7 @@ def ground_state_mse_loss(
                 datum.molecule,
                 training_config=cfg,
                 self_consistent_molecule=self_consistent_molecule,
+                target_density=core_datum.target_density,
                 target_density_matrix=core_datum.target_density_matrix,
             )
             density_penalty = core_datum.density_constraint_weight * density_mse
@@ -3677,63 +3730,22 @@ def ground_state_mse_loss(
                     assume_self_consistent_input=(core_cfg.mode == "self_consistent"),
                 )
             )
-        if scf_info_for_datum is not None and str(scf_info_for_datum.mode).startswith("self_consistent"):
+        if scf_info_for_datum is not None and str(scf_info_for_datum.mode).startswith(
+            "self_consistent"
+        ):
             dtype = predicted.dtype
-            stop_gradient_mask = _scf_stop_gradient_mask(core_cfg, scf_info_for_datum)
-            scf_stop_gradient_terms.append(
-                jnp.atleast_1d(jnp.asarray(stop_gradient_mask, dtype=dtype))
-            )
-            scf_converged_terms.append(
-                jnp.atleast_1d(jnp.asarray(scf_info_for_datum.converged, dtype=dtype))
-            )
-            scf_cycles_terms.append(
-                jnp.atleast_1d(jnp.asarray(scf_info_for_datum.cycles, dtype=dtype))
-            )
-            scf_selected_cycle_terms.append(
-                jnp.atleast_1d(jnp.asarray(scf_info_for_datum.selected_cycle, dtype=dtype))
-            )
-            scf_best_cycle_terms.append(
-                jnp.atleast_1d(jnp.asarray(scf_info_for_datum.best_cycle, dtype=dtype))
-            )
-            scf_final_rms_terms.append(
-                jnp.atleast_1d(jnp.asarray(scf_info_for_datum.final_rms_density, dtype=dtype))
-            )
-            scf_selected_rms_terms.append(
-                jnp.atleast_1d(
-                    jnp.asarray(scf_info_for_datum.selected_rms_density, dtype=dtype)
+            for key, attr in _SCF_METRIC_ATTRS:
+                _append_metric_term(
+                    metric_terms,
+                    key,
+                    jnp.asarray(getattr(scf_info_for_datum, attr), dtype=dtype),
                 )
-            )
-            scf_best_rms_terms.append(
-                jnp.atleast_1d(jnp.asarray(scf_info_for_datum.best_rms_density, dtype=dtype))
-            )
         excited_terms = _excited_state_extension_terms(
             predicted_ground_state_energy=predicted,
             excited_datum=excited_datum,
             excited_cfg=excited_cfg,
             get_excited_state_observables=_get_excited_state_observables,
         )
-        s1_penalty = excited_terms["s1_penalty"]
-        s1_mse = excited_terms["s1_mse"]
-        s1_mae = excited_terms["s1_mae"]
-        s1_predicted = excited_terms["s1_predicted"]
-        s1_target = excited_terms["s1_target"]
-        first_excited_total_penalty = excited_terms["first_excited_total_penalty"]
-        first_excited_total_mse = excited_terms["first_excited_total_mse"]
-        first_excited_total_predicted = excited_terms["first_excited_total_predicted"]
-        first_excited_total_target = excited_terms["first_excited_total_target"]
-        excitation_penalty = excited_terms["excitation_penalty"]
-        excitation_mse = excited_terms["excitation_mse"]
-        excitation_mae = excited_terms["excitation_mae"]
-        excitation_predicted = excited_terms["excitation_predicted"]
-        excitation_target = excited_terms["excitation_target"]
-        oscillator_strength_penalty = excited_terms["oscillator_strength_penalty"]
-        oscillator_strength_mse = excited_terms["oscillator_strength_mse"]
-        oscillator_strength_mae = excited_terms["oscillator_strength_mae"]
-        oscillator_strength_predicted = excited_terms["oscillator_strength_predicted"]
-        oscillator_strength_target = excited_terms["oscillator_strength_target"]
-        spectrum_penalty = excited_terms["spectrum_penalty"]
-        spectrum_mse = excited_terms["spectrum_mse"]
-        spectrum_mae = excited_terms["spectrum_mae"]
         loss_weight = jnp.asarray(datum.weight, dtype=predicted.dtype)
         if (
             core_cfg.mode == "self_consistent"
@@ -3758,322 +3770,65 @@ def ground_state_mse_loss(
             + stationarity_penalty
             + dm21_scf_penalty
             + fractional_penalty
-            + s1_penalty
-            + first_excited_total_penalty
-            + excitation_penalty
-            + oscillator_strength_penalty
-            + spectrum_penalty
+            + excited_terms["s1_penalty"]
+            + excited_terms["first_excited_total_penalty"]
+            + excited_terms["excitation_penalty"]
+            + excited_terms["oscillator_strength_penalty"]
+            + excited_terms["spectrum_penalty"]
         )
-        stop_gradient_mask = _scf_stop_gradient_mask(core_cfg, scf_info_for_datum)
         weighted_datum_loss = loss_weight * datum_total_penalty
-        weighted_datum_loss = _preserve_value_stop_gradient(weighted_datum_loss, stop_gradient_mask)
         total_loss += weighted_datum_loss
         total_weight += loss_weight
-        predictions.append(jnp.atleast_1d(predicted))
-        mse_terms.append(jnp.atleast_1d(raw_mse))
-        mae_terms.append(jnp.atleast_1d(raw_mae))
-        normalized_mse_terms.append(jnp.atleast_1d(datum_mse))
-        normalized_mae_terms.append(jnp.atleast_1d(datum_mae))
-        density_penalties.append(jnp.atleast_1d(density_penalty))
-        density_mse_terms.append(jnp.atleast_1d(density_mse))
-        density_matrix_penalties.append(jnp.atleast_1d(density_matrix_penalty))
-        density_matrix_mse_terms.append(jnp.atleast_1d(density_matrix_mse))
-        xc_potential_penalties.append(jnp.atleast_1d(xc_potential_penalty))
-        xc_potential_mse_terms.append(jnp.atleast_1d(xc_potential_mse))
-        xc_kernel_penalties.append(jnp.atleast_1d(xc_kernel_penalty))
-        xc_kernel_mse_terms.append(jnp.atleast_1d(xc_kernel_mse))
-        self_consistent_energy_penalties.append(jnp.atleast_1d(self_consistent_energy_penalty))
-        self_consistent_energy_mse_terms.append(jnp.atleast_1d(self_consistent_energy_mse))
-        self_consistent_energy_mae_terms.append(jnp.atleast_1d(self_consistent_energy_mae))
-        orbital_energy_penalties.append(jnp.atleast_1d(orbital_energy_penalty))
-        orbital_energy_mse_terms.append(jnp.atleast_1d(orbital_energy_mse))
-        orbital_energy_mae_terms.append(jnp.atleast_1d(orbital_energy_mae))
-        janak_frontier_penalties.append(jnp.atleast_1d(janak_frontier_penalty))
-        janak_frontier_mse_terms.append(jnp.atleast_1d(janak_frontier_mse))
-        janak_frontier_mae_terms.append(jnp.atleast_1d(janak_frontier_mae))
-        coefficient_prior_penalties.append(jnp.atleast_1d(coefficient_prior_penalty_value))
-        coefficient_prior_mse_terms.append(jnp.atleast_1d(coefficient_prior_mse))
-        stationarity_penalties.append(jnp.atleast_1d(stationarity_penalty))
-        dm21_scf_penalties.append(jnp.atleast_1d(dm21_scf_penalty))
-        dm21_scf_mse_terms.append(jnp.atleast_1d(dm21_scf_mse))
-        dm21_scf_delta_terms.append(jnp.atleast_1d(dm21_scf_delta))
-        fractional_penalties.append(jnp.atleast_1d(fractional_penalty))
-        s1_penalties.append(jnp.atleast_1d(s1_penalty))
-        s1_mse_terms.append(jnp.atleast_1d(s1_mse))
-        s1_mae_terms.append(jnp.atleast_1d(s1_mae))
-        s1_predicted_terms.append(jnp.atleast_1d(s1_predicted))
-        s1_target_terms.append(jnp.atleast_1d(s1_target))
-        first_excited_total_penalties.append(jnp.atleast_1d(first_excited_total_penalty))
-        first_excited_total_mse_terms.append(jnp.atleast_1d(first_excited_total_mse))
-        first_excited_total_predicted_terms.append(jnp.atleast_1d(first_excited_total_predicted))
-        first_excited_total_target_terms.append(jnp.atleast_1d(first_excited_total_target))
-        excitation_penalties.append(jnp.atleast_1d(excitation_penalty))
-        excitation_mse_terms.append(jnp.atleast_1d(excitation_mse))
-        excitation_mae_terms.append(jnp.atleast_1d(excitation_mae))
-        excitation_predicted_terms.append(jnp.atleast_1d(excitation_predicted))
-        excitation_target_terms.append(jnp.atleast_1d(excitation_target))
-        oscillator_strength_penalties.append(jnp.atleast_1d(oscillator_strength_penalty))
-        oscillator_strength_mse_terms.append(jnp.atleast_1d(oscillator_strength_mse))
-        oscillator_strength_mae_terms.append(jnp.atleast_1d(oscillator_strength_mae))
-        oscillator_strength_predicted_terms.append(
-            jnp.atleast_1d(oscillator_strength_predicted)
-        )
-        oscillator_strength_target_terms.append(
-            jnp.atleast_1d(oscillator_strength_target)
-        )
-        spectrum_penalties.append(jnp.atleast_1d(spectrum_penalty))
-        spectrum_mse_terms.append(jnp.atleast_1d(spectrum_mse))
-        spectrum_mae_terms.append(jnp.atleast_1d(spectrum_mae))
+        metric_values = {
+            "energy_mse": raw_mse,
+            "energy_mae": raw_mae,
+            "normalized_energy_mse": datum_mse,
+            "normalized_energy_mae": datum_mae,
+            "density_penalty": density_penalty,
+            "density_mse": density_mse,
+            "density_matrix_penalty": density_matrix_penalty,
+            "density_matrix_mse": density_matrix_mse,
+            "xc_potential_penalty": xc_potential_penalty,
+            "xc_potential_mse": xc_potential_mse,
+            "xc_kernel_penalty": xc_kernel_penalty,
+            "xc_kernel_mse": xc_kernel_mse,
+            "self_consistent_energy_penalty": self_consistent_energy_penalty,
+            "self_consistent_energy_mse": self_consistent_energy_mse,
+            "self_consistent_energy_mae": self_consistent_energy_mae,
+            "orbital_energy_penalty": orbital_energy_penalty,
+            "orbital_energy_mse": orbital_energy_mse,
+            "orbital_energy_mae": orbital_energy_mae,
+            "janak_frontier_penalty": janak_frontier_penalty,
+            "janak_frontier_mse": janak_frontier_mse,
+            "janak_frontier_mae": janak_frontier_mae,
+            "coefficient_prior_penalty": coefficient_prior_penalty_value,
+            "coefficient_prior_mse": coefficient_prior_mse,
+            "stationarity_penalty": stationarity_penalty,
+            "dm21_scf_penalty": dm21_scf_penalty,
+            "dm21_scf_mse": dm21_scf_mse,
+            "dm21_scf_delta_energy": dm21_scf_delta,
+            "fractional_penalty": fractional_penalty,
+            "predicted_total_energies": predicted,
+        }
+        metric_values.update(excited_terms)
+        _append_metric_terms(metric_terms, metric_values)
 
     loss = total_loss / jnp.maximum(
         jnp.asarray(total_weight),
         jnp.asarray(1.0, dtype=jnp.asarray(total_loss).dtype),
     )
 
-    def _concat_or_empty(terms: list[Array]) -> Array:
-        if not terms:
-            return jnp.array([], dtype=loss.dtype)
-        return jnp.concatenate(terms).astype(loss.dtype)
-
-    def _mean_or_nan(values: Array) -> Array:
-        if int(values.size) <= 0:
-            return jnp.asarray([jnp.nan], dtype=loss.dtype)
-        return jnp.asarray([jnp.mean(values)], dtype=loss.dtype)
-
-    def _max_or_nan(values: Array) -> Array:
-        if int(values.size) <= 0:
-            return jnp.asarray([jnp.nan], dtype=loss.dtype)
-        return jnp.asarray([jnp.max(values)], dtype=loss.dtype)
-
-    scf_converged = _concat_or_empty(scf_converged_terms)
-    scf_stop_gradient_applied = _concat_or_empty(scf_stop_gradient_terms)
-    scf_cycles = _concat_or_empty(scf_cycles_terms)
-    scf_selected_cycle = _concat_or_empty(scf_selected_cycle_terms)
-    scf_best_cycle = _concat_or_empty(scf_best_cycle_terms)
-    scf_final_rms = _concat_or_empty(scf_final_rms_terms)
-    scf_selected_rms = _concat_or_empty(scf_selected_rms_terms)
-    scf_best_rms = _concat_or_empty(scf_best_rms_terms)
-
-    metrics = {
-        "loss": loss,
-        "energy_mse": jnp.concatenate(mse_terms) if mse_terms else jnp.array([]),
-        "energy_mae": jnp.concatenate(mae_terms) if mae_terms else jnp.array([]),
-        "normalized_energy_mse": (
-            jnp.concatenate(normalized_mse_terms) if normalized_mse_terms else jnp.array([])
-        ),
-        "normalized_energy_mae": (
-            jnp.concatenate(normalized_mae_terms) if normalized_mae_terms else jnp.array([])
-        ),
-        "density_penalty": (
-            jnp.concatenate(density_penalties) if density_penalties else jnp.array([])
-        ),
-        "density_mse": (
-            jnp.concatenate(density_mse_terms) if density_mse_terms else jnp.array([])
-        ),
-        "density_matrix_penalty": (
-            jnp.concatenate(density_matrix_penalties)
-            if density_matrix_penalties
-            else jnp.array([])
-        ),
-        "density_matrix_mse": (
-            jnp.concatenate(density_matrix_mse_terms)
-            if density_matrix_mse_terms
-            else jnp.array([])
-        ),
-        "xc_potential_penalty": (
-            jnp.concatenate(xc_potential_penalties)
-            if xc_potential_penalties
-            else jnp.array([])
-        ),
-        "xc_potential_mse": (
-            jnp.concatenate(xc_potential_mse_terms)
-            if xc_potential_mse_terms
-            else jnp.array([])
-        ),
-        "xc_kernel_penalty": (
-            jnp.concatenate(xc_kernel_penalties)
-            if xc_kernel_penalties
-            else jnp.array([])
-        ),
-        "xc_kernel_mse": (
-            jnp.concatenate(xc_kernel_mse_terms)
-            if xc_kernel_mse_terms
-            else jnp.array([])
-        ),
-        "self_consistent_energy_penalty": (
-            jnp.concatenate(self_consistent_energy_penalties)
-            if self_consistent_energy_penalties
-            else jnp.array([])
-        ),
-        "self_consistent_energy_mse": (
-            jnp.concatenate(self_consistent_energy_mse_terms)
-            if self_consistent_energy_mse_terms
-            else jnp.array([])
-        ),
-        "self_consistent_energy_mae": (
-            jnp.concatenate(self_consistent_energy_mae_terms)
-            if self_consistent_energy_mae_terms
-            else jnp.array([])
-        ),
-        "orbital_energy_penalty": (
-            jnp.concatenate(orbital_energy_penalties)
-            if orbital_energy_penalties
-            else jnp.array([])
-        ),
-        "orbital_energy_mse": (
-            jnp.concatenate(orbital_energy_mse_terms)
-            if orbital_energy_mse_terms
-            else jnp.array([])
-        ),
-        "orbital_energy_mae": (
-            jnp.concatenate(orbital_energy_mae_terms)
-            if orbital_energy_mae_terms
-            else jnp.array([])
-        ),
-        "janak_frontier_penalty": (
-            jnp.concatenate(janak_frontier_penalties)
-            if janak_frontier_penalties
-            else jnp.array([])
-        ),
-        "janak_frontier_mse": (
-            jnp.concatenate(janak_frontier_mse_terms)
-            if janak_frontier_mse_terms
-            else jnp.array([])
-        ),
-        "janak_frontier_mae": (
-            jnp.concatenate(janak_frontier_mae_terms)
-            if janak_frontier_mae_terms
-            else jnp.array([])
-        ),
-        "coefficient_prior_penalty": (
-            jnp.concatenate(coefficient_prior_penalties)
-            if coefficient_prior_penalties
-            else jnp.array([])
-        ),
-        "coefficient_prior_mse": (
-            jnp.concatenate(coefficient_prior_mse_terms)
-            if coefficient_prior_mse_terms
-            else jnp.array([])
-        ),
-        "stationarity_penalty": (
-            jnp.concatenate(stationarity_penalties) if stationarity_penalties else jnp.array([])
-        ),
-        "dm21_scf_penalty": (
-            jnp.concatenate(dm21_scf_penalties) if dm21_scf_penalties else jnp.array([])
-        ),
-        "dm21_scf_mse": (
-            jnp.concatenate(dm21_scf_mse_terms) if dm21_scf_mse_terms else jnp.array([])
-        ),
-        "dm21_scf_delta_energy": (
-            jnp.concatenate(dm21_scf_delta_terms) if dm21_scf_delta_terms else jnp.array([])
-        ),
-        "fractional_penalty": (
-            jnp.concatenate(fractional_penalties) if fractional_penalties else jnp.array([])
-        ),
-        "s1_penalty": (jnp.concatenate(s1_penalties) if s1_penalties else jnp.array([])),
-        "s1_mse": (jnp.concatenate(s1_mse_terms) if s1_mse_terms else jnp.array([])),
-        "s1_mae": (jnp.concatenate(s1_mae_terms) if s1_mae_terms else jnp.array([])),
-        "s1_predicted": (
-            jnp.concatenate(s1_predicted_terms) if s1_predicted_terms else jnp.array([])
-        ),
-        "s1_target": (jnp.concatenate(s1_target_terms) if s1_target_terms else jnp.array([])),
-        "first_excited_total_penalty": (
-            jnp.concatenate(first_excited_total_penalties)
-            if first_excited_total_penalties
-            else jnp.array([])
-        ),
-        "first_excited_total_mse": (
-            jnp.concatenate(first_excited_total_mse_terms)
-            if first_excited_total_mse_terms
-            else jnp.array([])
-        ),
-        "first_excited_total_predicted": (
-            jnp.concatenate(first_excited_total_predicted_terms)
-            if first_excited_total_predicted_terms
-            else jnp.array([])
-        ),
-        "first_excited_total_target": (
-            jnp.concatenate(first_excited_total_target_terms)
-            if first_excited_total_target_terms
-            else jnp.array([])
-        ),
-        "excitation_penalty": (
-            jnp.concatenate(excitation_penalties) if excitation_penalties else jnp.array([])
-        ),
-        "excitation_mse": (
-            jnp.concatenate(excitation_mse_terms) if excitation_mse_terms else jnp.array([])
-        ),
-        "excitation_mae": (
-            jnp.concatenate(excitation_mae_terms) if excitation_mae_terms else jnp.array([])
-        ),
-        "excitation_predicted": (
-            jnp.concatenate(excitation_predicted_terms)
-            if excitation_predicted_terms
-            else jnp.array([])
-        ),
-        "excitation_target": (
-            jnp.concatenate(excitation_target_terms)
-            if excitation_target_terms
-            else jnp.array([])
-        ),
-        "oscillator_strength_penalty": (
-            jnp.concatenate(oscillator_strength_penalties)
-            if oscillator_strength_penalties
-            else jnp.array([])
-        ),
-        "oscillator_strength_mse": (
-            jnp.concatenate(oscillator_strength_mse_terms)
-            if oscillator_strength_mse_terms
-            else jnp.array([])
-        ),
-        "oscillator_strength_mae": (
-            jnp.concatenate(oscillator_strength_mae_terms)
-            if oscillator_strength_mae_terms
-            else jnp.array([])
-        ),
-        "oscillator_strength_predicted": (
-            jnp.concatenate(oscillator_strength_predicted_terms)
-            if oscillator_strength_predicted_terms
-            else jnp.array([])
-        ),
-        "oscillator_strength_target": (
-            jnp.concatenate(oscillator_strength_target_terms)
-            if oscillator_strength_target_terms
-            else jnp.array([])
-        ),
-        "spectrum_penalty": (
-            jnp.concatenate(spectrum_penalties) if spectrum_penalties else jnp.array([])
-        ),
-        "spectrum_mse": (
-            jnp.concatenate(spectrum_mse_terms) if spectrum_mse_terms else jnp.array([])
-        ),
-        "spectrum_mae": (
-            jnp.concatenate(spectrum_mae_terms) if spectrum_mae_terms else jnp.array([])
-        ),
-        "scf_stop_gradient_applied": scf_stop_gradient_applied,
-        "scf_converged": scf_converged,
-        "scf_cycles": scf_cycles,
-        "scf_selected_cycle": scf_selected_cycle,
-        "scf_best_cycle": scf_best_cycle,
-        "scf_final_rms_density": scf_final_rms,
-        "scf_selected_rms_density": scf_selected_rms,
-        "scf_best_rms_density": scf_best_rms,
-        "scf_converged_fraction": _mean_or_nan(scf_converged),
-        "scf_stop_gradient_fraction": _mean_or_nan(scf_stop_gradient_applied),
-        "scf_cycles_mean": _mean_or_nan(scf_cycles),
-        "scf_cycles_max": _max_or_nan(scf_cycles),
-        "scf_selected_cycle_mean": _mean_or_nan(scf_selected_cycle),
-        "scf_best_cycle_mean": _mean_or_nan(scf_best_cycle),
-        "scf_final_rms_mean": _mean_or_nan(scf_final_rms),
-        "scf_final_rms_max": _max_or_nan(scf_final_rms),
-        "scf_selected_rms_mean": _mean_or_nan(scf_selected_rms),
-        "scf_selected_rms_max": _max_or_nan(scf_selected_rms),
-        "scf_best_rms_mean": _mean_or_nan(scf_best_rms),
-        "scf_best_rms_max": _max_or_nan(scf_best_rms),
-        "predicted_total_energies": (
-            jnp.concatenate(predictions) if predictions else jnp.array([])
-        ),
-    }
+    metrics = {"loss": loss}
+    for key in (*_GROUND_STATE_LOSS_METRIC_KEYS, *_SCF_METRIC_KEYS):
+        metrics[key] = _concat_metric_terms(metric_terms[key], empty_dtype=loss.dtype)
+    for summary_key, source_key, reducer in _SCF_SUMMARY_METRICS:
+        values = metrics[source_key]
+        if reducer == "mean":
+            metrics[summary_key] = _mean_or_nan(values, dtype=loss.dtype)
+        elif reducer == "max":
+            metrics[summary_key] = _max_or_nan(values, dtype=loss.dtype)
+        else:
+            raise ValueError(f"Unsupported SCF metric reducer {reducer!r}.")
     return loss, metrics
 
 
@@ -4081,16 +3836,19 @@ def _build_excited_state_solver(
     params: PyTree,
     functional: Any,
     molecule: Any,
-) -> RestrictedCasidaTDDFT:
+    *,
+    use_tda: bool,
+) -> Any:
     contains_tracer = any(
         isinstance(leaf, jax.core.Tracer)
         for leaf in jax.tree_util.tree_leaves(params)
     )
-    return RestrictedCasidaTDDFT(
-        molecule=molecule,
+    solver_cls = tdscf.TDA if bool(use_tda) else tdscf.TDDFT
+    return solver_cls(
+        molecule,
         xc_functional=functional,
         xc_params=params,
-        eigensolver="dense" if contains_tracer else "auto",
+        eigensolver="davidson" if contains_tracer else "auto",
     )
 
 
@@ -4102,9 +3860,12 @@ def _solve_excited_states(
     nstates: int,
     use_tda: bool,
 ) -> Any:
-    solver = _build_excited_state_solver(params, functional, molecule)
-    if use_tda:
-        return solver.tda(nstates=nstates)
+    solver = _build_excited_state_solver(
+        params,
+        functional,
+        molecule,
+        use_tda=use_tda,
+    )
     return solver.kernel(nstates=nstates)
 
 

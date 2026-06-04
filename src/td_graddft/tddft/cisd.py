@@ -67,6 +67,66 @@ def _restricted_mo_eri_tensor(molecule: Any, mo_coeff: Array) -> Array:
     )
 
 
+def _general_chemist_block_from_ao(
+    molecule: Any,
+    c_p: Array,
+    c_q: Array,
+    c_r: Array,
+    c_s: Array,
+) -> Array:
+    rep_tensor = getattr(molecule, "rep_tensor", None)
+    if rep_tensor is not None and int(jnp.asarray(rep_tensor).size) > 0:
+        eri_ao = jnp.asarray(rep_tensor)
+        return jnp.einsum(
+            "pqrs,pP,qQ,rR,sS->PQRS",
+            eri_ao,
+            c_p,
+            c_q,
+            c_r,
+            c_s,
+            precision=Precision.HIGHEST,
+        )
+
+    eri_pair_matrix = getattr(molecule, "eri_pair_matrix", None)
+    if eri_pair_matrix is not None and int(jnp.asarray(eri_pair_matrix).size) > 0:
+        pair = jnp.asarray(eri_pair_matrix)
+        nao = int(c_p.shape[0])
+        rows, cols, _, _ = _metadata_arrays(nao, c_p.dtype)
+        pq_pairs = _mo_pair_products(c_p, c_q, rows, cols)
+        rs_pairs = _mo_pair_products(c_r, c_s, rows, cols)
+        return jnp.einsum(
+            "pqP,PQ,rsQ->pqrs",
+            pq_pairs,
+            pair,
+            rs_pairs,
+            precision=Precision.HIGHEST,
+        )
+
+    df_factors = getattr(molecule, "df_factors", None)
+    if df_factors is not None and int(jnp.asarray(df_factors).size) > 0:
+        factors = jnp.asarray(df_factors)
+        b_pq = jnp.einsum(
+            "Lmn,mP,nQ->LPQ",
+            factors,
+            c_p,
+            c_q,
+            precision=Precision.HIGHEST,
+        )
+        b_rs = jnp.einsum(
+            "Lmn,mR,nS->LRS",
+            factors,
+            c_r,
+            c_s,
+            precision=Precision.HIGHEST,
+        )
+        return jnp.einsum("Lpq,Lrs->pqrs", b_pq, b_rs, precision=Precision.HIGHEST)
+
+    raise ValueError(
+        "CIS(D) correction requires rep_tensor, eri_pair_matrix, or df_factors "
+        "for unrestricted/open-shell references."
+    )
+
+
 def _spin_orbital_labels(spatial: Array) -> tuple[Array, Array]:
     spatial = jnp.asarray(spatial, dtype=jnp.int32)
     return (
@@ -139,6 +199,70 @@ def _antisymmetrized_block(
     )
 
 
+def _general_chemist_block(
+    molecule: Any,
+    coeff_p: Array,
+    spin_p: Array,
+    coeff_q: Array,
+    spin_q: Array,
+    coeff_r: Array,
+    spin_r: Array,
+    coeff_s: Array,
+    spin_s: Array,
+) -> Array:
+    values = _general_chemist_block_from_ao(
+        molecule,
+        coeff_p,
+        coeff_q,
+        coeff_r,
+        coeff_s,
+    )
+    spin_mask = (
+        (spin_p[:, None, None, None] == spin_q[None, :, None, None])
+        & (spin_r[None, None, :, None] == spin_s[None, None, None, :])
+    )
+    return values * spin_mask.astype(values.dtype)
+
+
+def _general_antisymmetrized_block(
+    molecule: Any,
+    coeff_p: Array,
+    spin_p: Array,
+    coeff_q: Array,
+    spin_q: Array,
+    coeff_r: Array,
+    spin_r: Array,
+    coeff_s: Array,
+    spin_s: Array,
+) -> Array:
+    direct = _general_chemist_block(
+        molecule,
+        coeff_p,
+        spin_p,
+        coeff_r,
+        spin_r,
+        coeff_q,
+        spin_q,
+        coeff_s,
+        spin_s,
+    )
+    exchange = _general_chemist_block(
+        molecule,
+        coeff_p,
+        spin_p,
+        coeff_s,
+        spin_s,
+        coeff_q,
+        spin_q,
+        coeff_r,
+        spin_r,
+    )
+    return jnp.transpose(direct, (0, 2, 1, 3)) - jnp.transpose(
+        exchange,
+        (0, 2, 3, 1),
+    )
+
+
 def _result_singles_amplitudes(result: TDAResult | TDDFTResult) -> Array:
     if isinstance(result, TDDFTResult):
         return jnp.asarray(result.x_amplitudes + result.y_amplitudes)
@@ -159,6 +283,82 @@ def _spatial_to_spin_singlet_amplitudes(amplitudes: Array) -> Array:
         amplitudes
     )
     return spin_amplitudes
+
+
+def _unrestricted_spin_orbital_data(
+    molecule: Any,
+    occupation_tolerance: float,
+) -> tuple[Array, Array, Array, Array, Array, Array, tuple[int, int], tuple[int, int]]:
+    mo_coeff = jnp.asarray(molecule.mo_coeff)
+    mo_occ = jnp.asarray(molecule.mo_occ)
+    mo_energy = jnp.asarray(molecule.mo_energy)
+    if mo_coeff.ndim != 3 or mo_coeff.shape[0] != 2:
+        raise ValueError("Unrestricted CIS(D) correction expects mo_coeff with shape (2, nao, nmo).")
+
+    occ_a = jnp.where(mo_occ[0] > occupation_tolerance)[0]
+    vir_a = jnp.where(mo_occ[0] <= occupation_tolerance)[0]
+    occ_b = jnp.where(mo_occ[1] > occupation_tolerance)[0]
+    vir_b = jnp.where(mo_occ[1] <= occupation_tolerance)[0]
+
+    occ_coeff = jnp.concatenate(
+        [mo_coeff[0][:, occ_a], mo_coeff[1][:, occ_b]],
+        axis=1,
+    )
+    vir_coeff = jnp.concatenate(
+        [mo_coeff[0][:, vir_a], mo_coeff[1][:, vir_b]],
+        axis=1,
+    )
+    occ_spin = jnp.concatenate(
+        [
+            jnp.zeros((occ_a.shape[0],), dtype=jnp.int32),
+            jnp.ones((occ_b.shape[0],), dtype=jnp.int32),
+        ]
+    )
+    vir_spin = jnp.concatenate(
+        [
+            jnp.zeros((vir_a.shape[0],), dtype=jnp.int32),
+            jnp.ones((vir_b.shape[0],), dtype=jnp.int32),
+        ]
+    )
+    occ_eps = jnp.concatenate([mo_energy[0][occ_a], mo_energy[1][occ_b]])
+    vir_eps = jnp.concatenate([mo_energy[0][vir_a], mo_energy[1][vir_b]])
+    return (
+        occ_coeff,
+        occ_spin,
+        occ_eps,
+        vir_coeff,
+        vir_spin,
+        vir_eps,
+        (int(occ_a.shape[0]), int(occ_b.shape[0])),
+        (int(vir_a.shape[0]), int(vir_b.shape[0])),
+    )
+
+
+def _unrestricted_result_singles_amplitudes(
+    result: Any,
+    *,
+    occ_counts: tuple[int, int],
+    vir_counts: tuple[int, int],
+) -> Array:
+    if hasattr(result, "x_amplitudes_alpha"):
+        alpha = jnp.asarray(result.x_amplitudes_alpha + result.y_amplitudes_alpha)
+        beta = jnp.asarray(result.x_amplitudes_beta + result.y_amplitudes_beta)
+    elif hasattr(result, "amplitudes_alpha"):
+        alpha = jnp.asarray(result.amplitudes_alpha)
+        beta = jnp.asarray(result.amplitudes_beta)
+    else:
+        raise TypeError("Unrestricted CIS(D) correction requires unrestricted TDA/TDDFT amplitudes.")
+
+    nocca, noccb = occ_counts
+    nvira, nvirb = vir_counts
+    nstates = int(alpha.shape[0])
+    amplitudes = jnp.zeros(
+        (nstates, nocca + noccb, nvira + nvirb),
+        dtype=alpha.dtype,
+    )
+    amplitudes = amplitudes.at[:, :nocca, :nvira].set(alpha)
+    amplitudes = amplitudes.at[:, nocca:, nvira:].set(beta)
+    return amplitudes
 
 
 def restricted_cisd_second_order_correction(
@@ -276,6 +476,137 @@ def restricted_cisd_second_order_correction(
             jk_bc,
             mp2_amplitudes,
             b,
+            precision=Precision.HIGHEST,
+        )
+        indirect = (
+            jnp.einsum("ia,ib,ab->", b, b, r_ab, precision=Precision.HIGHEST)
+            + jnp.einsum("ic,jc,ij->", b, b, r_ij, precision=Precision.HIGHEST)
+            + jnp.einsum("ia,ia->", b, w_ia, precision=Precision.HIGHEST)
+        )
+        return jnp.real(direct + indirect)
+
+    correction = jax.vmap(root_correction)(spin_amplitudes, omegas)
+    return jnp.asarray(ac, dtype=correction.dtype) * correction
+
+
+def unrestricted_cisd_second_order_correction(
+    molecule: Any,
+    result: Any,
+    *,
+    ac: Array | float = 1.0,
+    occupation_tolerance: float = 1e-8,
+) -> Array:
+    """Return an ORCA-style CIS(D) doubles correction for unrestricted roots.
+
+    As in ORCA double-hybrid TDDFT, the response problem remains singles-only;
+    this routine adds a root-specific post-hoc doubles correction afterwards.
+    The first implementation uses spin-orbital amplitudes and AO integral
+    contractions. For single-electron references such as H2+, the doubles
+    space is empty and the correction is exactly zero.
+    """
+
+    (
+        occ_coeff,
+        occ_spin,
+        occ_eps,
+        vir_coeff,
+        vir_spin,
+        vir_eps,
+        occ_counts,
+        vir_counts,
+    ) = _unrestricted_spin_orbital_data(molecule, occupation_tolerance)
+
+    nocc = int(occ_coeff.shape[1])
+    nvir = int(vir_coeff.shape[1])
+    omegas = jnp.asarray(result.excitation_energies)
+    if nocc < 2 or nvir < 2:
+        return jnp.zeros_like(omegas)
+
+    ij_ab = _general_antisymmetrized_block(
+        molecule,
+        occ_coeff,
+        occ_spin,
+        occ_coeff,
+        occ_spin,
+        vir_coeff,
+        vir_spin,
+        vir_coeff,
+        vir_spin,
+    )
+    denom_mp2 = (
+        vir_eps[None, None, :, None]
+        + vir_eps[None, None, None, :]
+        - occ_eps[:, None, None, None]
+        - occ_eps[None, :, None, None]
+    )
+    mp2_amplitudes = -ij_ab / denom_mp2
+    ab_cj = _general_antisymmetrized_block(
+        molecule,
+        vir_coeff,
+        vir_spin,
+        vir_coeff,
+        vir_spin,
+        vir_coeff,
+        vir_spin,
+        occ_coeff,
+        occ_spin,
+    )
+    ka_ij = _general_antisymmetrized_block(
+        molecule,
+        occ_coeff,
+        occ_spin,
+        vir_coeff,
+        vir_spin,
+        occ_coeff,
+        occ_spin,
+        occ_coeff,
+        occ_spin,
+    )
+    jc_kb = _general_chemist_block(
+        molecule,
+        occ_coeff,
+        occ_spin,
+        vir_coeff,
+        vir_spin,
+        occ_coeff,
+        occ_spin,
+        vir_coeff,
+        vir_spin,
+    )
+    jk_bc = ij_ab
+    spin_amplitudes = _unrestricted_result_singles_amplitudes(
+        result,
+        occ_counts=occ_counts,
+        vir_counts=vir_counts,
+    )
+
+    def root_correction(b: Array, omega: Array) -> Array:
+        u = (
+            jnp.einsum("abcj,ic->ijab", ab_cj, b, precision=Precision.HIGHEST)
+            - jnp.einsum("abci,jc->ijab", ab_cj, b, precision=Precision.HIGHEST)
+            + jnp.einsum("kaij,kb->ijab", ka_ij, b, precision=Precision.HIGHEST)
+            - jnp.einsum("kbij,ka->ijab", ka_ij, b, precision=Precision.HIGHEST)
+        )
+        denom_excited = denom_mp2 - omega
+        direct = -0.25 * jnp.sum(u * u / denom_excited)
+
+        w_ia = jnp.einsum(
+            "jkbc,ikac,jb->ia",
+            jk_bc,
+            mp2_amplitudes,
+            b,
+            precision=Precision.HIGHEST,
+        )
+        r_ab = -jnp.einsum(
+            "jckb,jkca->ab",
+            jc_kb,
+            mp2_amplitudes,
+            precision=Precision.HIGHEST,
+        )
+        r_ij = -jnp.einsum(
+            "jakb,ikab->ij",
+            jc_kb,
+            mp2_amplitudes,
             precision=Precision.HIGHEST,
         )
         indirect = (

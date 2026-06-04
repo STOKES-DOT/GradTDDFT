@@ -234,41 +234,6 @@ def _flatten_primitive_quartets_4c(
     )
 
 
-@functools.lru_cache(maxsize=None)
-def _compiled_shell_block_scatter_kernel(
-    block_size: int,
-):
-    def kernel(
-        target: Array,
-        scatter_i: Array,
-        scatter_j: Array,
-        scatter_k: Array,
-        scatter_l: Array,
-        blocks: Array,
-    ) -> Array:
-        vv = jnp.concatenate(
-            (
-                blocks.reshape(-1),
-                blocks.transpose(0, 2, 1, 3, 4).reshape(-1),
-                blocks.transpose(0, 1, 2, 4, 3).reshape(-1),
-                blocks.transpose(0, 2, 1, 4, 3).reshape(-1),
-                blocks.transpose(0, 3, 4, 1, 2).reshape(-1),
-                blocks.transpose(0, 4, 3, 1, 2).reshape(-1),
-                blocks.transpose(0, 3, 4, 2, 1).reshape(-1),
-                blocks.transpose(0, 4, 3, 2, 1).reshape(-1),
-            ),
-            axis=0,
-        )
-        return target.at[
-            scatter_i[: 8 * block_size],
-            scatter_j[: 8 * block_size],
-            scatter_k[: 8 * block_size],
-            scatter_l[: 8 * block_size],
-        ].set(vv)
-
-    return jax.jit(kernel)
-
-
 def _angular_axis(angular: tuple[int, int, int]) -> int:
     for axis, power in enumerate(angular):
         if power:
@@ -488,19 +453,6 @@ def _use_jit_engine(
     raise ValueError(f"Unsupported integral engine mode {engine!r}.")
 
 
-def _quartet_signature(ao_i: CartesianAO, ao_j: CartesianAO, ao_k: CartesianAO, ao_l: CartesianAO):
-    return (
-        ao_i.angular,
-        ao_j.angular,
-        ao_k.angular,
-        ao_l.angular,
-        int(ao_i.exponents.shape[0]),
-        int(ao_j.exponents.shape[0]),
-        int(ao_k.exponents.shape[0]),
-        int(ao_l.exponents.shape[0]),
-    )
-
-
 @functools.lru_cache(maxsize=None)
 def _lower_triangle_pairs(size: int) -> tuple[tuple[int, int], ...]:
     return tuple((i, j) for i in range(size) for j in range(i + 1))
@@ -513,24 +465,6 @@ def _lower_triangle_pairs_to_matrix(size: int, *, sentinel: int | None = None) -
         pair_index[i, j] = pos
         pair_index[j, i] = pos
     return pair_index
-
-
-def _shell_quartet_signature(
-    shell_i: ContractedShell,
-    shell_j: ContractedShell,
-    shell_k: ContractedShell,
-    shell_l: ContractedShell,
-):
-    return (
-        shell_i.angulars,
-        shell_j.angulars,
-        shell_k.angulars,
-        shell_l.angulars,
-        int(shell_i.exponents.shape[0]),
-        int(shell_j.exponents.shape[0]),
-        int(shell_k.exponents.shape[0]),
-        int(shell_l.exponents.shape[0]),
-    )
 
 
 def _can_use_shell_block_path(
@@ -1585,50 +1519,6 @@ def _gather_shell_quartet_batch(
     )
 
 
-def _legacy_eri_tensor_shell_block(
-    basis: CartesianBasis,
-    *,
-    engine: str,
-) -> Array:
-    n = basis.nao
-    nshell = len(basis.shells)
-    if n == 0 or nshell == 0:
-        return jnp.zeros((n, n, n, n))
-
-    eri = jnp.zeros((n, n, n, n))
-
-    groups = basis.shell_quartet_groups
-    if not groups:
-        raise ValueError("Shell-block ERI path requires precomputed shell quartet groups.")
-
-    for group in groups:
-        signature = group.signature
-        idx_i_arr = jnp.asarray(group.idx_i, dtype=jnp.int32)
-        idx_j_arr = jnp.asarray(group.idx_j, dtype=jnp.int32)
-        idx_k_arr = jnp.asarray(group.idx_k, dtype=jnp.int32)
-        idx_l_arr = jnp.asarray(group.idx_l, dtype=jnp.int32)
-        kernel = _compiled_eri_shell_block_kernel_batched(*signature)
-        blocks = _run_quartet_kernel_chunked(
-            kernel,
-            group.batch_inputs,
-        )
-        ni = len(signature[0])
-        nj = len(signature[1])
-        nk = len(signature[2])
-        nl = len(signature[3])
-        block_size = int(idx_i_arr.shape[0]) * ni * nj * nk * nl
-        scatter_kernel = _compiled_shell_block_scatter_kernel(block_size)
-        eri = scatter_kernel(
-            eri,
-            group.scatter_i,
-            group.scatter_j,
-            group.scatter_k,
-            group.scatter_l,
-            blocks,
-        )
-    return eri
-
-
 def _eri_tensor_shell_block(
     basis: CartesianBasis,
     *,
@@ -1642,69 +1532,6 @@ def _eri_tensor_shell_block(
     if not groups:
         raise ValueError("Shell-block ERI path requires precomputed shell quartet groups.")
     return _fused_eri_tensor_from_shell_groups(basis, groups)
-
-
-def _legacy_eri_pair_matrix_packed_shell_block(
-    basis: CartesianBasis,
-    *,
-    engine: str,
-) -> Array:
-    n = basis.nao
-    nshell = len(basis.shells)
-    if n == 0 or nshell == 0:
-        return jnp.zeros((0, 0))
-
-    ao_pairs = _lower_triangle_pairs(n)
-    npair = len(ao_pairs)
-    pair_index = np.full((n, n), -1, dtype=np.int32)
-    for pos, (i, j) in enumerate(ao_pairs):
-        pair_index[i, j] = pos
-        pair_index[j, i] = pos
-    pair_index_arr = jnp.asarray(pair_index, dtype=jnp.int32)
-
-    pair = jnp.zeros((npair, npair))
-    groups = basis.shell_quartet_groups
-    if not groups:
-        raise ValueError("Shell-block packed ERI path requires precomputed shell quartet groups.")
-
-    for group in groups:
-        signature = group.signature
-        idx_i_arr = jnp.asarray(group.idx_i, dtype=jnp.int32)
-        idx_j_arr = jnp.asarray(group.idx_j, dtype=jnp.int32)
-        idx_k_arr = jnp.asarray(group.idx_k, dtype=jnp.int32)
-        idx_l_arr = jnp.asarray(group.idx_l, dtype=jnp.int32)
-        kernel = _compiled_eri_shell_block_kernel_batched(*signature)
-        blocks = _run_quartet_kernel_chunked(
-            kernel,
-            _gather_shell_quartet_batch(
-                basis,
-                idx_i_arr,
-                idx_j_arr,
-                idx_k_arr,
-                idx_l_arr,
-                nprim_i=signature[4],
-                nprim_j=signature[5],
-                nprim_k=signature[6],
-                nprim_l=signature[7],
-            ),
-        )
-        ni = len(signature[0])
-        nj = len(signature[1])
-        nk = len(signature[2])
-        nl = len(signature[3])
-        ao_i = basis.shell_ao_indices_padded[idx_i_arr, :ni]
-        ao_j = basis.shell_ao_indices_padded[idx_j_arr, :nj]
-        ao_k = basis.shell_ao_indices_padded[idx_k_arr, :nk]
-        ao_l = basis.shell_ao_indices_padded[idx_l_arr, :nl]
-
-        rows = pair_index_arr[ao_i[:, :, None], ao_j[:, None, :]]
-        cols = pair_index_arr[ao_k[:, :, None], ao_l[:, None, :]]
-        rows = jnp.broadcast_to(rows[:, :, :, None, None], blocks.shape).reshape(-1)
-        cols = jnp.broadcast_to(cols[:, None, None, :, :], blocks.shape).reshape(-1)
-        vals = blocks.reshape(-1)
-        pair = pair.at[rows, cols].set(vals)
-        pair = pair.at[cols, rows].set(vals)
-    return 0.5 * (pair + pair.T)
 
 
 def _eri_pair_matrix_packed_shell_block(

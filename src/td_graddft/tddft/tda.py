@@ -82,6 +82,12 @@ def solve_tda_from_operator(
     )
     if not _is_traced_convergence_flag(converged) and not bool(converged):
         raise RuntimeError("Davidson TDA solver did not converge.")
+    eigvecs = jax.lax.stop_gradient(eigvecs)
+    av = vind_rows(eigvecs.T).T
+    eigvals = jnp.sum(eigvecs * av, axis=0) / jnp.maximum(
+        jnp.sum(eigvecs * eigvecs, axis=0),
+        jnp.asarray(1e-30, dtype=eigvecs.dtype),
+    )
     return _finalize_tda_result(
         eigvals,
         eigvecs,

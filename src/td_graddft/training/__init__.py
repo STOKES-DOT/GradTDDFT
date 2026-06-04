@@ -47,7 +47,6 @@ from .excited_state_trainer import (
 )
 from .neural_xc_trainer import NeuralXCTrainer
 from .results import TrainingResult
-from .rsh_optimizer import RSHOptimizer
 
 __all__ = [
     "GroundStateCoreDatum",
@@ -87,6 +86,5 @@ __all__ = [
     "ExcitedStateFineTuneResult",
     "ExcitedStateFineTuner",
     "NeuralXCTrainer",
-    "RSHOptimizer",
     "TrainingResult",
 ]

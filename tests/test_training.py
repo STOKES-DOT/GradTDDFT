@@ -245,7 +245,6 @@ def test_pointwise_dataset_loss_calls_single_datum_loss(monkeypatch):
             "density_matrix_mse": jnp.atleast_1d(value + 3.0),
             "density_matrix_penalty": jnp.atleast_1d(value + 4.0),
             "scf_converged": jnp.atleast_1d(1.0),
-            "scf_stop_gradient_applied": jnp.atleast_1d(0.0),
             "scf_cycles": jnp.atleast_1d(value + 5.0),
             "scf_selected_cycle": jnp.atleast_1d(value + 6.0),
             "scf_best_cycle": jnp.atleast_1d(value + 7.0),
@@ -272,6 +271,32 @@ def test_pointwise_dataset_loss_calls_single_datum_loss(monkeypatch):
     np.testing.assert_allclose(np.asarray(metrics["scf_cycles_mean"]), np.asarray([7.5]))
     np.testing.assert_allclose(np.asarray(metrics["scf_cycles_max"]), np.asarray([8.5]))
     assert calls == [1.0, 3.0]
+
+
+def test_pointwise_dataset_loss_drops_unconverged_weights(monkeypatch):
+    def fake_loss(params, functional, data, *, training_config=None, predictor=None):
+        del params, functional, training_config, predictor
+        value = jnp.asarray(data.target_total_energy)
+        converged = 1.0 if float(value) < 2.0 else 0.0
+        return value, {"loss": value, "scf_converged": jnp.atleast_1d(converged)}
+
+    monkeypatch.setattr(training_targets, "ground_state_mse_loss", fake_loss)
+    dataset = (
+        GroundStateDatum(SimpleNamespace(), jnp.asarray(1.0)),
+        GroundStateDatum(SimpleNamespace(), jnp.asarray(3.0)),
+    )
+
+    loss, _ = training_targets.ground_state_mse_loss_pointwise_dataset(
+        {},
+        object(),
+        dataset,
+        training_config=GroundStateTrainingConfig(
+            mode="self_consistent",
+            scf_require_convergence=True,
+        ),
+    )
+
+    np.testing.assert_allclose(float(loss), 1.0)
 
 
 def _clip_toy_density(density: jnp.ndarray, density_floor: float) -> jnp.ndarray:
@@ -571,6 +596,102 @@ def test_hybrid_exact_exchange_energy_and_excitation_are_differentiable():
     assert jnp.allclose(excitation[0], 0.5, atol=1e-6)
     assert jnp.isfinite(grad)
     assert grad < -1e-6
+
+
+def test_predict_excitation_energies_dispatches_unrestricted_facades(monkeypatch):
+    calls: list[tuple[str, Any]] = []
+
+    class FakeTDA:
+        def __init__(self, molecule, **kwargs):
+            calls.append(("tda_init", {"molecule": molecule, **kwargs}))
+
+        def kernel(self, nstates=None):
+            calls.append(("tda_kernel", nstates))
+            return SimpleNamespace(excitation_energies=jnp.asarray([0.31]))
+
+    class FakeTDDFT:
+        def __init__(self, molecule, **kwargs):
+            calls.append(("tddft_init", {"molecule": molecule, **kwargs}))
+
+        def kernel(self, nstates=None):
+            calls.append(("tddft_kernel", nstates))
+            return SimpleNamespace(excitation_energies=jnp.asarray([0.47]))
+
+    monkeypatch.setattr(training_targets.tdscf, "TDA", FakeTDA)
+    monkeypatch.setattr(training_targets.tdscf, "TDDFT", FakeTDDFT)
+
+    molecule = UnrestrictedMolecule(
+        ao=jnp.array([[1.0, 0.5], [0.5, 1.0]]),
+        grid=QuadratureGrid(weights=jnp.array([1.0, 1.0])),
+        dipole_integrals=jnp.zeros((3, 2, 2)),
+        rep_tensor=jnp.zeros((2, 2, 2, 2)),
+        mo_coeff=jnp.stack([jnp.eye(2), jnp.eye(2)], axis=0),
+        mo_occ=jnp.array([[1.0, 0.0], [0.0, 0.0]]),
+        mo_energy=jnp.array([[0.0, 1.0], [0.2, 1.2]]),
+        rdm1=jnp.array(
+            [
+                [[1.0, 0.0], [0.0, 0.0]],
+                [[0.0, 0.0], [0.0, 0.0]],
+            ]
+        ),
+        h1e=jnp.zeros((2, 2)),
+        nuclear_repulsion=jnp.asarray(0.0),
+        overlap_matrix=jnp.eye(2),
+        nocc_alpha=1,
+        nocc_beta=0,
+    )
+
+    tda_excitation = predict_excitation_energies(
+        {},
+        object(),
+        molecule,
+        nstates=1,
+        use_tda=True,
+    )
+    tddft_excitation = predict_excitation_energies(
+        {},
+        object(),
+        molecule,
+        nstates=1,
+        use_tda=False,
+    )
+
+    assert jnp.allclose(tda_excitation, jnp.asarray([0.31]))
+    assert jnp.allclose(tddft_excitation, jnp.asarray([0.47]))
+    assert ("tda_kernel", 1) in calls
+    assert ("tddft_kernel", 1) in calls
+    assert calls[0][1]["molecule"] is molecule
+    assert calls[0][1]["eigensolver"] == "auto"
+
+
+def test_predict_excitation_energies_uses_davidson_for_traced_params(monkeypatch):
+    calls: list[dict[str, Any]] = []
+
+    class FakeTDA:
+        def __init__(self, molecule, **kwargs):
+            calls.append({"molecule": molecule, **kwargs})
+
+        def kernel(self, nstates=None):
+            return SimpleNamespace(excitation_energies=jnp.asarray([0.31]))
+
+    monkeypatch.setattr(training_targets.tdscf, "TDA", FakeTDA)
+
+    molecule = SimpleNamespace()
+
+    @jax.jit
+    def traced_excitation(weight):
+        return predict_excitation_energies(
+            {"weight": weight},
+            object(),
+            molecule,
+            nstates=1,
+            use_tda=True,
+        )
+
+    excitation = traced_excitation(jnp.asarray(1.0))
+
+    assert jnp.allclose(excitation, jnp.asarray([0.31]))
+    assert calls[0]["eigensolver"] == "davidson"
 
 
 def test_strict_jax_self_consistent_losses_have_finite_gradients():

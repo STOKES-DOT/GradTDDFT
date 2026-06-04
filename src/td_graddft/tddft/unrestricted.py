@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.lax import Precision
 from jaxtyping import Array
 
+from .cisd import unrestricted_cisd_second_order_correction
 from ._utils import (
     _casida_metric_factor,
     _resolve_xc_functional,
@@ -73,6 +75,7 @@ class UnrestrictedTDAResult:
     amplitudes_alpha: Array
     amplitudes_beta: Array
     a_matrix: Array
+    posthoc_correction: Array | None = None
 
 
 @_pytree_dataclass
@@ -88,6 +91,7 @@ class UnrestrictedTDDFTResult:
     a_matrix: Array
     b_matrix: Array
     casida_matrix: Array
+    posthoc_correction: Array | None = None
 
 
 def _unrestricted_orbital_data(
@@ -102,19 +106,47 @@ def _unrestricted_orbital_data(
             "Expected unrestricted orbitals with shape (2, nao, nmo)."
         )
 
-    occ_a = jnp.where(mo_occ[0] > occupation_tolerance)[0]
-    vir_a = jnp.where(mo_occ[0] <= occupation_tolerance)[0]
-    occ_b = jnp.where(mo_occ[1] > occupation_tolerance)[0]
-    vir_b = jnp.where(mo_occ[1] <= occupation_tolerance)[0]
-    if occ_a.size == 0 or vir_a.size == 0 or occ_b.size == 0 or vir_b.size == 0:
-        raise ValueError("Need at least one occupied and one virtual orbital per spin.")
+    nmo = int(mo_coeff.shape[-1])
 
-    orbo_a = mo_coeff[0][:, occ_a]
-    orbv_a = mo_coeff[0][:, vir_a]
-    orbo_b = mo_coeff[1][:, occ_b]
-    orbv_b = mo_coeff[1][:, vir_b]
-    de_a = mo_energy[0][vir_a][None, :] - mo_energy[0][occ_a][:, None]
-    de_b = mo_energy[1][vir_b][None, :] - mo_energy[1][occ_b][:, None]
+    def _channel_partition(
+        spin: int,
+        *,
+        nocc_hint: Any | None,
+    ) -> tuple[Array, Array, Array]:
+        if nocc_hint is not None:
+            nocc = int(nocc_hint)
+            nocc = max(0, min(nocc, nmo))
+            occ_idx = jnp.arange(nocc)
+            vir_idx = jnp.arange(nocc, nmo)
+        else:
+            occ_values = mo_occ[spin]
+            if isinstance(occ_values, jax.core.Tracer):
+                raise ValueError(
+                    "JIT-traced unrestricted TDDFT/TDA requires static "
+                    "nocc_alpha/nocc_beta on the molecule."
+                )
+            host_occ = np.asarray(jax.device_get(occ_values))
+            occ_idx = jnp.asarray(np.where(host_occ > occupation_tolerance)[0], dtype=jnp.int32)
+            vir_idx = jnp.asarray(np.where(host_occ <= occupation_tolerance)[0], dtype=jnp.int32)
+        orbo = mo_coeff[spin][:, occ_idx]
+        orbv = mo_coeff[spin][:, vir_idx]
+        de = mo_energy[spin][vir_idx][None, :] - mo_energy[spin][occ_idx][:, None]
+        return orbo, orbv, de
+
+    orbo_a, orbv_a, de_a = _channel_partition(
+        0,
+        nocc_hint=getattr(molecule, "nocc_alpha", None),
+    )
+    orbo_b, orbv_b, de_b = _channel_partition(
+        1,
+        nocc_hint=getattr(molecule, "nocc_beta", None),
+    )
+    has_alpha_channel = de_a.shape[0] > 0 and de_a.shape[1] > 0
+    has_beta_channel = de_b.shape[0] > 0 and de_b.shape[1] > 0
+    if not (has_alpha_channel or has_beta_channel):
+        raise ValueError(
+            "Need at least one occupied-virtual excitation channel across alpha/beta spins."
+        )
     return orbo_a, orbv_a, orbo_b, orbv_b, de_a, de_b
 
 
@@ -467,14 +499,18 @@ def solve_unrestricted_tda(
     naa = nocca * nvira
 
     eigvals, eigvecs = jnp.linalg.eigh(_symmetrize(matrices.a_matrix))
-    keep = jnp.where(eigvals > excitation_threshold)[0]
-    if nstates is not None:
-        keep = keep[:nstates]
+    dim = int(eigvals.shape[0])
+    nroots = dim if nstates is None else min(int(nstates), dim)
+    valid = eigvals > excitation_threshold
+    order = jnp.argsort(jnp.where(valid, eigvals, jnp.inf))
+    keep = order[:nroots]
+    keep_mask = valid[keep]
 
-    energies = eigvals[keep]
+    energies = jnp.where(keep_mask, eigvals[keep], 0.0)
     amps = eigvecs[:, keep].T
-    amplitudes_alpha = amps[:, :naa].reshape(-1, nocca, nvira)
-    amplitudes_beta = amps[:, naa:].reshape(-1, noccb, nvirb)
+    amps = amps * keep_mask[:, None]
+    amplitudes_alpha = amps[:, :naa].reshape(nroots, nocca, nvira)
+    amplitudes_beta = amps[:, naa:].reshape(nroots, noccb, nvirb)
     return UnrestrictedTDAResult(
         excitation_energies=energies,
         amplitudes_alpha=amplitudes_alpha,
@@ -506,26 +542,34 @@ def solve_unrestricted_casida(
     casida_matrix = _symmetrize(metric_factor.T.conj() @ a_plus_b @ metric_factor)
 
     w2, vecs = jnp.linalg.eigh(casida_matrix)
-    keep = jnp.where(w2 > excitation_threshold**2)[0]
-    if nstates is not None:
-        keep = keep[:nstates]
+    dim = int(w2.shape[0])
+    nroots = dim if nstates is None else min(int(nstates), dim)
+    valid = w2 > excitation_threshold**2
+    order = jnp.argsort(jnp.where(valid, w2, jnp.inf))
+    keep = order[:nroots]
+    keep_mask = valid[keep]
 
     w = jnp.sqrt(jnp.maximum(w2[keep], 0.0))
+    w = jnp.where(keep_mask, w, 0.0)
     f_vectors = vecs[:, keep]
+    f_vectors = f_vectors * keep_mask[jnp.newaxis, :]
     x_plus_y = metric_factor @ f_vectors
-    x_minus_y = (a_plus_b @ x_plus_y) / w[jnp.newaxis, :]
+    safe_w = jnp.where(keep_mask, w, 1.0)
+    x_minus_y = (a_plus_b @ x_plus_y) / safe_w[jnp.newaxis, :]
 
     x = 0.5 * (x_plus_y + x_minus_y)
     y = 0.5 * (x_plus_y - x_minus_y)
+    x = x * keep_mask[jnp.newaxis, :]
+    y = y * keep_mask[jnp.newaxis, :]
     norm = jnp.sum(jnp.abs(x) ** 2, axis=0) - jnp.sum(jnp.abs(y) ** 2, axis=0)
     scale = 1.0 / jnp.sqrt(jnp.maximum(jnp.abs(norm), matrix_eps))
     x = x * scale[jnp.newaxis, :]
     y = y * scale[jnp.newaxis, :]
 
-    x_alpha = x[:naa, :].T.reshape(-1, nocca, nvira)
-    x_beta = x[naa:, :].T.reshape(-1, noccb, nvirb)
-    y_alpha = y[:naa, :].T.reshape(-1, nocca, nvira)
-    y_beta = y[naa:, :].T.reshape(-1, noccb, nvirb)
+    x_alpha = x[:naa, :].T.reshape(nroots, nocca, nvira)
+    x_beta = x[naa:, :].T.reshape(nroots, noccb, nvirb)
+    y_alpha = y[:naa, :].T.reshape(nroots, nocca, nvira)
+    y_beta = y[naa:, :].T.reshape(nroots, noccb, nvirb)
     return UnrestrictedTDDFTResult(
         excitation_energies=w,
         x_amplitudes_alpha=x_alpha,
@@ -566,12 +610,57 @@ class UnrestrictedTDA:
 
         return vind, flat_a
 
+    def _posthoc_correction(self, result: UnrestrictedTDAResult) -> Array | None:
+        resolved_xc = _resolve_xc_functional(
+            self.molecule,
+            self.xc_functional,
+            self.xc_params,
+        )
+        if resolved_xc is None:
+            return None
+        correction_fn = getattr(resolved_xc, "post_tda_correction", None)
+        if not callable(correction_fn):
+            return None
+        try:
+            correction = correction_fn(
+                self.molecule,
+                result,
+                occupation_tolerance=self.occupation_tolerance,
+            )
+        except AttributeError as exc:
+            if "does not expose" not in str(exc):
+                raise
+            return None
+        correction = jnp.asarray(correction, dtype=result.excitation_energies.dtype)
+        if correction.ndim == 0:
+            correction = jnp.full_like(result.excitation_energies, correction)
+        elif correction.shape != result.excitation_energies.shape:
+            raise ValueError(
+                "post_tda_correction must return a scalar or shape "
+                f"{result.excitation_energies.shape}, got {correction.shape}."
+            )
+        return correction
+
+    def _apply_posthoc_correction(
+        self,
+        result: UnrestrictedTDAResult,
+    ) -> UnrestrictedTDAResult:
+        correction = self._posthoc_correction(result)
+        if correction is None:
+            return result
+        return replace(
+            result,
+            excitation_energies=result.excitation_energies + correction,
+            posthoc_correction=correction,
+        )
+
     def kernel(self, nstates: int | None = None) -> UnrestrictedTDAResult:
-        return solve_unrestricted_tda(
+        result = solve_unrestricted_tda(
             self.build_matrices(),
             nstates=nstates,
             excitation_threshold=self.excitation_threshold,
         )
+        return self._apply_posthoc_correction(result)
 
 
 @dataclass(frozen=True)
@@ -600,11 +689,12 @@ class UnrestrictedCasidaTDDFT:
             xc_params=self.xc_params,
             occupation_tolerance=self.occupation_tolerance,
         )
-        return solve_unrestricted_tda(
+        result = solve_unrestricted_tda(
             tda_mats,
             nstates=nstates,
             excitation_threshold=self.excitation_threshold,
         )
+        return self._apply_posthoc_correction(result, use_tda=True)
 
     def gen_tda_vind(self):
         matrices = self.build_matrices()
@@ -631,10 +721,63 @@ class UnrestrictedCasidaTDDFT:
 
         return vind, flat_a, flat_b
 
+    def _posthoc_correction(
+        self,
+        result: UnrestrictedTDAResult | UnrestrictedTDDFTResult,
+        *,
+        use_tda: bool,
+    ) -> Array | None:
+        resolved_xc = _resolve_xc_functional(
+            self.molecule,
+            self.xc_functional,
+            self.xc_params,
+        )
+        if resolved_xc is None:
+            return None
+        method_name = "post_tda_correction" if use_tda else "post_tddft_correction"
+        correction_fn = getattr(resolved_xc, method_name, None)
+        if not callable(correction_fn):
+            return None
+        try:
+            correction = correction_fn(
+                self.molecule,
+                result,
+                occupation_tolerance=self.occupation_tolerance,
+            )
+        except AttributeError as exc:
+            if "does not expose" not in str(exc):
+                raise
+            return None
+        correction = jnp.asarray(correction, dtype=result.excitation_energies.dtype)
+        if correction.ndim == 0:
+            correction = jnp.full_like(result.excitation_energies, correction)
+        elif correction.shape != result.excitation_energies.shape:
+            raise ValueError(
+                f"{method_name} must return a scalar or shape "
+                f"{result.excitation_energies.shape}, got {correction.shape}."
+            )
+        return correction
+
+    def _apply_posthoc_correction(
+        self,
+        result: UnrestrictedTDAResult | UnrestrictedTDDFTResult,
+        *,
+        use_tda: bool,
+    ) -> UnrestrictedTDAResult | UnrestrictedTDDFTResult:
+        correction = self._posthoc_correction(result, use_tda=use_tda)
+        if correction is None:
+            return result
+        return replace(
+            result,
+            excitation_energies=result.excitation_energies + correction,
+            posthoc_correction=correction,
+        )
+
     def kernel(self, nstates: int | None = None) -> UnrestrictedTDDFTResult:
-        return solve_unrestricted_casida(
+        result = solve_unrestricted_casida(
             self.build_matrices(),
             nstates=nstates,
             excitation_threshold=self.excitation_threshold,
             matrix_eps=self.matrix_eps,
         )
+        return self._apply_posthoc_correction(result, use_tda=False)

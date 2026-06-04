@@ -56,6 +56,35 @@ def test_stream_train_defaults_to_host_reference_cache():
     assert module._use_host_reference_cache(args) is True
 
 
+def test_stream_train_default_update_mode_accumulates_one_epoch_gradient():
+    module = _load_training_tool()
+
+    args = module.parse_args(["--reference-csv", "refs.csv", "--stream-train"])
+
+    assert args.stream_update_mode == "accumulate"
+    assert module._lr_transition_steps(args, train_size=35) == args.lr_decay_every
+
+
+def test_stream_train_per_molecule_update_mode_scales_lr_decay_by_train_size():
+    module = _load_training_tool()
+
+    args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--stream-train",
+            "--stream-update-mode",
+            "per_molecule",
+            "--lr-decay-every",
+            "100",
+        ]
+    )
+
+    assert args.stream_update_mode == "per_molecule"
+    assert module._lr_transition_steps(args, train_size=35) == 3500
+    assert module._stream_lr_schedule_index(args, step=101, train_size=35) == 3500
+
+
 def test_host_reference_cache_can_be_disabled():
     module = _load_training_tool()
 
@@ -136,6 +165,7 @@ def test_hdf5_cache_can_read_unrestricted_molecule_on_host(tmp_path):
         nocc_alpha=1,
         nocc_beta=0,
         hfx_nu=np.ones((2, 2, 2, 2)),
+        pt2_local=np.array([0.0, 0.0]),
     )
     path = tmp_path / "refs.h5"
     with h5py.File(path, "w") as handle:
@@ -146,5 +176,6 @@ def test_hdf5_cache_can_read_unrestricted_molecule_on_host(tmp_path):
     assert isinstance(loaded.ao, np.ndarray)
     assert isinstance(loaded.grid.weights, np.ndarray)
     assert isinstance(loaded.hfx_nu, np.ndarray)
+    assert isinstance(loaded.pt2_local, np.ndarray)
     assert loaded.nocc_alpha == 1
     assert loaded.nocc_beta == 0

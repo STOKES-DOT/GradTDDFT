@@ -10,14 +10,6 @@ from jaxtyping import Array
 from ..data.molecule import MoleculeSpec
 
 
-def _hashable_static_value(value: Any) -> Any:
-    try:
-        hash(value)
-    except TypeError:
-        return repr(value)
-    return value
-
-
 def _contains_jax_tracer(value: Any) -> bool:
     if isinstance(value, jax.core.Tracer):
         return True

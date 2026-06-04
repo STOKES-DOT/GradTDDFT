@@ -194,6 +194,7 @@ def read_unrestricted_molecule(
         hfx_omega_values=kwargs.pop("hfx_omega_values"),
         hfx_local=kwargs.pop("hfx_local"),
         hfx_nu=kwargs.pop("hfx_nu"),
+        pt2_local=kwargs.pop("pt2_local"),
         scf_initial_density=kwargs.pop("scf_initial_density"),
     )
 

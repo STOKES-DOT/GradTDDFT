@@ -35,7 +35,6 @@ def dm21(
         ),
         network=network
         or NetworkSpec(
-            architecture="residual",
             hidden_dims=tuple(int(v) for v in DEFAULT_NETWORK_HIDDEN_DIMS),
             activation="tanh",
         ),

@@ -49,6 +49,7 @@ class GroundStateCoreDatum:
     """Ground-state supervision and regularization targets for one molecule."""
 
     target_total_energy: Array
+    target_density: Array | None = None
     target_density_matrix: Array | None = None
     target_xc_potential: Array | None = None
     target_xc_kernel: Array | None = None
@@ -114,6 +115,7 @@ class GroundStateDatum:
 
     molecule: Any
     target_total_energy: Array
+    target_density: Array | None = None
     target_density_matrix: Array | None = None
     target_s1_energy: Array | None = None
     target_first_excited_total_energy: Array | None = None
@@ -197,6 +199,7 @@ class GroundStateDatum:
         return cls(
             molecule=molecule,
             target_total_energy=core.target_total_energy,
+            target_density=core.target_density,
             target_density_matrix=core.target_density_matrix,
             target_xc_potential=core.target_xc_potential,
             target_xc_kernel=core.target_xc_kernel,
@@ -238,6 +241,7 @@ class GroundStateDatum:
     def ground_state_core(self) -> GroundStateCoreDatum:
         return GroundStateCoreDatum(
             target_total_energy=self.target_total_energy,
+            target_density=self.target_density,
             target_density_matrix=self.target_density_matrix,
             target_xc_potential=self.target_xc_potential,
             target_xc_kernel=self.target_xc_kernel,
@@ -322,16 +326,11 @@ class GroundStateCoreTrainingConfig:
         Literal["final", "best_rms", "first_converged"] | None
     ) = None
     scf_require_convergence: bool = False
-    scf_stop_gradient_on_unconverged: bool = False
-    scf_stop_gradient_rms_threshold: float | None = None
     scf_gradient_mode: Literal["expl", "impl"] = "impl"
     scf_implicit_diff_max_iter: int = 6
-    scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
-    scf_implicit_diff_solver: Literal["normal_cg", "gmres", "bicgstab"] = "gmres"
     scf_implicit_diff_tolerance: float = 1e-6
     scf_implicit_diff_regularization: float = 0.0
-    scf_implicit_diff_restart: int = 12
 
 
 @dataclass(frozen=True)
@@ -408,16 +407,11 @@ class GroundStateTrainingConfig:
         Literal["final", "best_rms", "first_converged"] | None
     ) = None
     scf_require_convergence: bool = False
-    scf_stop_gradient_on_unconverged: bool = False
-    scf_stop_gradient_rms_threshold: float | None = None
     scf_gradient_mode: Literal["expl", "impl"] = "impl"
     scf_implicit_diff_max_iter: int = 6
-    scf_implicit_diff_step_size: float = 0.2
     scf_implicit_diff_clip: float = 1e4
-    scf_implicit_diff_solver: Literal["normal_cg", "gmres", "bicgstab"] = "gmres"
     scf_implicit_diff_tolerance: float = 1e-6
     scf_implicit_diff_regularization: float = 0.0
-    scf_implicit_diff_restart: int = 12
 
     @classmethod
     def from_parts(
@@ -477,16 +471,11 @@ class GroundStateTrainingConfig:
                 core.fractional_branch_scf_iterate_selection
             ),
             scf_require_convergence=core.scf_require_convergence,
-            scf_stop_gradient_on_unconverged=core.scf_stop_gradient_on_unconverged,
-            scf_stop_gradient_rms_threshold=core.scf_stop_gradient_rms_threshold,
             scf_gradient_mode=core.scf_gradient_mode,
             scf_implicit_diff_max_iter=core.scf_implicit_diff_max_iter,
-            scf_implicit_diff_step_size=core.scf_implicit_diff_step_size,
             scf_implicit_diff_clip=core.scf_implicit_diff_clip,
-            scf_implicit_diff_solver=core.scf_implicit_diff_solver,
             scf_implicit_diff_tolerance=core.scf_implicit_diff_tolerance,
             scf_implicit_diff_regularization=core.scf_implicit_diff_regularization,
-            scf_implicit_diff_restart=core.scf_implicit_diff_restart,
         )
 
     def ground_state_core_config(self) -> GroundStateCoreTrainingConfig:
@@ -527,16 +516,11 @@ class GroundStateTrainingConfig:
                 self.fractional_branch_scf_iterate_selection
             ),
             scf_require_convergence=self.scf_require_convergence,
-            scf_stop_gradient_on_unconverged=self.scf_stop_gradient_on_unconverged,
-            scf_stop_gradient_rms_threshold=self.scf_stop_gradient_rms_threshold,
             scf_gradient_mode=self.scf_gradient_mode,
             scf_implicit_diff_max_iter=self.scf_implicit_diff_max_iter,
-            scf_implicit_diff_step_size=self.scf_implicit_diff_step_size,
             scf_implicit_diff_clip=self.scf_implicit_diff_clip,
-            scf_implicit_diff_solver=self.scf_implicit_diff_solver,
             scf_implicit_diff_tolerance=self.scf_implicit_diff_tolerance,
             scf_implicit_diff_regularization=self.scf_implicit_diff_regularization,
-            scf_implicit_diff_restart=self.scf_implicit_diff_restart,
         )
 
     def excited_state_training_config(self) -> ExcitedStateTrainingConfig:

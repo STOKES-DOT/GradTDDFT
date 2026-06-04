@@ -44,6 +44,7 @@ from td_graddft.training import (
     GroundStateTrainingConfig,
     create_train_state_from_molecule,
     ground_state_mse_loss,
+    ground_state_mse_loss_pointwise_dataset,
     make_ground_state_loss_and_grad,
     make_ground_state_train_step,
     predict_ground_state_total_energy,
@@ -59,10 +60,11 @@ _TRAIN_SCF_SAFETY_MAX_CYCLE = 512
 class ReferencePoint:
     r_angstrom: float
     molecule: Any
-    ccsdt_energy_h: float
-    rhf_energy_h: float
-    ccsd_corr_h: float
-    triples_corr_h: float
+    reference_energy_h: float
+    mean_field_energy_h: float
+    correlation_energy_h: float
+    perturbative_corr_h: float
+    reference_method: str
     target_density_matrix: Any
 
 
@@ -186,6 +188,59 @@ def compute_ccsdt_energy(
     return total, float(mf.e_tot), float(eccsd), float(et), ccsd_dm_ao
 
 
+def compute_casscf_energy(
+    mol: gto.Mole,
+    *,
+    active_space: str,
+    active_labels: list[str],
+    ncas: int,
+    nelecas: int,
+    avas_threshold: float,
+    rhf_max_cycle: int,
+    rhf_conv_tol: float,
+    casscf_max_cycle: int,
+    casscf_conv_tol: float,
+    include_nevpt2: bool,
+) -> tuple[float, float, float, float, np.ndarray]:
+    from pyscf import mcscf
+
+    mf = _run_rhf(mol, max_cycle=int(rhf_max_cycle), conv_tol=float(rhf_conv_tol))
+    mo_coeff = None
+    if str(active_space) == "avas":
+        from pyscf.mcscf import avas
+
+        avas_ncas, avas_nelecas, mo_coeff = avas.avas(
+            mf,
+            list(active_labels),
+            threshold=float(avas_threshold),
+            canonicalize=True,
+        )
+        if int(avas_ncas) < int(ncas) or int(avas_nelecas) < int(nelecas):
+            raise RuntimeError(
+                "AVAS active space mismatch: "
+                f"expected at least ({int(nelecas)}e,{int(ncas)}o), "
+                f"got ({int(avas_nelecas)}e,{int(avas_ncas)}o)"
+            )
+    mc = mcscf.CASSCF(mf, int(ncas), int(nelecas))
+    mc.conv_tol = float(casscf_conv_tol)
+    if hasattr(mc, "max_cycle_macro"):
+        mc.max_cycle_macro = int(casscf_max_cycle)
+    else:
+        mc.max_cycle = int(casscf_max_cycle)
+    mc.kernel(mo_coeff)
+    if not bool(mc.converged):
+        raise RuntimeError(f"CASSCF did not converge; last E={getattr(mc, 'e_tot', None)}")
+    casscf_total = float(mc.e_tot)
+    perturbative_corr = 0.0
+    if bool(include_nevpt2):
+        from pyscf import mrpt
+
+        perturbative_corr = float(mrpt.NEVPT(mc).kernel())
+    total = casscf_total + perturbative_corr
+    dm_ao = np.asarray(mc.make_rdm1(), dtype=np.float64)
+    return total, float(mf.e_tot), float(casscf_total - mf.e_tot), perturbative_corr, dm_ao
+
+
 def build_reference_point(
     r_angstrom: float,
     *,
@@ -200,13 +255,32 @@ def build_reference_point(
         cart=True,
         verbose=0,
     )
-    ccsdt_energy, rhf_energy, ccsd_corr, triples_corr, ccsd_dm_ao = compute_ccsdt_energy(
-        mol,
-        rhf_max_cycle=int(args.rhf_max_cycle),
-        rhf_conv_tol=float(args.rhf_conv_tol),
-        ccsd_max_cycle=int(args.ccsd_max_cycle),
-        ccsd_conv_tol=float(args.ccsd_conv_tol),
-    )
+    if str(args.reference_method) == "ccsd_t":
+        reference_energy, mf_energy, corr_energy, perturbative_corr, reference_dm_ao = (
+            compute_ccsdt_energy(
+                mol,
+                rhf_max_cycle=int(args.rhf_max_cycle),
+                rhf_conv_tol=float(args.rhf_conv_tol),
+                ccsd_max_cycle=int(args.ccsd_max_cycle),
+                ccsd_conv_tol=float(args.ccsd_conv_tol),
+            )
+        )
+    else:
+        reference_energy, mf_energy, corr_energy, perturbative_corr, reference_dm_ao = (
+            compute_casscf_energy(
+                mol,
+                active_space=str(args.active_space),
+                active_labels=list(args.active_labels),
+                ncas=int(args.ncas),
+                nelecas=int(args.nelecas),
+                avas_threshold=float(args.avas_threshold),
+                rhf_max_cycle=int(args.rhf_max_cycle),
+                rhf_conv_tol=float(args.rhf_conv_tol),
+                casscf_max_cycle=int(args.casscf_max_cycle),
+                casscf_conv_tol=float(args.casscf_conv_tol),
+                include_nevpt2=(str(args.reference_method) == "casscf_nevpt2"),
+            )
+        )
     mf_ref = _run_rks(
         mol,
         xc=str(args.xc),
@@ -224,11 +298,12 @@ def build_reference_point(
     return ReferencePoint(
         r_angstrom=float(r_angstrom),
         molecule=reference,
-        ccsdt_energy_h=float(ccsdt_energy),
-        rhf_energy_h=float(rhf_energy),
-        ccsd_corr_h=float(ccsd_corr),
-        triples_corr_h=float(triples_corr),
-        target_density_matrix=jnp.asarray(ccsd_dm_ao, dtype=jnp.float64),
+        reference_energy_h=float(reference_energy),
+        mean_field_energy_h=float(mf_energy),
+        correlation_energy_h=float(corr_energy),
+        perturbative_corr_h=float(perturbative_corr),
+        reference_method=str(args.reference_method),
+        target_density_matrix=jnp.asarray(reference_dm_ao, dtype=jnp.float64),
     )
 
 
@@ -242,7 +317,7 @@ def build_training_data(
         GroundStateDatum.from_parts(
             point.molecule,
             core=GroundStateCoreDatum(
-                target_total_energy=jnp.asarray(point.ccsdt_energy_h, dtype=jnp.float64),
+                target_total_energy=jnp.asarray(point.reference_energy_h, dtype=jnp.float64),
                 target_density_matrix=jnp.asarray(point.target_density_matrix),
                 density_constraint_weight=float(density_constraint_weight),
                 density_matrix_constraint_weight=float(density_matrix_constraint_weight),
@@ -252,23 +327,57 @@ def build_training_data(
     )
 
 
-def _cache_group_name(args: argparse.Namespace) -> str:
+def _cache_base_group_name(args: argparse.Namespace) -> str:
     pt2 = "pt2" if bool(args.include_pt2_channel) else "nopt2"
+    active = "none"
+    if str(args.reference_method) != "ccsd_t":
+        labels = "-".join(str(label).replace(" ", "") for label in args.active_labels)
+        active = (
+            f"{str(args.active_space)}/ncas={int(args.ncas)}/"
+            f"nelecas={int(args.nelecas)}/labels={labels}/"
+            f"thr={float(args.avas_threshold):.3g}"
+        )
     return (
-        f"n2_ccsdt/basis={str(args.basis).replace('/', '_')}/"
+        f"n2_ground/ref={str(args.reference_method)}/"
+        f"active={active}/"
+        f"basis={str(args.basis).replace('/', '_')}/"
         f"grid={int(args.grids_level)}/"
-        f"r={float(args.r_min):.8g}-{float(args.r_max):.8g}/"
-        f"n={int(args.train_points)}/{pt2}/"
+        f"{pt2}/"
         f"pt2mode={str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else 'none'}"
     )
 
 
+def _cache_group_name(args: argparse.Namespace) -> str:
+    return (
+        f"{_cache_base_group_name(args)}/"
+        f"r={float(args.r_min):.8g}-{float(args.r_max):.8g}/"
+        f"n={int(args.train_points)}"
+    )
+
+
+def _point_cache_group_name(args: argparse.Namespace, r_value: float) -> str:
+    return f"{_cache_base_group_name(args)}/points/r={float(r_value):.8g}"
+
+
+def _reference_label(args: argparse.Namespace) -> str:
+    method = str(args.reference_method)
+    if method == "ccsd_t":
+        return "CCSD(T)"
+    label = f"CASSCF({int(args.nelecas)}e,{int(args.ncas)}o)"
+    return f"{label}+NEVPT2" if method == "casscf_nevpt2" else label
+
+
 def _write_reference_point(group: Any, point: ReferencePoint) -> None:
     group.attrs["r_angstrom"] = float(point.r_angstrom)
-    group.attrs["ccsdt_energy_h"] = float(point.ccsdt_energy_h)
-    group.attrs["rhf_energy_h"] = float(point.rhf_energy_h)
-    group.attrs["ccsd_corr_h"] = float(point.ccsd_corr_h)
-    group.attrs["triples_corr_h"] = float(point.triples_corr_h)
+    group.attrs["reference_energy_h"] = float(point.reference_energy_h)
+    group.attrs["mean_field_energy_h"] = float(point.mean_field_energy_h)
+    group.attrs["correlation_energy_h"] = float(point.correlation_energy_h)
+    group.attrs["perturbative_corr_h"] = float(point.perturbative_corr_h)
+    group.attrs["reference_method"] = str(point.reference_method)
+    group.attrs["ccsdt_energy_h"] = float(point.reference_energy_h)
+    group.attrs["rhf_energy_h"] = float(point.mean_field_energy_h)
+    group.attrs["ccsd_corr_h"] = float(point.correlation_energy_h)
+    group.attrs["triples_corr_h"] = float(point.perturbative_corr_h)
     group.create_dataset(
         "target_density_matrix",
         data=np.asarray(point.target_density_matrix, dtype=np.float64),
@@ -286,10 +395,27 @@ def _read_reference_point(group: Any) -> ReferencePoint:
     return ReferencePoint(
         r_angstrom=float(group.attrs["r_angstrom"]),
         molecule=molecule,
-        ccsdt_energy_h=float(group.attrs["ccsdt_energy_h"]),
-        rhf_energy_h=float(group.attrs["rhf_energy_h"]),
-        ccsd_corr_h=float(group.attrs["ccsd_corr_h"]),
-        triples_corr_h=float(group.attrs["triples_corr_h"]),
+        reference_energy_h=float(
+            group.attrs["reference_energy_h"]
+            if "reference_energy_h" in group.attrs
+            else group.attrs["ccsdt_energy_h"]
+        ),
+        mean_field_energy_h=float(
+            group.attrs["mean_field_energy_h"]
+            if "mean_field_energy_h" in group.attrs
+            else group.attrs["rhf_energy_h"]
+        ),
+        correlation_energy_h=float(
+            group.attrs["correlation_energy_h"]
+            if "correlation_energy_h" in group.attrs
+            else group.attrs["ccsd_corr_h"]
+        ),
+        perturbative_corr_h=float(
+            group.attrs["perturbative_corr_h"]
+            if "perturbative_corr_h" in group.attrs
+            else group.attrs["triples_corr_h"]
+        ),
+        reference_method=str(group.attrs.get("reference_method", "ccsd_t")),
         target_density_matrix=jnp.asarray(target_density_matrix),
     )
 
@@ -319,6 +445,19 @@ def _load_reference_points_hdf5(path: Path, group_name: str) -> list[ReferencePo
         return [_read_reference_point(group[f"point_{idx:04d}"]) for idx in range(count)]
 
 
+def _save_reference_point_hdf5(path: Path, group_name: str, point: ReferencePoint) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "a") as handle:
+        if group_name in handle:
+            del handle[group_name]
+        _write_reference_point(handle.create_group(group_name), point)
+
+
+def _load_reference_point_hdf5(path: Path, group_name: str) -> ReferencePoint:
+    with h5py.File(path, "r") as handle:
+        return _read_reference_point(handle[group_name])
+
+
 def _tree_add(left: Any | None, right: Any) -> Any:
     if left is None:
         return right
@@ -335,7 +474,44 @@ def _metric_scalar(metrics: dict[str, Any], key: str, default: float = float("na
     arr = jnp.asarray(metrics[key])
     if int(arr.size) <= 0:
         return default
-    return float(arr.reshape(-1)[0])
+    return float(jnp.mean(arr))
+
+
+def _r_column_label(r_angstrom: float) -> str:
+    text = f"{float(r_angstrom):.6g}".replace("-", "m").replace(".", "p")
+    return f"r_{text}"
+
+
+_STREAM_POINT_METRICS = (
+    "loss",
+    "energy_mae_h",
+    "energy_signed_err_h",
+    "predicted_energy_h",
+    "density_mse",
+    "density_matrix_mse",
+    "grad_norm",
+    "grad_abs_max",
+    "nonfinite_grad_fraction",
+    "scf_converged",
+    "scf_cycles",
+    "scf_selected_rms_density",
+    "scf_best_rms_density",
+)
+
+
+def _add_stream_point_metrics(
+    row: dict[str, float],
+    *,
+    labels: tuple[str, ...],
+    losses: list[float],
+    metric_rows: list[dict[str, float]],
+) -> None:
+    for label, loss_value, metrics in zip(labels, losses, metric_rows):
+        row[f"loss_{label}"] = float(loss_value)
+        for key in _STREAM_POINT_METRICS:
+            if key == "loss":
+                continue
+            row[f"{key}_{label}"] = float(metrics.get(key, float("nan")))
 
 
 def _tree_all_finite(tree: Any) -> bool:
@@ -362,6 +538,8 @@ def train_functional(
         density_constraint_weight=float(args.density_constraint_weight),
         density_matrix_constraint_weight=float(args.density_matrix_constraint_weight),
     )
+    point_labels = tuple(_r_column_label(point.r_angstrom) for point in points)
+    target_energies_h = tuple(float(point.reference_energy_h) for point in points)
     functional = neural_xc.Functional(
         semilocal_xc=tuple(str(name) for name in args.semilocal_xc),
         hidden_dims=tuple(int(value) for value in args.hidden_dims),
@@ -404,10 +582,8 @@ def train_functional(
             scf_iterate_selection=str(args.scf_iterate_selection),
             scf_require_convergence=bool(args.scf_require_convergence),
             scf_gradient_mode=str(args.scf_gradient_mode),
-            scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
             scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
             scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
-            scf_implicit_diff_restart=int(args.scf_implicit_diff_restart),
         ),
     )
     if int(args.lr_decay_every) > 0:
@@ -450,15 +626,42 @@ def train_functional(
             density_penalties = []
             density_matrix_mses = []
             density_matrix_penalties = []
-            for datum in train_data:
+            point_metric_rows = []
+            for idx, datum in enumerate(train_data):
                 loss_val, metrics_val = eval_single(params, datum)
-                losses.append(float(loss_val))
-                maes.append(_metric_scalar(metrics_val, "energy_mae"))
-                density_mses.append(_metric_scalar(metrics_val, "density_mse"))
-                density_penalties.append(_metric_scalar(metrics_val, "density_penalty"))
-                density_matrix_mses.append(_metric_scalar(metrics_val, "density_matrix_mse"))
-                density_matrix_penalties.append(_metric_scalar(metrics_val, "density_matrix_penalty"))
-            return {
+                loss_scalar = float(loss_val)
+                energy_mae = _metric_scalar(metrics_val, "energy_mae")
+                density_mse = _metric_scalar(metrics_val, "density_mse")
+                density_penalty = _metric_scalar(metrics_val, "density_penalty")
+                density_matrix_mse = _metric_scalar(metrics_val, "density_matrix_mse")
+                density_matrix_penalty = _metric_scalar(metrics_val, "density_matrix_penalty")
+                predicted_energy = _metric_scalar(metrics_val, "predicted_total_energies")
+                losses.append(loss_scalar)
+                maes.append(energy_mae)
+                density_mses.append(density_mse)
+                density_penalties.append(density_penalty)
+                density_matrix_mses.append(density_matrix_mse)
+                density_matrix_penalties.append(density_matrix_penalty)
+                point_metric_rows.append(
+                    {
+                        "energy_mae_h": energy_mae,
+                        "energy_signed_err_h": predicted_energy - target_energies_h[idx],
+                        "predicted_energy_h": predicted_energy,
+                        "density_mse": density_mse,
+                        "density_matrix_mse": density_matrix_mse,
+                        "scf_converged": _metric_scalar(metrics_val, "scf_converged"),
+                        "scf_cycles": _metric_scalar(metrics_val, "scf_cycles"),
+                        "scf_selected_rms_density": _metric_scalar(
+                            metrics_val,
+                            "scf_selected_rms_density",
+                        ),
+                        "scf_best_rms_density": _metric_scalar(
+                            metrics_val,
+                            "scf_best_rms_density",
+                        ),
+                    }
+                )
+            row = {
                 "loss": float(np.mean(losses)),
                 "energy_mae_h": float(np.mean(maes)),
                 "density_mse": float(np.mean(density_mses)),
@@ -466,6 +669,13 @@ def train_functional(
                 "density_matrix_mse": float(np.mean(density_matrix_mses)),
                 "density_matrix_penalty": float(np.mean(density_matrix_penalties)),
             }
+            _add_stream_point_metrics(
+                row,
+                labels=point_labels,
+                losses=losses,
+                metric_rows=point_metric_rows,
+            )
+            return row
 
         initial_eval = _eval_all(state.params)
         best_params = state.params
@@ -502,17 +712,48 @@ def train_functional(
             grad_norms = []
             grad_abs_maxes = []
             nonfinite_fracs = []
-            for datum in train_data:
+            point_metric_rows = []
+            for idx, datum in enumerate(train_data):
                 loss_val, metrics, grads = loss_and_grad(state.params, datum)
-                losses.append(float(loss_val))
-                maes.append(_metric_scalar(metrics, "energy_mae"))
-                density_mses.append(_metric_scalar(metrics, "density_mse"))
+                loss_scalar = float(loss_val)
+                energy_mae = _metric_scalar(metrics, "energy_mae")
+                density_mse = _metric_scalar(metrics, "density_mse")
+                density_matrix_mse = _metric_scalar(metrics, "density_matrix_mse")
+                grad_norm = _metric_scalar(metrics, "grad_norm")
+                grad_abs_max = _metric_scalar(metrics, "grad_abs_max")
+                nonfinite_frac = _metric_scalar(metrics, "nonfinite_grad_fraction", 0.0)
+                predicted_energy = _metric_scalar(metrics, "predicted_total_energies")
+                losses.append(loss_scalar)
+                maes.append(energy_mae)
+                density_mses.append(density_mse)
                 density_penalties.append(_metric_scalar(metrics, "density_penalty"))
-                density_matrix_mses.append(_metric_scalar(metrics, "density_matrix_mse"))
+                density_matrix_mses.append(density_matrix_mse)
                 density_matrix_penalties.append(_metric_scalar(metrics, "density_matrix_penalty"))
-                grad_norms.append(_metric_scalar(metrics, "grad_norm"))
-                grad_abs_maxes.append(_metric_scalar(metrics, "grad_abs_max"))
-                nonfinite_fracs.append(_metric_scalar(metrics, "nonfinite_grad_fraction", 0.0))
+                grad_norms.append(grad_norm)
+                grad_abs_maxes.append(grad_abs_max)
+                nonfinite_fracs.append(nonfinite_frac)
+                point_metric_rows.append(
+                    {
+                        "energy_mae_h": energy_mae,
+                        "energy_signed_err_h": predicted_energy - target_energies_h[idx],
+                        "predicted_energy_h": predicted_energy,
+                        "density_mse": density_mse,
+                        "density_matrix_mse": density_matrix_mse,
+                        "grad_norm": grad_norm,
+                        "grad_abs_max": grad_abs_max,
+                        "nonfinite_grad_fraction": nonfinite_frac,
+                        "scf_converged": _metric_scalar(metrics, "scf_converged"),
+                        "scf_cycles": _metric_scalar(metrics, "scf_cycles"),
+                        "scf_selected_rms_density": _metric_scalar(
+                            metrics,
+                            "scf_selected_rms_density",
+                        ),
+                        "scf_best_rms_density": _metric_scalar(
+                            metrics,
+                            "scf_best_rms_density",
+                        ),
+                    }
+                )
                 grad_sum = _tree_add(grad_sum, grads)
             grads_avg = _tree_scale(grad_sum, 1.0 / max(1, len(train_data)))
             state = state.apply_gradients(grads=grads_avg)
@@ -546,6 +787,12 @@ def train_functional(
                 "nonfinite_grad_fraction": float(np.mean(nonfinite_fracs)),
                 "lr": lr,
             }
+            _add_stream_point_metrics(
+                row,
+                labels=point_labels,
+                losses=losses,
+                metric_rows=point_metric_rows,
+            )
             rows.append(row)
             if step == 1 or step % int(args.log_every) == 0 or step == int(args.steps):
                 logger.log(
@@ -583,8 +830,12 @@ def train_functional(
             "min_loss_step": min_loss_step,
         }
 
-    train_step = make_ground_state_train_step(functional, training_config=training_config)
-    eval_fn = lambda params: ground_state_mse_loss(  # noqa: E731
+    train_step = make_ground_state_train_step(
+        functional,
+        training_config=training_config,
+        loss_fn=ground_state_mse_loss_pointwise_dataset,
+    )
+    eval_fn = lambda params: ground_state_mse_loss_pointwise_dataset(  # noqa: E731
         params,
         functional,
         train_data,
@@ -714,14 +965,87 @@ def write_history_csv(path: Path, rows: list[dict[str, float]]) -> None:
             writer.writerow(row)
 
 
+def write_per_point_history_csv(
+    path: Path,
+    rows: list[dict[str, float]],
+    points: list[ReferencePoint],
+) -> None:
+    labels = tuple(_r_column_label(point.r_angstrom) for point in points)
+    fieldnames = [
+        "step",
+        "r_angstrom",
+        "target_energy_h",
+        "loss",
+        "energy_mae_h",
+        "energy_abs_err_ev",
+        "energy_signed_err_h",
+        "predicted_energy_h",
+        "density_mse",
+        "density_matrix_mse",
+        "grad_norm",
+        "grad_abs_max",
+        "nonfinite_grad_fraction",
+        "scf_converged",
+        "scf_cycles",
+        "scf_selected_rms_density",
+        "scf_best_rms_density",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            for label, point in zip(labels, points):
+                energy_mae_h = row.get(f"energy_mae_h_{label}", float("nan"))
+                writer.writerow(
+                    {
+                        "step": int(row["step"]),
+                        "r_angstrom": float(point.r_angstrom),
+                        "target_energy_h": float(point.reference_energy_h),
+                        "loss": row.get(f"loss_{label}", float("nan")),
+                        "energy_mae_h": energy_mae_h,
+                        "energy_abs_err_ev": float(energy_mae_h) * HARTREE_TO_EV,
+                        "energy_signed_err_h": row.get(
+                            f"energy_signed_err_h_{label}",
+                            float("nan"),
+                        ),
+                        "predicted_energy_h": row.get(
+                            f"predicted_energy_h_{label}",
+                            float("nan"),
+                        ),
+                        "density_mse": row.get(f"density_mse_{label}", float("nan")),
+                        "density_matrix_mse": row.get(
+                            f"density_matrix_mse_{label}",
+                            float("nan"),
+                        ),
+                        "grad_norm": row.get(f"grad_norm_{label}", float("nan")),
+                        "grad_abs_max": row.get(f"grad_abs_max_{label}", float("nan")),
+                        "nonfinite_grad_fraction": row.get(
+                            f"nonfinite_grad_fraction_{label}",
+                            float("nan"),
+                        ),
+                        "scf_converged": row.get(f"scf_converged_{label}", float("nan")),
+                        "scf_cycles": row.get(f"scf_cycles_{label}", float("nan")),
+                        "scf_selected_rms_density": row.get(
+                            f"scf_selected_rms_density_{label}",
+                            float("nan"),
+                        ),
+                        "scf_best_rms_density": row.get(
+                            f"scf_best_rms_density_{label}",
+                            float("nan"),
+                        ),
+                    }
+                )
+
+
 def write_reference_points_csv(path: Path, points: list[ReferencePoint]) -> None:
     rows = [
         {
             "r_angstrom": float(point.r_angstrom),
-            "ccsdt_energy_h": float(point.ccsdt_energy_h),
-            "rhf_energy_h": float(point.rhf_energy_h),
-            "ccsd_corr_h": float(point.ccsd_corr_h),
-            "triples_corr_h": float(point.triples_corr_h),
+            "reference_energy_h": float(point.reference_energy_h),
+            "mean_field_energy_h": float(point.mean_field_energy_h),
+            "correlation_energy_h": float(point.correlation_energy_h),
+            "perturbative_corr_h": float(point.perturbative_corr_h),
+            "reference_method": str(point.reference_method),
             "n_grid": int(np.asarray(point.molecule.grid.weights).size),
             "n_ao": int(np.asarray(point.molecule.mo_coeff).shape[-1]),
             "electron_count": float(np.asarray(point.molecule.mo_occ).sum()),
@@ -756,12 +1080,13 @@ def write_prediction_csv(
         rows.append(
             {
                 "r_angstrom": float(point.r_angstrom),
-                "ccsdt_energy_h": float(point.ccsdt_energy_h),
+                "reference_energy_h": float(point.reference_energy_h),
                 "predicted_energy_h": pred,
-                "energy_abs_err_ev": abs(pred - float(point.ccsdt_energy_h)) * HARTREE_TO_EV,
-                "rhf_energy_h": float(point.rhf_energy_h),
-                "ccsd_corr_h": float(point.ccsd_corr_h),
-                "triples_corr_h": float(point.triples_corr_h),
+                "energy_abs_err_ev": abs(pred - float(point.reference_energy_h)) * HARTREE_TO_EV,
+                "mean_field_energy_h": float(point.mean_field_energy_h),
+                "correlation_energy_h": float(point.correlation_energy_h),
+                "perturbative_corr_h": float(point.perturbative_corr_h),
+                "reference_method": str(point.reference_method),
             }
         )
     with path.open("w", newline="", encoding="utf-8") as handle:
@@ -772,7 +1097,13 @@ def write_prediction_csv(
     return rows
 
 
-def plot_outputs(outdir: Path, history: list[dict[str, float]], pred_rows: list[dict[str, float]]) -> None:
+def plot_outputs(
+    outdir: Path,
+    history: list[dict[str, float]],
+    pred_rows: list[dict[str, float]],
+    *,
+    reference_label: str,
+) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -797,11 +1128,11 @@ def plot_outputs(outdir: Path, history: list[dict[str, float]], pred_rows: list[
     plt.close(fig)
 
     r = np.asarray([row["r_angstrom"] for row in pred_rows], dtype=np.float64)
-    target = np.asarray([row["ccsdt_energy_h"] for row in pred_rows], dtype=np.float64)
+    target = np.asarray([row["reference_energy_h"] for row in pred_rows], dtype=np.float64)
     pred = np.asarray([row["predicted_energy_h"] for row in pred_rows], dtype=np.float64)
     err = np.asarray([row["energy_abs_err_ev"] for row in pred_rows], dtype=np.float64)
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.8))
-    axes[0].plot(r, target, "o-", label="CCSD(T)")
+    axes[0].plot(r, target, "o-", label=reference_label)
     axes[0].plot(r, pred, "s-", label="Neural XC")
     axes[0].set_xlabel("N-N distance (Angstrom)")
     axes[0].set_ylabel("total energy (Hartree)")
@@ -818,7 +1149,7 @@ def plot_outputs(outdir: Path, history: list[dict[str, float]], pred_rows: list[
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train Neural XC on N2 CCSD(T) ground-state dissociation points.")
+    p = argparse.ArgumentParser(description="Train Neural XC on N2 ground-state dissociation points.")
     p.add_argument("--basis", default="def2-svp")
     p.add_argument("--xc", default="b3lyp")
     p.add_argument("--r-min", type=float, default=0.05)
@@ -864,10 +1195,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--reference-scf-max-cycle", type=int, default=160)
     p.add_argument("--reference-scf-conv-tol", type=float, default=1e-10)
     p.add_argument("--reference-scf-device", choices=("cpu", "gpu"), default="cpu")
+    p.add_argument(
+        "--reference-method",
+        choices=("ccsd_t", "casscf", "casscf_nevpt2"),
+        default="ccsd_t",
+    )
+    p.add_argument("--active-space", choices=("canonical", "avas"), default="avas")
+    p.add_argument("--active-labels", nargs="+", default=["N 2s", "N 2p"])
+    p.add_argument("--ncas", type=int, default=8)
+    p.add_argument("--nelecas", type=int, default=10)
+    p.add_argument("--avas-threshold", type=float, default=0.1)
     p.add_argument("--rhf-max-cycle", type=int, default=200)
     p.add_argument("--rhf-conv-tol", type=float, default=1e-10)
     p.add_argument("--ccsd-max-cycle", type=int, default=120)
     p.add_argument("--ccsd-conv-tol", type=float, default=1e-8)
+    p.add_argument("--casscf-max-cycle", type=int, default=80)
+    p.add_argument("--casscf-conv-tol", type=float, default=1e-8)
     p.add_argument("--train-scf-max-cycle", type=int, default=0)
     p.add_argument("--train-scf-damping", type=float, default=0.25)
     p.add_argument("--train-scf-conv-tol-energy", type=float, default=1e-6)
@@ -888,14 +1231,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("expl", "impl"),
         default="impl",
     )
-    p.add_argument(
-        "--scf-implicit-diff-solver",
-        choices=("normal_cg", "gmres", "bicgstab"),
-        default="normal_cg",
-    )
     p.add_argument("--scf-implicit-diff-tolerance", type=float, default=1e-6)
     p.add_argument("--scf-implicit-diff-regularization", type=float, default=1e-3)
-    p.add_argument("--scf-implicit-diff-restart", type=int, default=12)
     p.add_argument("--scf-require-convergence", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--jit-train", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--jit-eval", action=argparse.BooleanOptionalAction, default=True)
@@ -906,6 +1243,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> dict[str, Any]:
     args = parse_args(argv)
+    reference_label = _reference_label(args)
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     logger = RunLogger(outdir / "run.log")
@@ -920,7 +1258,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         f"density_constraint_weight={args.density_constraint_weight} "
         f"density_matrix_constraint_weight={args.density_matrix_constraint_weight} "
         f"reference_scf_device={args.reference_scf_device} "
-        f"reference=CCSD(T)"
+        f"reference={reference_label} "
+        f"active_space={args.active_space if args.reference_method != 'ccsd_t' else 'none'}"
     )
     r_values = np.linspace(float(args.r_min), float(args.r_max), int(args.train_points))
     points: list[ReferencePoint]
@@ -938,14 +1277,26 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         points = []
         t_ref = time.perf_counter()
         for idx, r_value in enumerate(r_values, start=1):
-            point = build_reference_point(float(r_value), args=args)
+            point_group = _point_cache_group_name(args, float(r_value))
+            if (
+                cache_path is not None
+                and _has_hdf5_group(cache_path, point_group)
+                and not bool(args.rebuild_reference_cache)
+            ):
+                point = _load_reference_point_hdf5(cache_path, point_group)
+                source = "cache"
+            else:
+                point = build_reference_point(float(r_value), args=args)
+                source = "built"
+                if cache_path is not None:
+                    _save_reference_point_hdf5(cache_path, point_group, point)
             points.append(point)
             logger.log(
-                f"[ref] {idx:3d}/{len(r_values):3d} "
+                f"[ref] {idx:3d}/{len(r_values):3d} {source} "
                 f"R={point.r_angstrom:.4f} A "
-                f"E_CCSD(T)={point.ccsdt_energy_h:.10f} Eh "
-                f"E_RHF={point.rhf_energy_h:.10f} Eh "
-                f"E_T={point.triples_corr_h:.10f} Eh "
+                f"E_ref={point.reference_energy_h:.10f} Eh "
+                f"E_MF={point.mean_field_energy_h:.10f} Eh "
+                f"E_pert={point.perturbative_corr_h:.10f} Eh "
                 f"grid_n={int(np.asarray(point.molecule.grid.weights).size)}"
             )
         logger.log(f"[ref] done in {time.perf_counter() - t_ref:.2f} s")
@@ -958,7 +1309,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     logger.log(f"Wrote reference csv: {reference_csv}")
 
     training = train_functional(points, args=args, logger=logger)
-    write_history_csv(outdir / "training_history.csv", training["history"])
+    history_csv = outdir / "training_history.csv"
+    per_point_history_csv = outdir / "training_per_point_history.csv"
+    write_history_csv(history_csv, training["history"])
+    write_per_point_history_csv(per_point_history_csv, training["history"], points)
     pred_rows = write_prediction_csv(
         outdir / "n2_ccsdt_ground_predictions.csv",
         points,
@@ -972,7 +1326,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         metadata={
             "molecule": "N2",
             "basis": str(args.basis),
-            "reference": "CCSD(T)",
+            "reference": reference_label,
+            "reference_method": str(args.reference_method),
+            "active_space": str(args.active_space) if str(args.reference_method) != "ccsd_t" else None,
+            "active_labels": list(args.active_labels) if str(args.reference_method) != "ccsd_t" else None,
+            "ncas": int(args.ncas) if str(args.reference_method) != "ccsd_t" else None,
+            "nelecas": int(args.nelecas) if str(args.reference_method) != "ccsd_t" else None,
             "train_r_values_angstrom": [float(value) for value in r_values],
             "steps": int(args.steps),
             "learning_rate": float(args.learning_rate),
@@ -986,13 +1345,18 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         },
     )
     try:
-        plot_outputs(outdir, training["history"], pred_rows)
+        plot_outputs(outdir, training["history"], pred_rows, reference_label=reference_label)
     except Exception as exc:
         logger.log(f"[plot] skipped after error: {exc!r}")
     summary = {
         "molecule": "N2",
         "basis": str(args.basis),
-        "reference": "CCSD(T)",
+        "reference": reference_label,
+        "reference_method": str(args.reference_method),
+        "active_space": str(args.active_space) if str(args.reference_method) != "ccsd_t" else None,
+        "active_labels": list(args.active_labels) if str(args.reference_method) != "ccsd_t" else None,
+        "ncas": int(args.ncas) if str(args.reference_method) != "ccsd_t" else None,
+        "nelecas": int(args.nelecas) if str(args.reference_method) != "ccsd_t" else None,
         "include_pt2_channel": bool(args.include_pt2_channel),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
         "density_constraint_weight": float(args.density_constraint_weight),
@@ -1010,7 +1374,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "min_loss_step": int(training["min_loss_step"]),
         "prediction_energy_mae_ev": float(np.mean([row["energy_abs_err_ev"] for row in pred_rows])),
         "reference_points_csv": str(outdir / "n2_ccsdt_reference_points.csv"),
-        "training_history_csv": str(outdir / "training_history.csv"),
+        "training_history_csv": str(history_csv),
+        "training_per_point_history_csv": str(per_point_history_csv),
         "prediction_csv": str(outdir / "n2_ccsdt_ground_predictions.csv"),
         "training_curve_png": str(outdir / "training_loss.png"),
         "prediction_curve_png": str(outdir / "n2_ccsdt_ground_curve_train_points.png"),
@@ -1019,11 +1384,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     (outdir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     visualization_manifest = {
         "paper_experiment": "Ground-State Potential-Energy Surfaces",
-        "description": "Data files needed to reproduce N2 CCSD(T) ground-state training visualizations.",
+        "description": f"Data files needed to reproduce N2 {reference_label} ground-state training visualizations.",
         "figures": [
             {
                 "figure": str(outdir / "training_loss.png"),
-                "data_files": [str(outdir / "training_history.csv")],
+                "data_files": [str(history_csv), str(per_point_history_csv)],
                 "x": "step",
                 "y": [
                     "loss",
@@ -1048,12 +1413,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 ],
                 "x": "r_angstrom",
                 "y": [
-                    "ccsdt_energy_h",
+                    "reference_energy_h",
                     "predicted_energy_h",
                     "energy_abs_err_ev",
-                    "rhf_energy_h",
-                    "ccsd_corr_h",
-                    "triples_corr_h",
+                    "mean_field_energy_h",
+                    "correlation_energy_h",
+                    "perturbative_corr_h",
                 ],
             },
         ],

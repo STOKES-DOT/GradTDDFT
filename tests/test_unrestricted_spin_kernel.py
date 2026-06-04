@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import jax
 import numpy as np
 import jax.numpy as jnp
 import pytest
@@ -8,7 +9,9 @@ from td_graddft.tddft._utils import _matrix_power_symmetric, _symmetrize
 from td_graddft.tddft.unrestricted import (
     UnrestrictedResponseMatrices,
     build_unrestricted_response_matrices,
+    build_unrestricted_tda_matrices,
     solve_unrestricted_casida,
+    solve_unrestricted_tda,
 )
 
 
@@ -82,6 +85,91 @@ def test_unrestricted_response_rejects_scalar_kernel_fallback():
 
     with pytest.raises(ValueError, match="requires spin-resolved XC kernels"):
         build_unrestricted_response_matrices(reference, ScalarKernelXC())
+
+
+def test_unrestricted_tda_allows_empty_beta_occupied_channel():
+    reference = _toy_unrestricted_reference()
+    reference = reference.__class__(
+        **{
+            **reference.__dict__,
+            "mo_occ": jnp.asarray([[1.0, 0.0], [0.0, 0.0]]),
+            "rdm1": jnp.asarray(
+                [
+                    [[1.0, 0.0], [0.0, 0.0]],
+                    [[0.0, 0.0], [0.0, 0.0]],
+                ]
+            ),
+        }
+    )
+
+    matrices = build_unrestricted_tda_matrices(reference)
+    result = solve_unrestricted_tda(matrices, nstates=1)
+
+    assert result.excitation_energies.shape == (1,)
+    assert result.amplitudes_alpha.shape == (1, 1, 1)
+    assert result.amplitudes_beta.shape[0] == 1
+    assert result.amplitudes_beta.shape[1] == 0
+
+
+def test_unrestricted_tda_matrices_are_jittable_with_static_spin_counts():
+    reference = _toy_unrestricted_reference()
+    reference = reference.__class__(
+        **{
+            **reference.__dict__,
+            "mo_occ": jnp.asarray([[1.0, 0.0], [0.0, 0.0]]),
+            "rdm1": jnp.asarray(
+                [
+                    [[1.0, 0.0], [0.0, 0.0]],
+                    [[0.0, 0.0], [0.0, 0.0]],
+                ]
+            ),
+            "nocc_alpha": 1,
+            "nocc_beta": 0,
+        }
+    )
+
+    @jax.jit
+    def _build(mo_occ):
+        molecule = reference.__class__(**{**reference.__dict__, "mo_occ": mo_occ})
+        matrices = build_unrestricted_tda_matrices(molecule)
+        return matrices.a_matrix
+
+    a_matrix = _build(reference.mo_occ)
+
+    assert a_matrix.shape == (1, 1)
+    assert np.all(np.isfinite(np.asarray(a_matrix)))
+
+
+def test_unrestricted_tda_solver_is_jittable_with_static_nstates():
+    reference = _toy_unrestricted_reference()
+    reference = reference.__class__(
+        **{
+            **reference.__dict__,
+            "mo_occ": jnp.asarray([[1.0, 0.0], [0.0, 0.0]]),
+            "rdm1": jnp.asarray(
+                [
+                    [[1.0, 0.0], [0.0, 0.0]],
+                    [[0.0, 0.0], [0.0, 0.0]],
+                ]
+            ),
+            "nocc_alpha": 1,
+            "nocc_beta": 0,
+        }
+    )
+    matrices = build_unrestricted_tda_matrices(reference)
+
+    @jax.jit
+    def _solve(a_matrix):
+        mats = matrices.__class__(**{**matrices.__dict__, "a_matrix": a_matrix})
+        result = solve_unrestricted_tda(mats, nstates=1)
+        return result.excitation_energies, result.amplitudes_alpha, result.amplitudes_beta
+
+    energies, amplitudes_alpha, amplitudes_beta = _solve(matrices.a_matrix)
+
+    assert energies.shape == (1,)
+    assert amplitudes_alpha.shape == (1, 1, 1)
+    assert amplitudes_beta.shape == (1, 0, 2)
+    assert np.all(np.isfinite(np.asarray(energies)))
 
 
 def test_unrestricted_casida_cholesky_metric_matches_symmetric_sqrt_reference():

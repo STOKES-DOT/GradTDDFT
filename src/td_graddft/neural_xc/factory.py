@@ -14,12 +14,12 @@ from .components import (
     normalize_semilocal_xc_names,
 )
 from .defaults import (
+    DEFAULT_NETWORK_ARCHITECTURE,
     DEFAULT_INPUT_FEATURE_MODE,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
-    DEFAULT_NETWORK_ARCHITECTURE,
     DEFAULT_NETWORK_HIDDEN_DIMS,
 )
-from .networks import SimpleMixingMLP, ResidualMixingMLP, normalize_hidden_dims
+from .networks import ResidualMixingMLP, normalize_hidden_dims
 
 
 def _make_neural_xc_hybrid_functional(
@@ -36,9 +36,10 @@ def _make_neural_xc_hybrid_functional(
     response_pt2_mode: Literal["approx", "strict"] = "approx",
     strict_feature_alignment: bool = True,
     allow_experimental_jax_xc: bool = False,
+    architecture: str | None = None,
+    network_architecture: str | None = None,
     hidden_dims: Sequence[int] = DEFAULT_NETWORK_HIDDEN_DIMS,
     activation: Callable[[Array], Array] = nn.tanh,
-    network_architecture: Literal["simple_mlp", "graddft_residual"] = DEFAULT_NETWORK_ARCHITECTURE,
     squash_offset: float = 1e-4,
     sigmoid_scale_factor: float = 2.0,
     density_floor: float = 1e-12,
@@ -50,6 +51,16 @@ def _make_neural_xc_hybrid_functional(
     hfx_channels: int = 2,
     name: str = "neural_xc",
 ) -> NeuralXCFunctional:
+    arch = DEFAULT_NETWORK_ARCHITECTURE
+    if architecture is not None:
+        arch = str(architecture)
+    if network_architecture is not None:
+        arch = str(network_architecture)
+    if arch not in {"graddft_residual", "residual", "simple_mlp", "mlp"}:
+        raise ValueError(
+            f"Unsupported network architecture={arch!r}. "
+            "Expected 'graddft_residual' or 'simple_mlp'."
+        )
     if non_hf_module is not None:
         if (
             n_semilocal_channels is not None
@@ -75,29 +86,14 @@ def _make_neural_xc_hybrid_functional(
 
     dims = normalize_hidden_dims(hidden_dims)
     output_dim = n_semilocal + 1 + int(bool(include_pt2_channel))
-
-    if network_architecture == "simple_mlp":
-        model = SimpleMixingMLP(
-            hidden_dims=dims,
-            output_dim=output_dim,
-            activation=activation,
-            squash_offset=squash_offset,
-            sigmoid_scale_factor=sigmoid_scale_factor,
-        )
-    elif network_architecture == "graddft_residual":
-        block_activation = nn.elu if activation is nn.tanh else activation
-        model = ResidualMixingMLP(
-            hidden_dims=dims,
-            output_dim=output_dim,
-            block_activation=block_activation,
-            squash_offset=squash_offset,
-            sigmoid_scale_factor=sigmoid_scale_factor,
-        )
-    else:
-        raise ValueError(
-            f"Unsupported network_architecture={network_architecture!r}. "
-            "Expected 'simple_mlp' or 'graddft_residual'."
-        )
+    block_activation = nn.elu if activation is nn.tanh else activation
+    model = ResidualMixingMLP(
+        hidden_dims=dims,
+        output_dim=output_dim,
+        block_activation=block_activation,
+        squash_offset=squash_offset,
+        sigmoid_scale_factor=sigmoid_scale_factor,
+    )
 
     return NeuralXCFunctional(
         model=model,
@@ -123,7 +119,7 @@ def _make_neural_xc_hybrid_functional(
     )
 
 
-NeuralXCMixingMLP = SimpleMixingMLP
+NeuralXCMixingMLP = ResidualMixingMLP
 
 
 def make_neural_xc_functional(
@@ -140,9 +136,10 @@ def make_neural_xc_functional(
     response_pt2_mode: Literal["approx", "strict"] = "approx",
     strict_feature_alignment: bool = True,
     allow_experimental_jax_xc: bool = False,
+    architecture: str | None = None,
+    network_architecture: str | None = None,
     hidden_dims: Sequence[int] = DEFAULT_NETWORK_HIDDEN_DIMS,
     activation: Callable[[Array], Array] = nn.tanh,
-    network_architecture: Literal["simple_mlp", "graddft_residual"] = DEFAULT_NETWORK_ARCHITECTURE,
     squash_offset: float = 1e-4,
     sigmoid_scale_factor: float = 2.0,
     density_floor: float = 1e-12,
@@ -167,9 +164,10 @@ def make_neural_xc_functional(
         response_pt2_mode=response_pt2_mode,
         strict_feature_alignment=strict_feature_alignment,
         allow_experimental_jax_xc=allow_experimental_jax_xc,
+        architecture=architecture,
+        network_architecture=network_architecture,
         hidden_dims=hidden_dims,
         activation=activation,
-        network_architecture=network_architecture,
         squash_offset=squash_offset,
         sigmoid_scale_factor=sigmoid_scale_factor,
         density_floor=density_floor,

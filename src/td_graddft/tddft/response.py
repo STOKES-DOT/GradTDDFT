@@ -62,6 +62,8 @@ class _RestrictedResponseOperatorData:
     rho_ov_density: Array | None = None
     weighted_strict_tensor: Array | None = None
     response_features: Array | None = None
+    strict_tda_xc_action_fn: Callable[[Array], Array] | None = None
+    strict_tda_xc_diagonal: Array | None = None
     hybrid_fraction: Array | float = 0.0
     nonlocal_xc_action_fn: Callable[[Array], Array] | None = None
     nonlocal_xc_diagonal: Array | None = None
@@ -271,6 +273,76 @@ def _as_nonlocal_response_matrix(
     return matrix
 
 
+def _resolve_strict_tda_xc_matrix(
+    resolved_xc: Any,
+    molecule: Any,
+    *,
+    nocc: int,
+    nvir: int,
+    occupation_tolerance: float,
+) -> Array | None:
+    if resolved_xc is None:
+        return None
+    strict_tda_xc_matrix = getattr(resolved_xc, "strict_tda_xc_matrix", None)
+    if not callable(strict_tda_xc_matrix):
+        return None
+    try:
+        values = strict_tda_xc_matrix(
+            molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+    except AttributeError as exc:
+        if "does not expose" not in str(exc):
+            raise
+        return None
+    if values is None:
+        return None
+    return _as_nonlocal_response_matrix(
+        values,
+        nocc=nocc,
+        nvir=nvir,
+        label="Strict TDA XC matrix",
+    )
+
+
+def _resolve_strict_tda_xc_action_terms(
+    resolved_xc: Any,
+    molecule: Any,
+    *,
+    delta_eps: Array,
+    occupation_tolerance: float,
+) -> tuple[Callable[[Array], Array] | None, Array | None]:
+    if resolved_xc is None:
+        return None, None
+    strict_tda_xc_action = getattr(resolved_xc, "strict_tda_xc_action", None)
+    strict_tda_xc_diagonal = getattr(resolved_xc, "strict_tda_xc_diagonal", None)
+    if not callable(strict_tda_xc_action) or not callable(strict_tda_xc_diagonal):
+        return None, None
+    try:
+        diagonal = strict_tda_xc_diagonal(
+            molecule,
+            occupation_tolerance=occupation_tolerance,
+        )
+    except AttributeError as exc:
+        if "does not expose" not in str(exc):
+            raise
+        return None, None
+    diagonal = _as_nonlocal_response_diagonal(
+        diagonal,
+        delta_eps=delta_eps,
+        label="Strict TDA XC diagonal",
+    )
+
+    def action(values: Array) -> Array:
+        return strict_tda_xc_action(
+            molecule,
+            values,
+            occupation_tolerance=occupation_tolerance,
+        )
+
+    return action, diagonal
+
+
 def _as_nonlocal_response_diagonal(
     values: Any,
     *,
@@ -311,6 +383,92 @@ def _materialize_nonlocal_response_matrix_from_action(
     return action_basis.reshape(dim, dim).T
 
 
+def _optional_response_method(
+    resolved_xc: Any,
+    method_name: str,
+    callback_attr: str,
+) -> Callable[..., Any] | None:
+    method = getattr(resolved_xc, method_name, None)
+    if not callable(method):
+        return None
+    if hasattr(resolved_xc, callback_attr) and getattr(resolved_xc, callback_attr) is None:
+        return None
+    return method
+
+
+def _has_nonlocal_response_matrix_pair(resolved_xc: Any) -> bool:
+    return getattr(resolved_xc, "nonlocal_response_matrices_fn", None) is not None
+
+
+def _resolve_nonlocal_response_action_pair(
+    resolved_xc: Any,
+    molecule: Any,
+    *,
+    delta_eps: Array,
+    occupation_tolerance: float,
+) -> tuple[Callable[[Array], Array] | None, Callable[[Array], Array] | None, Array | None]:
+    if resolved_xc is None:
+        return None, None, None
+
+    action_a_raw = _optional_response_method(
+        resolved_xc,
+        "nonlocal_response_a_action",
+        "nonlocal_response_action_fn",
+    )
+    if action_a_raw is None:
+        action_a_raw = _optional_response_method(
+            resolved_xc,
+            "nonlocal_response_action",
+            "nonlocal_response_action_fn",
+        )
+    action_b_raw = _optional_response_method(
+        resolved_xc,
+        "nonlocal_response_b_action",
+        "nonlocal_response_b_action_fn",
+    )
+    if action_a_raw is None or action_b_raw is None:
+        return None, None, None
+
+    def _wrap_action(action_fn: Callable[..., Any], label: str) -> Callable[[Array], Array]:
+        def action(values: Array) -> Array:
+            out = jnp.asarray(
+                action_fn(
+                    molecule,
+                    values,
+                    occupation_tolerance=occupation_tolerance,
+                ),
+                dtype=delta_eps.dtype,
+            )
+            if out.shape != jnp.asarray(values).shape:
+                raise ValueError(
+                    f"{label} must preserve the transition-amplitude shape "
+                    f"{jnp.asarray(values).shape}, got {out.shape}."
+                )
+            _assert_finite(out, label=label)
+            return out
+
+        return action
+
+    diagonal = None
+    diagonal_fn = _optional_response_method(
+        resolved_xc,
+        "nonlocal_response_diagonal",
+        "nonlocal_response_diagonal_fn",
+    )
+    if callable(diagonal_fn):
+        diagonal = _as_nonlocal_response_diagonal(
+            diagonal_fn(molecule, occupation_tolerance=occupation_tolerance),
+            delta_eps=delta_eps,
+            label="Nonlocal A response diagonal",
+        )
+
+    return (
+        _wrap_action(action_a_raw, "Nonlocal A response action"),
+        _wrap_action(action_b_raw, "Nonlocal B response action"),
+        diagonal,
+    )
+
+
 def _resolve_nonlocal_response_terms(
     resolved_xc: Any,
     molecule: Any,
@@ -320,31 +478,30 @@ def _resolve_nonlocal_response_terms(
 ) -> tuple[Array | None, Callable[[Array], Array] | None, Array | None]:
     if resolved_xc is None:
         return None, None, None
-    if getattr(resolved_xc, "nonlocal_response_matrices_fn", None) is not None:
-        return None, None, None
 
     nocc, nvir = delta_eps.shape
     matrix_fn = getattr(resolved_xc, "nonlocal_response_matrix", None)
-    action_fn_raw = getattr(resolved_xc, "nonlocal_response_action", None)
-    diagonal_fn = getattr(resolved_xc, "nonlocal_response_diagonal", None)
-
-    matrix = None
-    if callable(matrix_fn):
-        try:
-            matrix_values = matrix_fn(
-                molecule,
-                occupation_tolerance=occupation_tolerance,
-            )
-        except AttributeError as exc:
-            if "does not expose" not in str(exc):
-                raise
-            matrix_values = None
-        if matrix_values is not None:
-            matrix = _as_nonlocal_response_matrix(
-                matrix_values,
-                nocc=nocc,
-                nvir=nvir,
-            )
+    action_fn_raw = _optional_response_method(
+        resolved_xc,
+        "nonlocal_response_action",
+        "nonlocal_response_action_fn",
+    )
+    diagonal_fn = _optional_response_method(
+        resolved_xc,
+        "nonlocal_response_diagonal",
+        "nonlocal_response_diagonal_fn",
+    )
+    if _has_nonlocal_response_matrix_pair(resolved_xc):
+        pair_action_a, pair_action_b, _ = _resolve_nonlocal_response_action_pair(
+            resolved_xc,
+            molecule,
+            delta_eps=delta_eps,
+            occupation_tolerance=occupation_tolerance,
+        )
+        if pair_action_a is not None and pair_action_b is not None:
+            return None, None, None
+        if action_fn_raw is None:
+            return None, None, None
 
     action = None
     if callable(action_fn_raw):
@@ -365,6 +522,24 @@ def _resolve_nonlocal_response_terms(
                 )
             _assert_finite(out, label="Nonlocal response action")
             return out
+
+    matrix = None
+    if action is None and callable(matrix_fn):
+        try:
+            matrix_values = matrix_fn(
+                molecule,
+                occupation_tolerance=occupation_tolerance,
+            )
+        except AttributeError as exc:
+            if "does not expose" not in str(exc):
+                raise
+            matrix_values = None
+        if matrix_values is not None:
+            matrix = _as_nonlocal_response_matrix(
+                matrix_values,
+                nocc=nocc,
+                nvir=nvir,
+            )
 
     diagonal = None
     if callable(diagonal_fn):
@@ -482,26 +657,15 @@ def build_restricted_response_matrices(
     exchange_a = jnp.zeros_like(hartree_a)
     exchange_b = jnp.zeros_like(hartree_b)
     if resolved_xc is not None:
-        strict_tda_xc_matrix = getattr(resolved_xc, "strict_tda_xc_matrix", None)
         grid_response_tensor = getattr(resolved_xc, "grid_response_tensor", None)
-        strict_tda_matrix_values = None
-        if callable(strict_tda_xc_matrix):
-            try:
-                strict_tda_matrix_values = strict_tda_xc_matrix(
-                    molecule,
-                    occupation_tolerance=occupation_tolerance,
-                )
-            except AttributeError as exc:
-                if "does not expose" not in str(exc):
-                    raise
-                strict_tda_matrix_values = None
-        if strict_tda_matrix_values is not None:
-            strict_tda_matrix = _as_nonlocal_response_matrix(
-                strict_tda_matrix_values,
-                nocc=nocc,
-                nvir=nvir,
-                label="Strict TDA XC matrix",
-            )
+        strict_tda_matrix = _resolve_strict_tda_xc_matrix(
+            resolved_xc,
+            molecule,
+            nocc=nocc,
+            nvir=nvir,
+            occupation_tolerance=occupation_tolerance,
+        )
+        if strict_tda_matrix is not None:
             xc_contribution = xc_contribution + strict_tda_matrix.reshape(
                 nocc,
                 nvir,
@@ -573,7 +737,7 @@ def build_restricted_response_matrices(
             exchange_a = hybrid_fraction * exchange_a_raw
             exchange_b = hybrid_fraction * exchange_b_raw
 
-        nonlocal_a_matrix, nonlocal_b_matrix = _resolve_nonlocal_response_matrix_pair(
+        nonlocal_a_action, nonlocal_b_action, _ = _resolve_nonlocal_response_action_pair(
             resolved_xc,
             molecule,
             delta_eps=delta_eps,
@@ -592,6 +756,29 @@ def build_restricted_response_matrices(
                 nvir=nvir,
                 dtype=delta_eps.dtype,
             )
+        if nonlocal_a_action is not None and nonlocal_b_action is not None:
+            nonlocal_a_matrix = _materialize_nonlocal_response_matrix_from_action(
+                nonlocal_a_action,
+                nocc=nocc,
+                nvir=nvir,
+                dtype=delta_eps.dtype,
+            )
+            nonlocal_b_matrix = _materialize_nonlocal_response_matrix_from_action(
+                nonlocal_b_action,
+                nocc=nocc,
+                nvir=nvir,
+                dtype=delta_eps.dtype,
+            )
+        elif nonlocal_matrix is None:
+            nonlocal_a_matrix, nonlocal_b_matrix = _resolve_nonlocal_response_matrix_pair(
+                resolved_xc,
+                molecule,
+                delta_eps=delta_eps,
+                occupation_tolerance=occupation_tolerance,
+            )
+        else:
+            nonlocal_a_matrix = None
+            nonlocal_b_matrix = None
         if nonlocal_matrix is not None:
             xc_contribution = xc_contribution + nonlocal_matrix.reshape(nocc, nvir, nocc, nvir)
         if nonlocal_a_matrix is not None:
@@ -848,26 +1035,15 @@ def build_restricted_tda_matrix(
             )
 
     if resolved_xc is not None:
-        strict_tda_xc_matrix = getattr(resolved_xc, "strict_tda_xc_matrix", None)
         grid_response_tensor = getattr(resolved_xc, "grid_response_tensor", None)
-        strict_tda_matrix_values = None
-        if callable(strict_tda_xc_matrix):
-            try:
-                strict_tda_matrix_values = strict_tda_xc_matrix(
-                    molecule,
-                    occupation_tolerance=occupation_tolerance,
-                )
-            except AttributeError as exc:
-                if "does not expose" not in str(exc):
-                    raise
-                strict_tda_matrix_values = None
-        if strict_tda_matrix_values is not None:
-            strict_tda_matrix = _as_nonlocal_response_matrix(
-                strict_tda_matrix_values,
-                nocc=nocc,
-                nvir=nvir,
-                label="Strict TDA XC matrix",
-            )
+        strict_tda_matrix = _resolve_strict_tda_xc_matrix(
+            resolved_xc,
+            molecule,
+            nocc=nocc,
+            nvir=nvir,
+            occupation_tolerance=occupation_tolerance,
+        )
+        if strict_tda_matrix is not None:
             flat_a = flat_a + strict_tda_matrix
         elif callable(grid_response_tensor):
             strict_tensor = _as_grid_response_tensor(
@@ -923,7 +1099,7 @@ def build_restricted_tda_matrix(
                 weights * local_fxc,
                 rho_ov_density.reshape(weights.shape[0], dim),
             )
-        nonlocal_a_matrix, _ = _resolve_nonlocal_response_matrix_pair(
+        nonlocal_a_action, _, _ = _resolve_nonlocal_response_action_pair(
             resolved_xc,
             molecule,
             delta_eps=delta_eps,
@@ -942,6 +1118,22 @@ def build_restricted_tda_matrix(
                 nvir=nvir,
                 dtype=delta_eps.dtype,
             )
+        if nonlocal_a_action is not None:
+            nonlocal_a_matrix = _materialize_nonlocal_response_matrix_from_action(
+                nonlocal_a_action,
+                nocc=nocc,
+                nvir=nvir,
+                dtype=delta_eps.dtype,
+            )
+        elif nonlocal_matrix is None:
+            nonlocal_a_matrix, _ = _resolve_nonlocal_response_matrix_pair(
+                resolved_xc,
+                molecule,
+                delta_eps=delta_eps,
+                occupation_tolerance=occupation_tolerance,
+            )
+        else:
+            nonlocal_a_matrix = None
         if nonlocal_matrix is not None:
             flat_a = flat_a + nonlocal_matrix
         if nonlocal_a_matrix is not None:
@@ -968,11 +1160,14 @@ def _build_restricted_response_operator_data(
         occupation_tolerance,
     )
     nocc, nvir = delta_eps.shape
+    dim = int(nocc * nvir)
 
     weighted_local_kernel = None
     rho_ov_density = None
     weighted_strict_tensor = None
     response_features = None
+    strict_tda_xc_action_fn = None
+    strict_tda_xc_diagonal = None
     hybrid_fraction = 0.0
     nonlocal_xc_action_fn = None
     nonlocal_xc_diagonal = None
@@ -988,7 +1183,38 @@ def _build_restricted_response_operator_data(
             total_density,
         )
         grid_response_tensor = getattr(resolved_xc, "grid_response_tensor", None)
-        if callable(grid_response_tensor):
+        (
+            action_strict_tda_xc_fn,
+            action_strict_tda_xc_diagonal,
+        ) = _resolve_strict_tda_xc_action_terms(
+            resolved_xc,
+            molecule,
+            delta_eps=delta_eps,
+            occupation_tolerance=occupation_tolerance,
+        )
+        if action_strict_tda_xc_fn is not None and action_strict_tda_xc_diagonal is not None:
+            strict_tda_xc_action_fn = action_strict_tda_xc_fn
+            strict_tda_xc_diagonal = action_strict_tda_xc_diagonal
+        else:
+            strict_tda_matrix = _resolve_strict_tda_xc_matrix(
+                resolved_xc,
+                molecule,
+                nocc=nocc,
+                nvir=nvir,
+                occupation_tolerance=occupation_tolerance,
+            )
+        if strict_tda_xc_action_fn is not None:
+            pass
+        elif strict_tda_matrix is not None:
+            flat_strict_tda_matrix = strict_tda_matrix
+
+            def strict_tda_xc_action_fn(values: Array) -> Array:
+                reshaped = jnp.asarray(values, dtype=delta_eps.dtype).reshape(-1, dim)
+                out = reshaped @ flat_strict_tda_matrix.T
+                return out.reshape(-1, nocc, nvir)
+
+            strict_tda_xc_diagonal = jnp.diag(flat_strict_tda_matrix).reshape(nocc, nvir)
+        elif callable(grid_response_tensor):
             strict_tensor = _as_grid_response_tensor(
                 grid_response_tensor(molecule),
                 ngrids=int(weights.shape[0]),
@@ -1037,7 +1263,11 @@ def _build_restricted_response_operator_data(
             local_fxc = _as_grid_values(local_fxc, total_density, label="XC kernel")
             weighted_local_kernel = weights * local_fxc
 
-        nonlocal_a_matrix, nonlocal_b_matrix = _resolve_nonlocal_response_matrix_pair(
+        (
+            pair_nonlocal_a_action,
+            pair_nonlocal_b_action,
+            pair_nonlocal_a_diagonal,
+        ) = _resolve_nonlocal_response_action_pair(
             resolved_xc,
             molecule,
             delta_eps=delta_eps,
@@ -1049,7 +1279,22 @@ def _build_restricted_response_operator_data(
             delta_eps=delta_eps,
             occupation_tolerance=occupation_tolerance,
         )
-        dim = int(nocc * nvir)
+        nonlocal_a_matrix = None
+        nonlocal_b_matrix = None
+        if pair_nonlocal_a_action is not None and pair_nonlocal_b_action is not None:
+            nonlocal_xc_a_action_fn = pair_nonlocal_a_action
+            nonlocal_xc_b_action_fn = pair_nonlocal_b_action
+            nonlocal_xc_a_diagonal = pair_nonlocal_a_diagonal
+        elif nonlocal_matrix is None and nonlocal_action is None:
+            nonlocal_a_matrix, nonlocal_b_matrix = _resolve_nonlocal_response_matrix_pair(
+                resolved_xc,
+                molecule,
+                delta_eps=delta_eps,
+                occupation_tolerance=occupation_tolerance,
+            )
+        else:
+            nonlocal_a_matrix = None
+            nonlocal_b_matrix = None
         if nonlocal_a_matrix is not None:
             flat_a = nonlocal_a_matrix
 
@@ -1123,6 +1368,8 @@ def _build_restricted_response_operator_data(
         rho_ov_density=rho_ov_density,
         weighted_strict_tensor=weighted_strict_tensor,
         response_features=response_features,
+        strict_tda_xc_action_fn=strict_tda_xc_action_fn,
+        strict_tda_xc_diagonal=strict_tda_xc_diagonal,
         hybrid_fraction=hybrid_fraction,
         nonlocal_xc_action_fn=nonlocal_xc_action_fn,
         nonlocal_xc_diagonal=nonlocal_xc_diagonal,
@@ -1134,6 +1381,8 @@ def _build_restricted_response_operator_data(
 
 def _restricted_xc_action(data: _RestrictedResponseOperatorData, x: Array) -> Array:
     out = jnp.zeros_like(x)
+    if data.strict_tda_xc_action_fn is not None:
+        out = out + data.strict_tda_xc_action_fn(x)
     if data.weighted_strict_tensor is not None and data.response_features is not None:
         projected = jnp.einsum(
             "xria,nia->nxr",
@@ -1170,6 +1419,8 @@ def _restricted_xc_action(data: _RestrictedResponseOperatorData, x: Array) -> Ar
 
 def _restricted_xc_diagonal(data: _RestrictedResponseOperatorData) -> Array:
     out = jnp.zeros_like(data.delta_eps)
+    if data.strict_tda_xc_diagonal is not None:
+        out = out + jnp.asarray(data.strict_tda_xc_diagonal, dtype=out.dtype)
     if data.weighted_strict_tensor is not None and data.response_features is not None:
         out = out + 2.0 * jnp.einsum(
             "xyr,xria,yria->ia",
@@ -1380,12 +1631,32 @@ def build_restricted_a_minus_b_matrix(
     a_minus_b = (diagonal + hartree_diff + exchange_diff).reshape(dim, dim)
 
     resolved_xc = _resolve_xc_functional(molecule, xc_functional, xc_params)
-    nonlocal_a_matrix, nonlocal_b_matrix = _resolve_nonlocal_response_matrix_pair(
+    nonlocal_a_action, nonlocal_b_action, _ = _resolve_nonlocal_response_action_pair(
         resolved_xc,
         molecule,
         delta_eps=delta_eps,
         occupation_tolerance=occupation_tolerance,
     )
+    if nonlocal_a_action is not None and nonlocal_b_action is not None:
+        nonlocal_a_matrix = _materialize_nonlocal_response_matrix_from_action(
+            nonlocal_a_action,
+            nocc=nocc,
+            nvir=nvir,
+            dtype=delta_eps.dtype,
+        )
+        nonlocal_b_matrix = _materialize_nonlocal_response_matrix_from_action(
+            nonlocal_b_action,
+            nocc=nocc,
+            nvir=nvir,
+            dtype=delta_eps.dtype,
+        )
+    else:
+        nonlocal_a_matrix, nonlocal_b_matrix = _resolve_nonlocal_response_matrix_pair(
+            resolved_xc,
+            molecule,
+            delta_eps=delta_eps,
+            occupation_tolerance=occupation_tolerance,
+        )
     if nonlocal_a_matrix is not None:
         a_minus_b = a_minus_b + nonlocal_a_matrix
     if nonlocal_b_matrix is not None:

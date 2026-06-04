@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Sequence
 
 from .defaults import (
+    DEFAULT_NETWORK_ARCHITECTURE,
     DEFAULT_NEURAL_XC_HF_INPUT_MODE,
     DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE,
@@ -46,7 +47,7 @@ class ChannelSpec:
 
 @dataclass(frozen=True)
 class NetworkSpec:
-    architecture: str = "residual"
+    architecture: str = DEFAULT_NETWORK_ARCHITECTURE
     hidden_dims: tuple[int, ...] = field(
         default_factory=lambda: tuple(int(v) for v in DEFAULT_NETWORK_HIDDEN_DIMS)
     )

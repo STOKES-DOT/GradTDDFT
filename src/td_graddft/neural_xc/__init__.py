@@ -32,13 +32,12 @@ from .defaults import (
     DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
+    DEFAULT_NETWORK_ARCHITECTURE,
     DEFAULT_NETWORK_HIDDEN_DIMS,
     DEFAULT_INPUT_FEATURE_MODE,
-    DEFAULT_NETWORK_ARCHITECTURE,
     resolve_coefficient_prior_values,
 )
 from .networks import (
-    SimpleMixingMLP,
     ResidualMixingMLP,
 )
 from . import presets
@@ -63,14 +62,13 @@ __all__ = [
     "DEFAULT_NEURAL_XC_RESPONSE_HF_MODE",
     "DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE",
     "DEFAULT_NEURAL_XC_SEMILOCAL_XC",
-    "SimpleMixingMLP",
+    "DEFAULT_NETWORK_ARCHITECTURE",
     "Functional",
     "FRIENDLY_XC_COMPONENT_ALIASES",
     "JAXXCFunctionalInfo",
     "JAXXCStatus",
     "NetworkSpec",
     "DEFAULT_INPUT_FEATURE_MODE",
-    "DEFAULT_NETWORK_ARCHITECTURE",
     "DEFAULT_NETWORK_HIDDEN_DIMS",
     "ResidualMixingMLP",
     "NeuralXCHybridFunctional",

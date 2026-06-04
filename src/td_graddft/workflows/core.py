@@ -97,7 +97,6 @@ def _canonicalize_graddft_ground_state_config(
 
     aligned = replace(
         config,
-        network_architecture="graddft_residual",
         input_feature_mode="canonical",
         hf_input_mode="spin_resolved",
         response_hf_mode="strict",
@@ -312,6 +311,7 @@ def run_molecule_from_spec(
                 libcint_geometry_grad_policy=simulation.jax_libcint_geometry_grad_policy,
                 compute_local_hfx_features=compute_local_hfx_features,
                 compute_local_hfx_aux=compute_local_hfx_aux,
+                compute_local_pt2_features=compute_local_pt2_features,
                 hfx_omega_values=hfx_omega_values,
                 hfx_chunk_size=hfx_chunk_size,
                 precompile_eri=simulation.jax_precompile_eri,
@@ -395,7 +395,6 @@ def train_neural_xc(
         else None
     )
     functional = neural_xc.Functional(
-        architecture=config.network_architecture,
         semilocal_xc=config.semilocal_xc,
         n_semilocal_channels=config.n_semilocal_channels,
         input_feature_mode=config.input_feature_mode,
@@ -550,16 +549,11 @@ def train_neural_xc(
         scf_vxc_clip=config.scf_vxc_clip,
         scf_iterate_selection=config.scf_iterate_selection,
         scf_require_convergence=config.scf_require_convergence,
-        scf_stop_gradient_on_unconverged=config.scf_stop_gradient_on_unconverged,
-        scf_stop_gradient_rms_threshold=config.scf_stop_gradient_rms_threshold,
         scf_gradient_mode=selected_scf_gradient_mode,
         scf_implicit_diff_max_iter=config.scf_implicit_diff_max_iter,
-        scf_implicit_diff_step_size=config.scf_implicit_diff_step_size,
         scf_implicit_diff_clip=config.scf_implicit_diff_clip,
-        scf_implicit_diff_solver=config.scf_implicit_diff_solver,
         scf_implicit_diff_tolerance=config.scf_implicit_diff_tolerance,
         scf_implicit_diff_regularization=config.scf_implicit_diff_regularization,
-        scf_implicit_diff_restart=config.scf_implicit_diff_restart,
     )
     gs_excited_training = ExcitedStateTrainingConfig(
         s1_constraint_use_tda=bool(config.s1_constraint_use_tda),
