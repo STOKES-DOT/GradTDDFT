@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import jax
 import jax.numpy as jnp
 from jax.lax import Precision
 
@@ -312,15 +313,34 @@ class ChunkedHFXNu:
         with h5py.File(filename, "r") as handle:
             dataset = handle[dataset_path]
             shape = tuple(int(dim) for dim in dataset.shape)
+            dataset_dtype = np.dtype(dataset.dtype)
         if len(shape) != 4:
             raise ValueError(
                 "HDF5 HFX nu dataset must have shape (n_omega, ngrids, nao, nao), "
                 f"got {shape}."
             )
+        callback_dtype = np.dtype(jax.dtypes.canonicalize_dtype(dataset_dtype))
 
         def grid_chunk(start: int, stop: int) -> np.ndarray:
-            with h5py.File(filename, "r") as handle:
-                return np.asarray(handle[dataset_path][:, int(start) : int(stop)])
+            start_i = int(start)
+            stop_i = int(stop)
+            chunk_shape = (shape[0], max(0, stop_i - start_i), shape[2], shape[3])
+
+            def read_chunk(start_arg: Any, stop_arg: Any) -> np.ndarray:
+                read_start = int(np.asarray(start_arg))
+                read_stop = int(np.asarray(stop_arg))
+                with h5py.File(filename, "r") as handle:
+                    return np.asarray(
+                        handle[dataset_path][:, read_start:read_stop],
+                        dtype=callback_dtype,
+                    )
+
+            return jax.pure_callback(
+                read_chunk,
+                jax.ShapeDtypeStruct(chunk_shape, callback_dtype),
+                np.asarray(start_i, dtype=np.int32),
+                np.asarray(stop_i, dtype=np.int32),
+            )
 
         return cls(
             shape=shape,
@@ -374,12 +394,14 @@ class ChunkedHFXNu:
             _grid_chunk_fn=grid_chunk,
         )
 
-    def grid_chunk(self, start: int, stop: int) -> np.ndarray:
-        return np.asarray(self._grid_chunk_fn(int(start), int(stop)))
+    def grid_chunk(self, start: int, stop: int) -> Any:
+        return self._grid_chunk_fn(int(start), int(stop))
 
     def materialize(self) -> np.ndarray:
         chunks = [
-            self.grid_chunk(start, min(start + int(self.chunk_size), self.shape[1]))
+            np.asarray(
+                self.grid_chunk(start, min(start + int(self.chunk_size), self.shape[1]))
+            )
             for start in range(0, self.shape[1], int(self.chunk_size))
         ]
         if not chunks:

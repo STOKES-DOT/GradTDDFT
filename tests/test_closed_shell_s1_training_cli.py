@@ -184,6 +184,43 @@ def test_hdf5_cache_can_read_restricted_hfx_nu_as_chunked_api(tmp_path):
     assert np.allclose(loaded.hfx_nu_api.grid_chunk(1, 3), hfx_nu[:, 1:3])
 
 
+def test_hdf5_chunked_hfx_nu_reads_at_runtime_under_jit(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    import jax
+    import jax.numpy as jnp
+
+    from td_graddft.neural_xc.inputs import ChunkedHFXNu
+
+    hfx_nu = np.arange(2 * 5 * 2 * 2, dtype=np.float64).reshape(2, 5, 2, 2)
+    path = tmp_path / "refs.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("hfx_nu", data=hfx_nu)
+
+    api = ChunkedHFXNu.from_hdf5_dataset(str(path), "hfx_nu", chunk_size=2)
+
+    def chunk_sum(scale):
+        return jnp.sum(api.grid_chunk(1, 3) * scale)
+
+    jitted_chunk_sum = jax.jit(chunk_sum)
+    jitted_chunk_grad = jax.jit(jax.grad(chunk_sum))
+
+    first = float(jitted_chunk_sum(jnp.asarray(1.0, dtype=jnp.float32)))
+    first_grad = float(jitted_chunk_grad(jnp.asarray(1.0, dtype=jnp.float32)))
+    updated = hfx_nu.copy()
+    updated[:, 1:3] = updated[:, 1:3] + 100.0
+    with h5py.File(path, "r+") as handle:
+        handle["hfx_nu"][:, 1:3] = updated[:, 1:3]
+        handle.flush()
+
+    second = float(jitted_chunk_sum(jnp.asarray(1.0, dtype=jnp.float32)))
+    second_grad = float(jitted_chunk_grad(jnp.asarray(1.0, dtype=jnp.float32)))
+
+    assert first == pytest.approx(float(np.sum(hfx_nu[:, 1:3])))
+    assert first_grad == pytest.approx(float(np.sum(hfx_nu[:, 1:3])))
+    assert second == pytest.approx(float(np.sum(updated[:, 1:3])))
+    assert second_grad == pytest.approx(float(np.sum(updated[:, 1:3])))
+
+
 def test_hdf5_cache_materializes_chunked_hfx_nu_api(tmp_path):
     h5py = pytest.importorskip("h5py")
     from td_graddft.data.hdf5_cache import (
