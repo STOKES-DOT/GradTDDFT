@@ -200,6 +200,35 @@ def test_chunked_hfx_nu_matches_dense_hf_grid_contribution():
         assert jnp.allclose(chunked_part, dense_part)
 
 
+def test_hf_grid_contribution_prefers_cached_hfx_local_over_chunked_nu():
+    class RaisingChunkedNu:
+        shape = (1, 2, 2, 2)
+        chunk_size = 1
+
+        def grid_chunk(self, start, stop):
+            raise AssertionError("hfx_local should avoid reading hfx_nu chunks")
+
+        def grid_chunk_padded(self, start, chunk_size):
+            raise AssertionError("hfx_local should avoid reading padded hfx_nu chunks")
+
+    molecule = _make_toy_molecule()
+    molecule.hfx_nu = None
+    molecule.hfx_nu_api = RaisingChunkedNu()
+    expected_a = molecule.hfx_local[0, :, 0]
+    expected_b = molecule.hfx_local[1, :, 0]
+
+    functional = make_neural_xc_functional(
+        semilocal_xc=("gga_x_pbe", "gga_c_pbe"),
+        hidden_dims=(8,),
+    )
+
+    total, hfx_a, hfx_b = functional.projected_hf_grid_contribution_components(molecule)
+
+    assert jnp.allclose(hfx_a, expected_a)
+    assert jnp.allclose(hfx_b, expected_b)
+    assert jnp.allclose(total, expected_a + expected_b)
+
+
 def test_chunked_hfx_nu_matches_dense_hfx_fock_contraction():
     dense_molecule = _make_toy_molecule()
     dense_nu = _toy_hfx_nu_cache()

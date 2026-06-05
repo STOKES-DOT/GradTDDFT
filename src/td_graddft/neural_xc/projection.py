@@ -529,8 +529,16 @@ class NeuralXCProjectionMixin:
         features: RestrictedFeatureBundle | None = None,
     ) -> tuple[Array, Array, Array]:
         del features
-        nu_source = hfx_nu_source(molecule)
-        if nu_source is not None:
+        hfx_local = getattr(molecule, "hfx_local", None)
+        if hfx_local is not None:
+            hfx_local = jnp.asarray(hfx_local)
+        else:
+            nu_source = hfx_nu_source(molecule)
+            if nu_source is None:
+                raise AttributeError(
+                    "local HF channel requires molecule.hfx_local, molecule.hfx_nu, "
+                    "or molecule.hfx_nu_api."
+                )
             if getattr(molecule, "ao", None) is None:
                 raise AttributeError("Molecule-like object must define ao.")
             ao = jnp.asarray(molecule.ao)
@@ -651,14 +659,6 @@ class NeuralXCProjectionMixin:
                     jnp.arange(n_chunks),
                 )
             hfx_local = jnp.stack([e_hf_a[:, None], e_hf_b[:, None]], axis=0)
-        else:
-            hfx_local = getattr(molecule, "hfx_local", None)
-            if hfx_local is None:
-                raise AttributeError(
-                    "local HF channel requires molecule.hfx_local, molecule.hfx_nu, "
-                    "or molecule.hfx_nu_api."
-                )
-            hfx_local = jnp.asarray(hfx_local)
 
         if hfx_local.ndim != 3 or hfx_local.shape[0] != 2:
             raise ValueError(
