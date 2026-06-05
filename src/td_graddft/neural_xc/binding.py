@@ -543,8 +543,7 @@ class NeuralXCBindingMixin:
             n_chunks = (int(ngrid) + chunk_size - 1) // chunk_size
             zero = jnp.zeros((ao.shape[1], ao.shape[1]), dtype=matrix_dtype)
 
-            def body(carry: Array, chunk_idx: Array) -> tuple[Array, None]:
-                start = chunk_idx * chunk_size
+            def vmat_chunk_from_start(start: Array) -> Array:
                 ao_chunk = self._take_grid_chunk(ao, start, chunk_size, axis=0)
                 grad_chunk = self._take_grid_chunk(grad, start, chunk_size, axis=0)
                 nu_chunk = hfx_nu_grid_chunk_padded(
@@ -567,12 +566,18 @@ class NeuralXCBindingMixin:
                     precision=Precision.HIGHEST,
                 )
                 aow = -0.5 * fxx * jnp.transpose(grad_chunk, (1, 0))[:, :, None]
-                vmat_chunk = jnp.einsum(
+                return jnp.einsum(
                     "gp,wgq->pq",
                     ao_chunk,
                     aow,
                     precision=Precision.HIGHEST,
                 )
+
+            vmat_chunk_from_start = jax.checkpoint(vmat_chunk_from_start)
+
+            def body(carry: Array, chunk_idx: Array) -> tuple[Array, None]:
+                start = chunk_idx * chunk_size
+                vmat_chunk = vmat_chunk_from_start(start)
                 return carry + vmat_chunk, None
 
             vmat, _ = jax.lax.scan(body, zero, jnp.arange(n_chunks))

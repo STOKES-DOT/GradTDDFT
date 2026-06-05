@@ -567,8 +567,7 @@ def _restricted_hfx_features_from_nu(
         padded = n_chunks * chunk_size
         zero = jnp.zeros((n_omega, padded), dtype=ao.dtype)
 
-        def body(carry: Array, chunk_idx: Array) -> tuple[Array, None]:
-            start = chunk_idx * chunk_size
+        def exx_chunk_from_start(start: Array) -> Array:
             indices = start + jnp.arange(chunk_size)
             ao_chunk = jnp.take(ao, indices, axis=0, mode="clip")
             valid = indices < ngrid
@@ -598,6 +597,12 @@ def _restricted_hfx_features_from_nu(
                 fxx_chunk,
                 precision=Precision.HIGHEST,
             )
+
+        exx_chunk_from_start = jax.checkpoint(exx_chunk_from_start)
+
+        def body(carry: Array, chunk_idx: Array) -> tuple[Array, None]:
+            start = chunk_idx * chunk_size
+            exx_chunk = exx_chunk_from_start(start)
             return jax.lax.dynamic_update_slice(carry, exx_chunk, (0, start)), None
 
         exx, _ = jax.lax.scan(body, zero, jnp.arange(n_chunks))

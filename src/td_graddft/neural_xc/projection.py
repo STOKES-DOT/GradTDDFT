@@ -464,6 +464,8 @@ class NeuralXCProjectionMixin:
             )
             return vxc_matrix, extra_fock, energy, alpha_num, alpha_den
 
+        chunk_terms = jax.checkpoint(chunk_terms)
+
         def body(
             carry: tuple[Array, Array, Array, Array, Array],
             chunk_idx: Array,
@@ -594,12 +596,7 @@ class NeuralXCProjectionMixin:
                 padded = n_chunks * chunk_size
                 zero = jnp.zeros((padded,), dtype=ao.dtype)
 
-                def body(
-                    carry: tuple[Array, Array],
-                    chunk_idx: Array,
-                ) -> tuple[tuple[Array, Array], None]:
-                    hfx_a, hfx_b = carry
-                    start = chunk_idx * chunk_size
+                def chunk_energy_from_start(start: Array) -> tuple[Array, Array]:
                     ao_chunk = self._take_grid_chunk(ao, start, chunk_size, axis=0)
                     nu_chunk = hfx_nu_grid_chunk_padded(
                         nu_source,
@@ -608,7 +605,17 @@ class NeuralXCProjectionMixin:
                         n_omega=1,
                         dtype=ao.dtype,
                     )[0]
-                    exx_a_chunk, exx_b_chunk = chunk_energy(ao_chunk, nu_chunk)
+                    return chunk_energy(ao_chunk, nu_chunk)
+
+                chunk_energy_from_start = jax.checkpoint(chunk_energy_from_start)
+
+                def body(
+                    carry: tuple[Array, Array],
+                    chunk_idx: Array,
+                ) -> tuple[tuple[Array, Array], None]:
+                    hfx_a, hfx_b = carry
+                    start = chunk_idx * chunk_size
+                    exx_a_chunk, exx_b_chunk = chunk_energy_from_start(start)
                     hfx_a = jax.lax.dynamic_update_slice(hfx_a, exx_a_chunk, (start,))
                     hfx_b = jax.lax.dynamic_update_slice(hfx_b, exx_b_chunk, (start,))
                     return (hfx_a, hfx_b), None

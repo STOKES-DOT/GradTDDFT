@@ -1231,8 +1231,7 @@ class ResponseMixin:
                     nu_chunk,
                 )
 
-            if not is_chunked_hfx_nu(nu_source):
-                chunk_contribution_from_start = jax.checkpoint(chunk_contribution_from_start)
+            chunk_contribution_from_start = jax.checkpoint(chunk_contribution_from_start)
 
             def body(
                 carry: tuple[Array, Array],
@@ -1874,8 +1873,7 @@ class ResponseMixin:
                         weights_chunk,
                     )
 
-                if not is_chunked_hfx_nu(nu_source):
-                    chunk_action_from_start = jax.checkpoint(chunk_action_from_start)
+                chunk_action_from_start = jax.checkpoint(chunk_action_from_start)
 
                 def action_body(
                     carry: tuple[Array, Array],
@@ -1926,8 +1924,7 @@ class ResponseMixin:
                     weights_chunk,
                 )
 
-            if not is_chunked_hfx_nu(nu_source):
-                chunk_diagonal_from_start = jax.checkpoint(chunk_diagonal_from_start)
+            chunk_diagonal_from_start = jax.checkpoint(chunk_diagonal_from_start)
 
             def diagonal_body(carry: Array, chunk_idx: Array) -> tuple[Array, None]:
                 start = chunk_idx * chunk_size
