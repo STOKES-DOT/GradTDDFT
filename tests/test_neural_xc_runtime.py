@@ -1965,6 +1965,15 @@ class _HFResponsiveChannelModel(nn.Module):
         return coeff.at[..., 1].set(hf_coeff)
 
 
+class _HFParametricResponsiveChannelModel(nn.Module):
+    @nn.compact
+    def __call__(self, inputs):
+        coeff = jnp.zeros(inputs.shape[:-1] + (2,), dtype=inputs.dtype)
+        scale = self.param("scale", nn.initializers.constant(0.25), ())
+        hf_coeff = scale + jnp.square(inputs[..., 0])
+        return coeff.at[..., 1].set(hf_coeff)
+
+
 class _PT2ResponsiveChannelModel(nn.Module):
     @nn.compact
     def __call__(self, inputs):
@@ -2435,6 +2444,58 @@ def test_chunked_low_memory_strict_hfx_response_matches_dense_path():
         dense_bound.nonlocal_response_diagonal(molecule),
         atol=1e-10,
     )
+
+
+def test_hdf5_chunked_low_memory_response_supports_jitted_param_grad(tmp_path):
+    h5py = pytest.importorskip("h5py")
+
+    molecule = _make_pt2_toy_molecule()
+    molecule.rep_tensor = jnp.zeros_like(molecule.rep_tensor)
+    molecule.nocc = 1
+    dense_nu = np.asarray(
+        [
+            [
+                [[0.7, 0.2], [0.2, 0.5]],
+                [[0.4, -0.1], [-0.1, 0.6]],
+            ],
+        ],
+        dtype=np.float64,
+    )
+    path = tmp_path / "refs.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("hfx_nu", data=dense_nu)
+    molecule.hfx_nu = None
+    molecule.hfx_local = None
+    molecule.hfx_nu_api = ChunkedHFXNu.from_hdf5_dataset(
+        str(path),
+        "hfx_nu",
+        chunk_size=1,
+    )
+    functional = NeuralXCFunctional(
+        model=_HFParametricResponsiveChannelModel(),
+        semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
+        input_feature_mode="enhanced",
+        hf_input_mode="total_only",
+        response_hf_mode="strict",
+        strict_hfx_response_mode="low_memory",
+        response_grid_chunk_size=1,
+        name="hf_strict_low_memory_response_hdf5_chunk_api",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(230), molecule)
+    amplitudes = jnp.asarray([[0.7]], dtype=jnp.float64)
+
+    @jax.jit
+    def objective(local_params):
+        bound = functional.bind_to_molecule_for_response(local_params, molecule)
+        return jnp.sum(bound.nonlocal_response_action(molecule, amplitudes))
+
+    value = objective(params)
+    grads = jax.jit(jax.grad(objective))(params)
+    leaves = jax.tree_util.tree_leaves(grads)
+
+    assert bool(jnp.isfinite(value))
+    assert leaves
+    assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in leaves)
 
 
 def test_low_memory_strict_hfx_response_does_not_pad_full_hfx_nu(monkeypatch):

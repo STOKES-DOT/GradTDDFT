@@ -22,7 +22,7 @@ from ..tddft.cisd import (
 )
 from .inputs import (
     has_hfx_nu_source,
-    hfx_nu_grid_chunk,
+    hfx_nu_grid_chunk_padded,
     hfx_nu_shape,
     hfx_nu_source,
     is_chunked_hfx_nu,
@@ -539,16 +539,18 @@ class NeuralXCBindingMixin:
                 "(nao, nao) or (2, nao, nao)."
             )
         if is_chunked_hfx_nu(nu_source):
-            vmat = jnp.zeros((ao.shape[1], ao.shape[1]), dtype=matrix_dtype)
             chunk_size = self._effective_response_grid_chunk_size(int(ngrid))
-            for start in range(0, int(ngrid), chunk_size):
-                end = min(start + chunk_size, int(ngrid))
-                ao_chunk = ao[start:end]
-                grad_chunk = grad[start:end]
-                nu_chunk = hfx_nu_grid_chunk(
+            n_chunks = (int(ngrid) + chunk_size - 1) // chunk_size
+            zero = jnp.zeros((ao.shape[1], ao.shape[1]), dtype=matrix_dtype)
+
+            def body(carry: Array, chunk_idx: Array) -> tuple[Array, None]:
+                start = chunk_idx * chunk_size
+                ao_chunk = self._take_grid_chunk(ao, start, chunk_size, axis=0)
+                grad_chunk = self._take_grid_chunk(grad, start, chunk_size, axis=0)
+                nu_chunk = hfx_nu_grid_chunk_padded(
                     nu_source,
                     start,
-                    end,
+                    chunk_size,
                     n_omega=n_grad_channels,
                     dtype=matrix_dtype,
                 )
@@ -565,12 +567,15 @@ class NeuralXCBindingMixin:
                     precision=Precision.HIGHEST,
                 )
                 aow = -0.5 * fxx * jnp.transpose(grad_chunk, (1, 0))[:, :, None]
-                vmat = vmat + jnp.einsum(
+                vmat_chunk = jnp.einsum(
                     "gp,wgq->pq",
                     ao_chunk,
                     aow,
                     precision=Precision.HIGHEST,
                 )
+                return carry + vmat_chunk, None
+
+            vmat, _ = jax.lax.scan(body, zero, jnp.arange(n_chunks))
         else:
             nu = jnp.asarray(nu_source, dtype=matrix_dtype)[:n_grad_channels]
             e = jnp.einsum("gp,pq->gq", ao, density_half, precision=Precision.HIGHEST)

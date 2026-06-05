@@ -1209,7 +1209,7 @@ class ResponseMixin:
                 if is_chunked_hfx_nu(nu_source):
                     nu_chunk = hfx_nu_grid_chunk_padded(
                         nu_source,
-                        int(start),
+                        start,
                         chunk_size,
                         n_omega=n_hfx,
                         dtype=point_variables.dtype,
@@ -1231,31 +1231,23 @@ class ResponseMixin:
                     nu_chunk,
                 )
 
-            if is_chunked_hfx_nu(nu_source):
-                matrix_a = zero
-                matrix_b = zero
-                for chunk_idx in range(n_chunks):
-                    start = chunk_idx * chunk_size
-                    matrix_a_chunk, matrix_b_chunk = chunk_contribution_from_start(start)
-                    matrix_a = matrix_a + matrix_a_chunk
-                    matrix_b = matrix_b + matrix_b_chunk
-            else:
+            if not is_chunked_hfx_nu(nu_source):
                 chunk_contribution_from_start = jax.checkpoint(chunk_contribution_from_start)
 
-                def body(
-                    carry: tuple[Array, Array],
-                    chunk_idx: Array,
-                ) -> tuple[tuple[Array, Array], None]:
-                    start = chunk_idx * chunk_size
-                    matrix_a_chunk, matrix_b_chunk = chunk_contribution_from_start(start)
-                    matrix_a, matrix_b = carry
-                    return (matrix_a + matrix_a_chunk, matrix_b + matrix_b_chunk), None
+            def body(
+                carry: tuple[Array, Array],
+                chunk_idx: Array,
+            ) -> tuple[tuple[Array, Array], None]:
+                start = chunk_idx * chunk_size
+                matrix_a_chunk, matrix_b_chunk = chunk_contribution_from_start(start)
+                matrix_a, matrix_b = carry
+                return (matrix_a + matrix_a_chunk, matrix_b + matrix_b_chunk), None
 
-                (matrix_a, matrix_b), _ = jax.lax.scan(
-                    body,
-                    (zero, zero),
-                    jnp.arange(n_chunks),
-                )
+            (matrix_a, matrix_b), _ = jax.lax.scan(
+                body,
+                (zero, zero),
+                jnp.arange(n_chunks),
+            )
             matrix_a = jnp.nan_to_num(matrix_a, nan=0.0, posinf=0.0, neginf=0.0)
             matrix_b = jnp.nan_to_num(matrix_b, nan=0.0, posinf=0.0, neginf=0.0)
             return (
@@ -1815,7 +1807,7 @@ class ResponseMixin:
                 if is_chunked_hfx_nu(nu_source):
                     nu_chunk = hfx_nu_grid_chunk_padded(
                         nu_source,
-                        int(start),
+                        start,
                         chunk_size,
                         n_omega=n_hfx,
                         dtype=point_variables.dtype,
@@ -1882,31 +1874,23 @@ class ResponseMixin:
                         weights_chunk,
                     )
 
-                if is_chunked_hfx_nu(nu_source):
-                    action_a = zero_action
-                    action_b = zero_action
-                    for chunk_idx in range(n_chunks):
-                        start = chunk_idx * chunk_size
-                        delta_a, delta_b = chunk_action_from_start(start)
-                        action_a = action_a + delta_a
-                        action_b = action_b + delta_b
-                else:
+                if not is_chunked_hfx_nu(nu_source):
                     chunk_action_from_start = jax.checkpoint(chunk_action_from_start)
 
-                    def action_body(
-                        carry: tuple[Array, Array],
-                        chunk_idx: Array,
-                    ) -> tuple[tuple[Array, Array], None]:
-                        start = chunk_idx * chunk_size
-                        delta_a, delta_b = chunk_action_from_start(start)
-                        action_a, action_b = carry
-                        return (action_a + delta_a, action_b + delta_b), None
+                def action_body(
+                    carry: tuple[Array, Array],
+                    chunk_idx: Array,
+                ) -> tuple[tuple[Array, Array], None]:
+                    start = chunk_idx * chunk_size
+                    delta_a, delta_b = chunk_action_from_start(start)
+                    action_a, action_b = carry
+                    return (action_a + delta_a, action_b + delta_b), None
 
-                    (action_a, action_b), _ = jax.lax.scan(
-                        action_body,
-                        (zero_action, zero_action),
-                        jnp.arange(n_chunks),
-                    )
+                (action_a, action_b), _ = jax.lax.scan(
+                    action_body,
+                    (zero_action, zero_action),
+                    jnp.arange(n_chunks),
+                )
                 action_a = jnp.nan_to_num(action_a, nan=0.0, posinf=0.0, neginf=0.0)
                 action_b = jnp.nan_to_num(action_b, nan=0.0, posinf=0.0, neginf=0.0)
                 return action_a.reshape(output_shape), action_b.reshape(output_shape), None
@@ -1942,23 +1926,18 @@ class ResponseMixin:
                     weights_chunk,
                 )
 
-            if is_chunked_hfx_nu(nu_source):
-                diagonal = zero_diagonal
-                for chunk_idx in range(n_chunks):
-                    start = chunk_idx * chunk_size
-                    diagonal = diagonal + chunk_diagonal_from_start(start)
-            else:
+            if not is_chunked_hfx_nu(nu_source):
                 chunk_diagonal_from_start = jax.checkpoint(chunk_diagonal_from_start)
 
-                def diagonal_body(carry: Array, chunk_idx: Array) -> tuple[Array, None]:
-                    start = chunk_idx * chunk_size
-                    return carry + chunk_diagonal_from_start(start), None
+            def diagonal_body(carry: Array, chunk_idx: Array) -> tuple[Array, None]:
+                start = chunk_idx * chunk_size
+                return carry + chunk_diagonal_from_start(start), None
 
-                diagonal, _ = jax.lax.scan(
-                    diagonal_body,
-                    zero_diagonal,
-                    jnp.arange(n_chunks),
-                )
+            diagonal, _ = jax.lax.scan(
+                diagonal_body,
+                zero_diagonal,
+                jnp.arange(n_chunks),
+            )
             diagonal = jnp.nan_to_num(diagonal, nan=0.0, posinf=0.0, neginf=0.0)
             return None, None, diagonal
 

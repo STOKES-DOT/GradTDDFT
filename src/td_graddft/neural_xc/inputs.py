@@ -272,6 +272,7 @@ class ChunkedHFXNu:
     shape: tuple[int, int, int, int]
     chunk_size: int
     _grid_chunk_fn: Any
+    _grid_chunk_padded_fn: Any | None = None
 
     @property
     def ndim(self) -> int:
@@ -286,13 +287,31 @@ class ChunkedHFXNu:
                 f"got {array.shape}."
             )
 
+        shape = tuple(int(dim) for dim in array.shape)
+
         def grid_chunk(start: int, stop: int) -> np.ndarray:
             return np.asarray(array[:, int(start) : int(stop)])
 
+        def grid_chunk_padded(start: Any, chunk_size: int) -> jnp.ndarray:
+            chunk_size_i = int(chunk_size)
+            dense = jnp.asarray(array)
+            indices = jnp.asarray(start, dtype=jnp.int32) + jnp.arange(
+                chunk_size_i,
+                dtype=jnp.int32,
+            )
+            chunk = jnp.take(dense, indices, axis=1, mode="clip")
+            valid = indices < int(shape[1])
+            return jnp.where(
+                valid.reshape((1, chunk_size_i, 1, 1)),
+                chunk,
+                jnp.zeros_like(chunk),
+            )
+
         return cls(
-            shape=tuple(int(dim) for dim in array.shape),
+            shape=shape,
             chunk_size=int(chunk_size),
             _grid_chunk_fn=grid_chunk,
+            _grid_chunk_padded_fn=grid_chunk_padded,
         )
 
     @classmethod
@@ -342,10 +361,37 @@ class ChunkedHFXNu:
                 np.asarray(stop_i, dtype=np.int32),
             )
 
+        def grid_chunk_padded(start: Any, chunk_size: int) -> jnp.ndarray:
+            chunk_size_i = int(chunk_size)
+            chunk_shape = (shape[0], chunk_size_i, shape[2], shape[3])
+
+            def read_chunk(start_arg: Any) -> np.ndarray:
+                read_start = int(np.asarray(start_arg))
+                output = np.zeros(chunk_shape, dtype=callback_dtype)
+                if read_start >= shape[1] or chunk_size_i <= 0:
+                    return output
+                read_stop = min(read_start + chunk_size_i, shape[1])
+                if read_stop <= read_start:
+                    return output
+                with h5py.File(filename, "r") as handle:
+                    data = np.asarray(
+                        handle[dataset_path][:, read_start:read_stop],
+                        dtype=callback_dtype,
+                    )
+                output[:, : data.shape[1]] = data
+                return output
+
+            return jax.pure_callback(
+                read_chunk,
+                jax.ShapeDtypeStruct(chunk_shape, callback_dtype),
+                jnp.asarray(start, dtype=jnp.int32),
+            )
+
         return cls(
             shape=shape,
             chunk_size=int(chunk_size),
             _grid_chunk_fn=grid_chunk,
+            _grid_chunk_padded_fn=grid_chunk_padded,
         )
 
     @classmethod
@@ -388,14 +434,49 @@ class ChunkedHFXNu:
                 chunks.append(np.asarray(nu))
             return np.stack(chunks, axis=0)
 
+        callback_dtype = np.dtype(jax.dtypes.canonicalize_dtype(np.float64))
+
+        def grid_chunk_padded(start: Any, chunk_size: int) -> jnp.ndarray:
+            chunk_size_i = int(chunk_size)
+            chunk_shape = (shape[0], chunk_size_i, shape[2], shape[3])
+
+            def read_chunk(start_arg: Any) -> np.ndarray:
+                read_start = int(np.asarray(start_arg))
+                read_stop = min(read_start + chunk_size_i, shape[1])
+                output = np.zeros(chunk_shape, dtype=callback_dtype)
+                if read_stop <= read_start:
+                    return output
+                data = np.asarray(grid_chunk(read_start, read_stop), dtype=callback_dtype)
+                output[:, : data.shape[1]] = data
+                return output
+
+            return jax.pure_callback(
+                read_chunk,
+                jax.ShapeDtypeStruct(chunk_shape, callback_dtype),
+                jnp.asarray(start, dtype=jnp.int32),
+            )
+
         return cls(
             shape=shape,
             chunk_size=int(chunk_size),
             _grid_chunk_fn=grid_chunk,
+            _grid_chunk_padded_fn=grid_chunk_padded,
         )
 
     def grid_chunk(self, start: int, stop: int) -> Any:
         return self._grid_chunk_fn(int(start), int(stop))
+
+    def grid_chunk_padded(self, start: Any, chunk_size: int) -> Any:
+        chunk_size_i = int(chunk_size)
+        if self._grid_chunk_padded_fn is not None:
+            return self._grid_chunk_padded_fn(start, chunk_size_i)
+        start_i = int(start)
+        stop_i = min(start_i + chunk_size_i, self.shape[1])
+        chunk = jnp.asarray(self.grid_chunk(start_i, stop_i))
+        pad = chunk_size_i - int(chunk.shape[1])
+        if pad <= 0:
+            return chunk
+        return jnp.pad(chunk, ((0, 0), (0, pad), (0, 0), (0, 0)))
 
     def materialize(self) -> np.ndarray:
         chunks = [
@@ -466,8 +547,13 @@ def hfx_nu_grid_chunk_padded(
     dtype: Any | None = None,
 ) -> jnp.ndarray:
     _, ngrids, _, _ = hfx_nu_shape(source)
-    start_i = int(start)
     chunk_size_i = int(chunk_size)
+    if is_chunked_hfx_nu(source):
+        chunk = source.grid_chunk_padded(start, chunk_size_i)
+        if n_omega is not None:
+            chunk = chunk[: int(n_omega)]
+        return jnp.asarray(chunk, dtype=dtype)
+    start_i = int(start)
     stop_i = min(start_i + chunk_size_i, ngrids)
     chunk = hfx_nu_grid_chunk(
         source,
