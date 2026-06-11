@@ -13,7 +13,7 @@ from jaxtyping import Array, PyTree
 
 from ..data.integrals import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix
 from ..neural_xc.inputs import (
-    hfx_nu_grid_chunk,
+    hfx_nu_grid_chunk_padded,
     hfx_nu_shape,
     hfx_nu_source,
     is_chunked_hfx_nu,
@@ -563,14 +563,19 @@ def _restricted_hfx_features_from_nu(
     density_half = 0.5 * density
     if is_chunked_hfx_nu(nu_cache):
         chunk_size = max(1, min(int(getattr(nu_cache, "chunk_size", ngrid)), ngrid))
-        exx_chunks = []
-        for start in range(0, ngrid, chunk_size):
-            end = min(start + chunk_size, ngrid)
-            ao_chunk = ao[start:end]
-            nu_chunk = hfx_nu_grid_chunk(
+        n_chunks = (ngrid + chunk_size - 1) // chunk_size
+        padded = n_chunks * chunk_size
+        zero = jnp.zeros((n_omega, padded), dtype=ao.dtype)
+
+        def exx_chunk_from_start(start: Array) -> Array:
+            indices = start + jnp.arange(chunk_size)
+            ao_chunk = jnp.take(ao, indices, axis=0, mode="clip")
+            valid = indices < ngrid
+            ao_chunk = jnp.where(valid[:, None], ao_chunk, jnp.zeros_like(ao_chunk))
+            nu_chunk = hfx_nu_grid_chunk_padded(
                 nu_cache,
                 start,
-                end,
+                chunk_size,
                 n_omega=n_omega,
                 dtype=ao.dtype,
             )
@@ -586,16 +591,22 @@ def _restricted_hfx_features_from_nu(
                 e_chunk,
                 precision=Precision.HIGHEST,
             )
-            exx_chunks.append(
-                -0.5
-                * jnp.einsum(
-                    "gb,wgb->wg",
-                    e_chunk,
-                    fxx_chunk,
-                    precision=Precision.HIGHEST,
-                )
+            exx_chunk = -0.5 * jnp.einsum(
+                "gb,wgb->wg",
+                e_chunk,
+                fxx_chunk,
+                precision=Precision.HIGHEST,
             )
-        exx = jnp.concatenate(exx_chunks, axis=1)
+
+        exx_chunk_from_start = jax.checkpoint(exx_chunk_from_start)
+
+        def body(carry: Array, chunk_idx: Array) -> tuple[Array, None]:
+            start = chunk_idx * chunk_size
+            exx_chunk = exx_chunk_from_start(start)
+            return jax.lax.dynamic_update_slice(carry, exx_chunk, (0, start)), None
+
+        exx, _ = jax.lax.scan(body, zero, jnp.arange(n_chunks))
+        exx = exx[:, :ngrid]
     else:
         nu = jnp.asarray(nu_cache, dtype=ao.dtype)
         e = jnp.einsum(

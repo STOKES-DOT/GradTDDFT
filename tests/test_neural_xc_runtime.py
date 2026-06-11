@@ -201,6 +201,35 @@ def test_chunked_hfx_nu_matches_dense_hf_grid_contribution():
         assert jnp.allclose(chunked_part, dense_part)
 
 
+def test_hf_grid_contribution_prefers_cached_hfx_local_over_chunked_nu():
+    class RaisingChunkedNu:
+        shape = (1, 2, 2, 2)
+        chunk_size = 1
+
+        def grid_chunk(self, start, stop):
+            raise AssertionError("hfx_local should avoid reading hfx_nu chunks")
+
+        def grid_chunk_padded(self, start, chunk_size):
+            raise AssertionError("hfx_local should avoid reading padded hfx_nu chunks")
+
+    molecule = _make_toy_molecule()
+    molecule.hfx_nu = None
+    molecule.hfx_nu_api = RaisingChunkedNu()
+    expected_a = molecule.hfx_local[0, :, 0]
+    expected_b = molecule.hfx_local[1, :, 0]
+
+    functional = make_neural_xc_functional(
+        semilocal_xc=("gga_x_pbe", "gga_c_pbe"),
+        hidden_dims=(8,),
+    )
+
+    total, hfx_a, hfx_b = functional.projected_hf_grid_contribution_components(molecule)
+
+    assert jnp.allclose(hfx_a, expected_a)
+    assert jnp.allclose(hfx_b, expected_b)
+    assert jnp.allclose(total, expected_a + expected_b)
+
+
 def test_chunked_hfx_nu_matches_dense_hfx_fock_contraction():
     dense_molecule = _make_toy_molecule()
     dense_nu = _toy_hfx_nu_cache()
@@ -2435,6 +2464,58 @@ def test_chunked_low_memory_strict_hfx_response_matches_dense_path():
         dense_bound.nonlocal_response_diagonal(molecule),
         atol=1e-10,
     )
+
+
+def test_hdf5_chunked_low_memory_response_supports_jitted_param_grad(tmp_path):
+    h5py = pytest.importorskip("h5py")
+
+    molecule = _make_pt2_toy_molecule()
+    molecule.rep_tensor = jnp.zeros_like(molecule.rep_tensor)
+    molecule.nocc = 1
+    dense_nu = np.asarray(
+        [
+            [
+                [[0.7, 0.2], [0.2, 0.5]],
+                [[0.4, -0.1], [-0.1, 0.6]],
+            ],
+        ],
+        dtype=np.float64,
+    )
+    path = tmp_path / "refs.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("hfx_nu", data=dense_nu)
+    molecule.hfx_nu = None
+    molecule.hfx_local = None
+    molecule.hfx_nu_api = ChunkedHFXNu.from_hdf5_dataset(
+        str(path),
+        "hfx_nu",
+        chunk_size=1,
+    )
+    functional = NeuralXCFunctional(
+        model=_HFParametricResponsiveChannelModel(),
+        semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
+        input_feature_mode="enhanced",
+        hf_input_mode="total_only",
+        response_hf_mode="strict",
+        strict_hfx_response_mode="low_memory",
+        response_grid_chunk_size=1,
+        name="hf_strict_low_memory_response_hdf5_chunk_api",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(230), molecule)
+    amplitudes = jnp.asarray([[0.7]], dtype=jnp.float64)
+
+    @jax.jit
+    def objective(local_params):
+        bound = functional.bind_to_molecule_for_response(local_params, molecule)
+        return jnp.sum(bound.nonlocal_response_action(molecule, amplitudes))
+
+    value = objective(params)
+    grads = jax.jit(jax.grad(objective))(params)
+    leaves = jax.tree_util.tree_leaves(grads)
+
+    assert bool(jnp.isfinite(value))
+    assert leaves
+    assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in leaves)
 
 
 def test_low_memory_strict_hfx_response_does_not_pad_full_hfx_nu(monkeypatch):
