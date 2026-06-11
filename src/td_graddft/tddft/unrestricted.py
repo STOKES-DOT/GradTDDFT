@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, fields, replace
 from typing import Any
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -10,10 +12,9 @@ from jax.lax import Precision
 from jaxtyping import Array
 
 from .cisd import unrestricted_cisd_second_order_correction
+from .eigensolvers import davidson_lowest_tdhf, davidson_lowest_symmetric, _solver_dtype
 from ._utils import (
-    _casida_metric_factor,
     _resolve_xc_functional,
-    _symmetrize,
     _transition_densities_on_grid,
 )
 
@@ -35,46 +36,12 @@ def _pytree_dataclass(cls):
 
 @_pytree_dataclass
 @dataclass(frozen=True)
-class UnrestrictedResponseMatrices:
-    """Spin-block A/B matrices for unrestricted TDDFT response."""
-
-    orbital_energy_differences_alpha: Array
-    orbital_energy_differences_beta: Array
-    a_aa: Array
-    a_ab: Array
-    a_ba: Array
-    a_bb: Array
-    b_aa: Array
-    b_ab: Array
-    b_ba: Array
-    b_bb: Array
-    a_matrix: Array
-    b_matrix: Array
-
-
-@_pytree_dataclass
-@dataclass(frozen=True)
-class UnrestrictedTDAMatrices:
-    """Spin-block TDA response matrix for unrestricted references."""
-
-    orbital_energy_differences_alpha: Array
-    orbital_energy_differences_beta: Array
-    a_aa: Array
-    a_ab: Array
-    a_ba: Array
-    a_bb: Array
-    a_matrix: Array
-
-
-@_pytree_dataclass
-@dataclass(frozen=True)
 class UnrestrictedTDAResult:
     """Excitation energies and alpha/beta amplitudes from unrestricted TDA."""
 
     excitation_energies: Array
     amplitudes_alpha: Array
     amplitudes_beta: Array
-    a_matrix: Array
     posthoc_correction: Array | None = None
 
 
@@ -88,10 +55,21 @@ class UnrestrictedTDDFTResult:
     x_amplitudes_beta: Array
     y_amplitudes_alpha: Array
     y_amplitudes_beta: Array
-    a_matrix: Array
-    b_matrix: Array
-    casida_matrix: Array
     posthoc_correction: Array | None = None
+
+
+@dataclass(frozen=True)
+class _UnrestrictedResponseOperatorData:
+    orbital_energy_differences_alpha: Array
+    orbital_energy_differences_beta: Array
+    a_aa: Array
+    a_ab: Array
+    a_ba: Array
+    a_bb: Array
+    b_aa: Array
+    b_ab: Array
+    b_ba: Array
+    b_bb: Array
 
 
 def _unrestricted_orbital_data(
@@ -148,23 +126,6 @@ def _unrestricted_orbital_data(
             "Need at least one occupied-virtual excitation channel across alpha/beta spins."
         )
     return orbo_a, orbv_a, orbo_b, orbv_b, de_a, de_b
-
-
-def _flatten_spin_blocks(
-    aa: Array,
-    ab: Array,
-    ba: Array,
-    bb: Array,
-) -> Array:
-    naa = aa.shape[0] * aa.shape[1]
-    nbb = bb.shape[0] * bb.shape[1]
-    flat_aa = aa.reshape(naa, naa)
-    flat_ab = ab.reshape(naa, nbb)
-    flat_ba = ba.reshape(nbb, naa)
-    flat_bb = bb.reshape(nbb, nbb)
-    upper = jnp.concatenate([flat_aa, flat_ab], axis=1)
-    lower = jnp.concatenate([flat_ba, flat_bb], axis=1)
-    return jnp.concatenate([upper, lower], axis=0)
 
 
 def _spin_densities_on_grid(molecule: Any) -> tuple[Array, Array]:
@@ -414,15 +375,13 @@ def _build_unrestricted_response_blocks(
     return de_a, de_b, a_aa, a_ab, a_ba, a_bb, b_aa, b_ab, b_ba, b_bb
 
 
-def build_unrestricted_response_matrices(
+def _build_unrestricted_response_operator_data(
     molecule: Any,
     xc_functional: Any | None = None,
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
-) -> UnrestrictedResponseMatrices:
-    """Build unrestricted spin-block A/B TDDFT response matrices in pure JAX."""
-
+) -> _UnrestrictedResponseOperatorData:
     resolved_xc = _resolve_xc_functional(molecule, xc_functional, xc_params)
     (
         de_a,
@@ -440,9 +399,7 @@ def build_unrestricted_response_matrices(
         resolved_xc,
         occupation_tolerance=occupation_tolerance,
     )
-    flat_a = _symmetrize(_flatten_spin_blocks(a_aa, a_ab, a_ba, a_bb))
-    flat_b = _symmetrize(_flatten_spin_blocks(b_aa, b_ab, b_ba, b_bb))
-    return UnrestrictedResponseMatrices(
+    return _UnrestrictedResponseOperatorData(
         orbital_energy_differences_alpha=de_a,
         orbital_energy_differences_beta=de_b,
         a_aa=a_aa,
@@ -453,112 +410,268 @@ def build_unrestricted_response_matrices(
         b_ab=b_ab,
         b_ba=b_ba,
         b_bb=b_bb,
-        a_matrix=flat_a,
-        b_matrix=flat_b,
     )
 
 
-def build_unrestricted_tda_matrices(
+def _unrestricted_dimensions(
+    data: _UnrestrictedResponseOperatorData,
+) -> tuple[int, int, int, int, int]:
+    nocca, nvira = data.orbital_energy_differences_alpha.shape
+    noccb, nvirb = data.orbital_energy_differences_beta.shape
+    naa = int(nocca * nvira)
+    nbb = int(noccb * nvirb)
+    return int(nocca), int(nvira), int(noccb), int(nvirb), int(naa + nbb)
+
+
+def _split_unrestricted_rows(
+    data: _UnrestrictedResponseOperatorData,
+    rows: Array,
+) -> tuple[Array, Array]:
+    nocca, nvira, noccb, nvirb, dim = _unrestricted_dimensions(data)
+    rows = jnp.asarray(rows).reshape(-1, dim)
+    batch = int(rows.shape[0])
+    naa = int(nocca * nvira)
+    alpha = rows[:, :naa].reshape(batch, nocca, nvira)
+    beta = rows[:, naa:].reshape(batch, noccb, nvirb)
+    return alpha, beta
+
+
+def _join_unrestricted_rows(alpha: Array, beta: Array) -> Array:
+    batch = int(alpha.shape[0])
+    return jnp.concatenate(
+        [
+            alpha.reshape(batch, -1),
+            beta.reshape(batch, -1),
+        ],
+        axis=-1,
+    )
+
+
+def _block_diagonal(block: Array) -> Array:
+    dim = int(block.shape[0] * block.shape[1])
+    return jnp.diag(block.reshape(dim, dim))
+
+
+def _unrestricted_a_action(
+    data: _UnrestrictedResponseOperatorData,
+    rows: Array,
+) -> Array:
+    alpha, beta = _split_unrestricted_rows(data, rows)
+    out_alpha = jnp.einsum(
+        "iajb,njb->nia",
+        data.a_aa,
+        alpha,
+        precision=Precision.HIGHEST,
+    ) + jnp.einsum(
+        "iajb,njb->nia",
+        data.a_ab,
+        beta,
+        precision=Precision.HIGHEST,
+    )
+    out_beta = jnp.einsum(
+        "iajb,njb->nia",
+        data.a_ba,
+        alpha,
+        precision=Precision.HIGHEST,
+    ) + jnp.einsum(
+        "iajb,njb->nia",
+        data.a_bb,
+        beta,
+        precision=Precision.HIGHEST,
+    )
+    return _join_unrestricted_rows(out_alpha, out_beta)
+
+
+def _unrestricted_b_action(
+    data: _UnrestrictedResponseOperatorData,
+    rows: Array,
+) -> Array:
+    alpha, beta = _split_unrestricted_rows(data, rows)
+    out_alpha = jnp.einsum(
+        "iajb,njb->nia",
+        data.b_aa,
+        alpha,
+        precision=Precision.HIGHEST,
+    ) + jnp.einsum(
+        "iajb,njb->nia",
+        data.b_ab,
+        beta,
+        precision=Precision.HIGHEST,
+    )
+    out_beta = jnp.einsum(
+        "iajb,njb->nia",
+        data.b_ba,
+        alpha,
+        precision=Precision.HIGHEST,
+    ) + jnp.einsum(
+        "iajb,njb->nia",
+        data.b_bb,
+        beta,
+        precision=Precision.HIGHEST,
+    )
+    return _join_unrestricted_rows(out_alpha, out_beta)
+
+
+def _unrestricted_tda_diagonal(data: _UnrestrictedResponseOperatorData) -> Array:
+    return jnp.concatenate(
+        [
+            _block_diagonal(data.a_aa),
+            _block_diagonal(data.a_bb),
+        ],
+        axis=0,
+    )
+
+
+def build_unrestricted_tda_operator(
     molecule: Any,
     xc_functional: Any | None = None,
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
-) -> UnrestrictedTDAMatrices:
-    """Build unrestricted spin-block TDA response matrices in pure JAX."""
-
-    resp = build_unrestricted_response_matrices(
+) -> tuple[Callable[[Array], Array], Array, Array, Array]:
+    data = _build_unrestricted_response_operator_data(
         molecule,
         xc_functional,
         xc_params=xc_params,
         occupation_tolerance=occupation_tolerance,
     )
-    return UnrestrictedTDAMatrices(
-        orbital_energy_differences_alpha=resp.orbital_energy_differences_alpha,
-        orbital_energy_differences_beta=resp.orbital_energy_differences_beta,
-        a_aa=resp.a_aa,
-        a_ab=resp.a_ab,
-        a_ba=resp.a_ba,
-        a_bb=resp.a_bb,
-        a_matrix=resp.a_matrix,
+    diagonal = _unrestricted_tda_diagonal(data)
+
+    def vind(rows: Array) -> Array:
+        return _unrestricted_a_action(data, rows)
+
+    return (
+        vind,
+        diagonal,
+        data.orbital_energy_differences_alpha,
+        data.orbital_energy_differences_beta,
     )
 
 
-def solve_unrestricted_tda(
-    matrices: UnrestrictedTDAMatrices,
+def build_unrestricted_tdhf_operator(
+    molecule: Any,
+    xc_functional: Any | None = None,
     *,
-    nstates: int | None = None,
-    excitation_threshold: float = 1e-7,
-) -> UnrestrictedTDAResult:
-    """Solve unrestricted TDA from spin-block response matrices."""
+    xc_params: Any | None = None,
+    occupation_tolerance: float = 1e-8,
+) -> tuple[Callable[[Array], Array], Array, Array]:
+    data = _build_unrestricted_response_operator_data(
+        molecule,
+        xc_functional,
+        xc_params=xc_params,
+        occupation_tolerance=occupation_tolerance,
+    )
+    _, _, _, _, dim = _unrestricted_dimensions(data)
 
-    de_a = matrices.orbital_energy_differences_alpha
-    de_b = matrices.orbital_energy_differences_beta
+    def vind(rows: Array) -> Array:
+        rows = jnp.asarray(rows).reshape(-1, 2 * dim)
+        x = rows[:, :dim]
+        y = rows[:, dim:]
+        upper = _unrestricted_a_action(data, x) + _unrestricted_b_action(data, y)
+        lower = -(_unrestricted_b_action(data, x) + _unrestricted_a_action(data, y))
+        return jnp.concatenate([upper, lower], axis=-1)
+
+    return (
+        vind,
+        data.orbital_energy_differences_alpha,
+        data.orbital_energy_differences_beta,
+    )
+
+
+def _is_traced_convergence_flag(value: Any) -> bool:
+    return isinstance(value, jax.core.Tracer)
+
+
+def _finalize_unrestricted_tda_result(
+    eigvals: Array,
+    eigvecs: Array,
+    *,
+    nroots: int,
+    excitation_threshold: float,
+    de_a: Array,
+    de_b: Array,
+) -> UnrestrictedTDAResult:
     nocca, nvira = de_a.shape
     noccb, nvirb = de_b.shape
-    naa = nocca * nvira
-
-    eigvals, eigvecs = jnp.linalg.eigh(_symmetrize(matrices.a_matrix))
-    dim = int(eigvals.shape[0])
-    nroots = dim if nstates is None else min(int(nstates), dim)
+    naa = int(nocca * nvira)
     valid = eigvals > excitation_threshold
     order = jnp.argsort(jnp.where(valid, eigvals, jnp.inf))
     keep = order[:nroots]
-    keep_mask = valid[keep]
-
-    energies = jnp.where(keep_mask, eigvals[keep], 0.0)
-    amps = eigvecs[:, keep].T
-    amps = amps * keep_mask[:, None]
+    mask = valid[keep]
+    energies = jnp.where(mask, eigvals[keep], 0.0)
+    amps = eigvecs[:, keep].T * mask[:, None]
     amplitudes_alpha = amps[:, :naa].reshape(nroots, nocca, nvira)
     amplitudes_beta = amps[:, naa:].reshape(nroots, noccb, nvirb)
     return UnrestrictedTDAResult(
         excitation_energies=energies,
         amplitudes_alpha=amplitudes_alpha,
         amplitudes_beta=amplitudes_beta,
-        a_matrix=matrices.a_matrix,
     )
 
 
-def solve_unrestricted_casida(
-    matrices: UnrestrictedResponseMatrices,
+def solve_unrestricted_tda_from_operator(
+    de_a: Array,
+    de_b: Array,
+    vind_rows: Callable[[Array], Array],
+    diagonal: Array,
     *,
     nstates: int | None = None,
     excitation_threshold: float = 1e-7,
-    matrix_eps: float = 1e-10,
-) -> UnrestrictedTDDFTResult:
-    """Solve unrestricted Casida TDDFT equation from A/B response matrices."""
+    davidson_tol: float = 1e-6,
+    davidson_max_iter: int = 60,
+    davidson_max_subspace: int | None = None,
+) -> UnrestrictedTDAResult:
+    dim = int(jnp.asarray(diagonal).size)
+    nroots = dim if nstates is None else min(int(nstates), dim)
+    eigvals, eigvecs, converged = davidson_lowest_symmetric(
+        lambda vectors: vind_rows(jnp.asarray(vectors).T).T,
+        nroots=nroots,
+        size=dim,
+        diag=jnp.asarray(diagonal).reshape(dim),
+        tol=davidson_tol,
+        max_iter=davidson_max_iter,
+        max_subspace=davidson_max_subspace,
+    )
+    if not _is_traced_convergence_flag(converged) and not bool(converged):
+        raise RuntimeError("Davidson unrestricted TDA solver did not converge.")
+    eigvecs = jax.lax.stop_gradient(eigvecs)
+    av = vind_rows(eigvecs.T).T
+    eigvals = jnp.sum(eigvecs * av, axis=0) / jnp.maximum(
+        jnp.sum(eigvecs * eigvecs, axis=0),
+        jnp.asarray(1e-30, dtype=eigvecs.dtype),
+    )
+    return _finalize_unrestricted_tda_result(
+        eigvals,
+        eigvecs,
+        nroots=nroots,
+        excitation_threshold=excitation_threshold,
+        de_a=de_a,
+        de_b=de_b,
+    )
 
-    de_a = matrices.orbital_energy_differences_alpha
-    de_b = matrices.orbital_energy_differences_beta
+
+def _finalize_unrestricted_casida_result(
+    w: Array,
+    x_vecs: Array,
+    y_vecs: Array,
+    *,
+    nroots: int,
+    excitation_threshold: float,
+    matrix_eps: float,
+    de_a: Array,
+    de_b: Array,
+) -> UnrestrictedTDDFTResult:
     nocca, nvira = de_a.shape
     noccb, nvirb = de_b.shape
-    naa = nocca * nvira
-
-    flat_a = _symmetrize(matrices.a_matrix)
-    flat_b = _symmetrize(matrices.b_matrix)
-    a_plus_b = _symmetrize(flat_a + flat_b)
-    a_minus_b = _symmetrize(flat_a - flat_b)
-    metric_factor = _casida_metric_factor(a_minus_b, matrix_eps)
-    casida_matrix = _symmetrize(metric_factor.T.conj() @ a_plus_b @ metric_factor)
-
-    w2, vecs = jnp.linalg.eigh(casida_matrix)
-    dim = int(w2.shape[0])
-    nroots = dim if nstates is None else min(int(nstates), dim)
-    valid = w2 > excitation_threshold**2
-    order = jnp.argsort(jnp.where(valid, w2, jnp.inf))
+    naa = int(nocca * nvira)
+    valid = w > excitation_threshold
+    order = jnp.argsort(jnp.where(valid, w, jnp.inf))
     keep = order[:nroots]
     keep_mask = valid[keep]
 
-    w = jnp.sqrt(jnp.maximum(w2[keep], 0.0))
-    w = jnp.where(keep_mask, w, 0.0)
-    f_vectors = vecs[:, keep]
-    f_vectors = f_vectors * keep_mask[jnp.newaxis, :]
-    x_plus_y = metric_factor @ f_vectors
-    safe_w = jnp.where(keep_mask, w, 1.0)
-    x_minus_y = (a_plus_b @ x_plus_y) / safe_w[jnp.newaxis, :]
-
-    x = 0.5 * (x_plus_y + x_minus_y)
-    y = 0.5 * (x_plus_y - x_minus_y)
+    energies = jnp.where(keep_mask, w[keep], 0.0)
+    x = x_vecs[:, keep]
+    y = y_vecs[:, keep]
     x = x * keep_mask[jnp.newaxis, :]
     y = y * keep_mask[jnp.newaxis, :]
     norm = jnp.sum(jnp.abs(x) ** 2, axis=0) - jnp.sum(jnp.abs(y) ** 2, axis=0)
@@ -571,14 +684,70 @@ def solve_unrestricted_casida(
     y_alpha = y[:naa, :].T.reshape(nroots, nocca, nvira)
     y_beta = y[naa:, :].T.reshape(nroots, noccb, nvirb)
     return UnrestrictedTDDFTResult(
-        excitation_energies=w,
+        excitation_energies=energies,
         x_amplitudes_alpha=x_alpha,
         x_amplitudes_beta=x_beta,
         y_amplitudes_alpha=y_alpha,
         y_amplitudes_beta=y_beta,
-        a_matrix=matrices.a_matrix,
-        b_matrix=matrices.b_matrix,
-        casida_matrix=casida_matrix,
+    )
+
+
+def solve_unrestricted_casida_from_tdhf_operator(
+    de_a: Array,
+    de_b: Array,
+    tdhf_vind_rows: Callable[[Array], Array],
+    *,
+    nstates: int | None = None,
+    excitation_threshold: float = 1e-7,
+    matrix_eps: float = 1e-10,
+    davidson_tol: float = 1e-6,
+    davidson_max_iter: int = 60,
+    davidson_max_subspace: int | None = None,
+) -> UnrestrictedTDDFTResult:
+    dim = int(jnp.asarray(de_a).size + jnp.asarray(de_b).size)
+    nroots = dim if nstates is None else min(int(nstates), dim)
+    dtype = _solver_dtype(jnp.result_type(de_a, de_b))
+
+    def tdhf_vind(values: Array) -> Array:
+        values = jnp.asarray(values, dtype=dtype).reshape(-1, 2 * dim)
+        return tdhf_vind_rows(values)
+
+    diagonal = jnp.concatenate([jnp.ravel(de_a), jnp.ravel(de_b)]).astype(dtype)
+    w, x_vecs, y_vecs, converged = davidson_lowest_tdhf(
+        lambda values: jax.lax.stop_gradient(tdhf_vind(values)),
+        nroots=nroots,
+        size=dim,
+        diag=diagonal,
+        tol=davidson_tol,
+        max_iter=davidson_max_iter,
+        max_subspace=davidson_max_subspace,
+        matrix_eps=matrix_eps,
+    )
+    del converged
+    x_vecs = jax.lax.stop_gradient(x_vecs)
+    y_vecs = jax.lax.stop_gradient(y_vecs)
+    applied = tdhf_vind(jnp.concatenate([x_vecs.T, y_vecs.T], axis=-1))
+    top = applied[:, :dim].T
+    bottom = -applied[:, dim:].T
+    numerator = jnp.sum(x_vecs * top, axis=0) + jnp.sum(
+        y_vecs * bottom,
+        axis=0,
+    )
+    denominator = jnp.sum(x_vecs * x_vecs, axis=0) - jnp.sum(y_vecs * y_vecs, axis=0)
+    denominator = jnp.where(
+        jnp.abs(denominator) > jnp.asarray(1e-30, dtype=dtype),
+        denominator,
+        jnp.asarray(1e-30, dtype=dtype),
+    )
+    return _finalize_unrestricted_casida_result(
+        numerator / denominator,
+        x_vecs,
+        y_vecs,
+        nroots=nroots,
+        excitation_threshold=excitation_threshold,
+        matrix_eps=matrix_eps,
+        de_a=de_a,
+        de_b=de_b,
     )
 
 
@@ -591,24 +760,19 @@ class UnrestrictedTDA:
     xc_params: Any | None = None
     occupation_tolerance: float = 1e-8
     excitation_threshold: float = 1e-7
+    eigensolver: Literal["auto", "davidson"] = "auto"
+    davidson_tol: float = 1e-6
+    davidson_max_iter: int = 60
+    davidson_max_subspace: int | None = None
 
-    def build_matrices(self) -> UnrestrictedTDAMatrices:
-        return build_unrestricted_tda_matrices(
+    def gen_tda_vind(self):
+        vind, _, _, _ = build_unrestricted_tda_operator(
             self.molecule,
             self.xc_functional,
             xc_params=self.xc_params,
             occupation_tolerance=self.occupation_tolerance,
         )
-
-    def gen_tda_vind(self):
-        matrices = self.build_matrices()
-        flat_a = matrices.a_matrix
-
-        def vind(x: Array) -> Array:
-            x = jnp.asarray(x).reshape(-1, flat_a.shape[0])
-            return x @ flat_a.T
-
-        return vind, flat_a
+        return vind
 
     def _posthoc_correction(self, result: UnrestrictedTDAResult) -> Array | None:
         resolved_xc = _resolve_xc_functional(
@@ -655,10 +819,27 @@ class UnrestrictedTDA:
         )
 
     def kernel(self, nstates: int | None = None) -> UnrestrictedTDAResult:
-        result = solve_unrestricted_tda(
-            self.build_matrices(),
+        mode = str(self.eigensolver).lower()
+        if mode not in {"auto", "davidson"}:
+            raise ValueError(
+                f"Unsupported eigensolver={self.eigensolver!r}. Choose one of {{'auto', 'davidson'}}."
+            )
+        vind, diagonal, de_a, de_b = build_unrestricted_tda_operator(
+            self.molecule,
+            self.xc_functional,
+            xc_params=self.xc_params,
+            occupation_tolerance=self.occupation_tolerance,
+        )
+        result = solve_unrestricted_tda_from_operator(
+            de_a,
+            de_b,
+            vind,
+            diagonal,
             nstates=nstates,
             excitation_threshold=self.excitation_threshold,
+            davidson_tol=self.davidson_tol,
+            davidson_max_iter=self.davidson_max_iter,
+            davidson_max_subspace=self.davidson_max_subspace,
         )
         return self._apply_posthoc_correction(result)
 
@@ -673,53 +854,53 @@ class UnrestrictedCasidaTDDFT:
     occupation_tolerance: float = 1e-8
     excitation_threshold: float = 1e-7
     matrix_eps: float = 1e-10
-
-    def build_matrices(self) -> UnrestrictedResponseMatrices:
-        return build_unrestricted_response_matrices(
-            self.molecule,
-            self.xc_functional,
-            xc_params=self.xc_params,
-            occupation_tolerance=self.occupation_tolerance,
-        )
+    eigensolver: Literal["auto", "davidson"] = "auto"
+    davidson_tol: float = 1e-6
+    davidson_max_iter: int = 60
+    davidson_max_subspace: int | None = None
 
     def tda(self, nstates: int | None = None) -> UnrestrictedTDAResult:
-        tda_mats = build_unrestricted_tda_matrices(
+        mode = str(self.eigensolver).lower()
+        if mode not in {"auto", "davidson"}:
+            raise ValueError(
+                f"Unsupported eigensolver={self.eigensolver!r}. Choose one of {{'auto', 'davidson'}}."
+            )
+        vind, diagonal, de_a, de_b = build_unrestricted_tda_operator(
             self.molecule,
             self.xc_functional,
             xc_params=self.xc_params,
             occupation_tolerance=self.occupation_tolerance,
         )
-        result = solve_unrestricted_tda(
-            tda_mats,
+        result = solve_unrestricted_tda_from_operator(
+            de_a,
+            de_b,
+            vind,
+            diagonal,
             nstates=nstates,
             excitation_threshold=self.excitation_threshold,
+            davidson_tol=self.davidson_tol,
+            davidson_max_iter=self.davidson_max_iter,
+            davidson_max_subspace=self.davidson_max_subspace,
         )
         return self._apply_posthoc_correction(result, use_tda=True)
 
     def gen_tda_vind(self):
-        matrices = self.build_matrices()
-        flat_a = matrices.a_matrix
-
-        def vind(x: Array) -> Array:
-            x = jnp.asarray(x).reshape(-1, flat_a.shape[0])
-            return x @ flat_a.T
-
-        return vind, flat_a
+        vind, _, _, _ = build_unrestricted_tda_operator(
+            self.molecule,
+            self.xc_functional,
+            xc_params=self.xc_params,
+            occupation_tolerance=self.occupation_tolerance,
+        )
+        return vind
 
     def gen_tdhf_vind(self):
-        matrices = self.build_matrices()
-        flat_a = matrices.a_matrix
-        flat_b = matrices.b_matrix
-
-        def vind(z: Array) -> Array:
-            z = jnp.asarray(z).reshape(-1, 2 * flat_a.shape[0])
-            x = z[:, : flat_a.shape[0]]
-            y = z[:, flat_a.shape[0] :]
-            upper = x @ flat_a.T + y @ flat_b.T
-            lower = -(x @ flat_b.T + y @ flat_a.T)
-            return jnp.concatenate([upper, lower], axis=-1)
-
-        return vind, flat_a, flat_b
+        vind, _, _ = build_unrestricted_tdhf_operator(
+            self.molecule,
+            self.xc_functional,
+            xc_params=self.xc_params,
+            occupation_tolerance=self.occupation_tolerance,
+        )
+        return vind
 
     def _posthoc_correction(
         self,
@@ -774,10 +955,26 @@ class UnrestrictedCasidaTDDFT:
         )
 
     def kernel(self, nstates: int | None = None) -> UnrestrictedTDDFTResult:
-        result = solve_unrestricted_casida(
-            self.build_matrices(),
+        mode = str(self.eigensolver).lower()
+        if mode not in {"auto", "davidson"}:
+            raise ValueError(
+                f"Unsupported eigensolver={self.eigensolver!r}. Choose one of {{'auto', 'davidson'}}."
+            )
+        vind_tdhf, de_a, de_b = build_unrestricted_tdhf_operator(
+            self.molecule,
+            self.xc_functional,
+            xc_params=self.xc_params,
+            occupation_tolerance=self.occupation_tolerance,
+        )
+        result = solve_unrestricted_casida_from_tdhf_operator(
+            de_a,
+            de_b,
+            vind_tdhf,
             nstates=nstates,
             excitation_threshold=self.excitation_threshold,
             matrix_eps=self.matrix_eps,
+            davidson_tol=self.davidson_tol,
+            davidson_max_iter=self.davidson_max_iter,
+            davidson_max_subspace=self.davidson_max_subspace,
         )
         return self._apply_posthoc_correction(result, use_tda=False)
