@@ -361,32 +361,6 @@ class ChunkedHFXNu:
                 np.asarray(stop_i, dtype=np.int32),
             )
 
-        def grid_chunk_padded(start: Any, chunk_size: int) -> jnp.ndarray:
-            chunk_size_i = int(chunk_size)
-            chunk_shape = (shape[0], chunk_size_i, shape[2], shape[3])
-
-            def read_chunk(start_arg: Any) -> np.ndarray:
-                read_start = int(np.asarray(start_arg))
-                output = np.zeros(chunk_shape, dtype=callback_dtype)
-                if read_start >= shape[1] or chunk_size_i <= 0:
-                    return output
-                read_stop = min(read_start + chunk_size_i, shape[1])
-                if read_stop <= read_start:
-                    return output
-                with h5py.File(filename, "r") as handle:
-                    data = np.asarray(
-                        handle[dataset_path][:, read_start:read_stop],
-                        dtype=callback_dtype,
-                    )
-                output[:, : data.shape[1]] = data
-                return output
-
-            return jax.pure_callback(
-                read_chunk,
-                jax.ShapeDtypeStruct(chunk_shape, callback_dtype),
-                jnp.asarray(start, dtype=jnp.int32),
-            )
-
         return cls(
             shape=shape,
             chunk_size=int(chunk_size),

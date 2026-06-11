@@ -44,6 +44,7 @@ from td_graddft.tddft.response import (
     build_restricted_tda_matrix,
     build_restricted_tda_operator,
 )
+from td_graddft.tddft.cisd import restricted_cisd_second_order_correction
 from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,
@@ -1994,21 +1995,11 @@ class _HFResponsiveChannelModel(nn.Module):
         return coeff.at[..., 1].set(hf_coeff)
 
 
-class _HFParametricResponsiveChannelModel(nn.Module):
-    @nn.compact
-    def __call__(self, inputs):
-        coeff = jnp.zeros(inputs.shape[:-1] + (2,), dtype=inputs.dtype)
-        scale = self.param("scale", nn.initializers.constant(0.25), ())
-        hf_coeff = scale + jnp.square(inputs[..., 0])
-        return coeff.at[..., 1].set(hf_coeff)
-
-
-class _PT2ResponsiveChannelModel(nn.Module):
+class _DensityResponsivePT2ChannelModel(nn.Module):
     @nn.compact
     def __call__(self, inputs):
         coeff = jnp.zeros(inputs.shape[:-1] + (3,), dtype=inputs.dtype)
-        pt2_coeff = 0.25 + jnp.square(inputs[..., -1])
-        return coeff.at[..., 1].set(pt2_coeff)
+        return coeff.at[..., 1].set(jnp.square(inputs[..., 0]))
 
 
 class _DensityResponsivePT2ChannelModel(nn.Module):
