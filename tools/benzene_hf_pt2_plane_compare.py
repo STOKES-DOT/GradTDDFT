@@ -17,7 +17,7 @@ import numpy as np
 from pyscf import dft, gto
 
 from td_graddft import neural_xc
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
 
 ANG_TO_BOHR = 1.0 / 0.52917721092
 

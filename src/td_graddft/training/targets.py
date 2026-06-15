@@ -27,6 +27,8 @@ from .config import (
     GroundStateTrainingConfig,
 )
 
+_S1_SOLVER_NSTATES = 3
+
 
 def _as_dataset(data: GroundStateDatum | Sequence[GroundStateDatum]) -> list[GroundStateDatum]:
     if isinstance(data, GroundStateDatum):
@@ -74,7 +76,7 @@ def _excited_state_extension_terms(
     )
     if needs_s1_prediction:
         terms["s1_predicted"] = get_excited_state_observables(
-            1,
+            _S1_SOLVER_NSTATES,
             excited_cfg.s1_constraint_use_tda,
         )[0][0]
 
@@ -312,9 +314,6 @@ _GROUND_STATE_LOSS_METRIC_KEYS = (
     "orbital_energy_penalty",
     "orbital_energy_mse",
     "orbital_energy_mae",
-    "janak_frontier_penalty",
-    "janak_frontier_mse",
-    "janak_frontier_mae",
     "coefficient_prior_penalty",
     "coefficient_prior_mse",
     "stationarity_penalty",
@@ -838,7 +837,7 @@ def _perturb_restricted_frontier_occupations(
             updated_occ[:, lumo_idx] - mo_occ[:, lumo_idx]
         )
     else:
-        raise ValueError("Janak frontier perturbation currently supports restricted orbitals only.")
+        raise ValueError("Frontier occupation perturbation currently supports restricted orbitals only.")
 
     updates = {
         "mo_occ": updated_occ,
@@ -860,7 +859,7 @@ class _FrozenFunctionalAdapter:
     """Freeze a molecule-bound functional for fractional-state diagnostics.
 
     For nn-RSH, the learned `(sr, lr, omega)` depend on the input density
-    descriptor. Janak and piecewise-linearity probes should instead keep the
+    descriptor. Fractional-state probes should instead keep the
     functional fixed at the base state and only vary occupations/orbitals.
     """
 
@@ -963,12 +962,6 @@ def _fractional_branch_training_config(
         scf_level_shift=float(branch_level_shift),
         scf_iterate_selection=branch_iterate_selection,
     )
-
-
-def _strict_janak_branch_training_config(
-    training_config: GroundStateTrainingConfig | None,
-) -> GroundStateTrainingConfig:
-    return _fractional_branch_training_config(training_config)
 
 
 @dataclass(frozen=True)
@@ -1390,759 +1383,6 @@ def _perturb_spin_orbital_occupation(
     if hasattr(molecule, "scf_initial_density"):
         updates["scf_initial_density"] = updates["rdm1"].sum(axis=0)
     return _replace_molecule_copy(molecule, **updates)
-
-
-def _resolve_variational_spin_orbital_state_and_info(
-    params: PyTree,
-    functional: Any,
-    molecule: Any,
-    *,
-    spin_index: Any,
-    orbital_index: Any,
-    delta: Any,
-    training_config: GroundStateTrainingConfig | None = None,
-) -> tuple[Any, Any]:
-    perturbed = _perturb_spin_orbital_occupation(
-        molecule,
-        spin_index=spin_index,
-        orbital_index=orbital_index,
-        delta=delta,
-    )
-    return _resolve_training_molecule_and_info_with_mode(
-        params,
-        functional,
-        perturbed,
-        _strict_janak_branch_training_config(training_config),
-    )
-
-
-def _orbital_overlap_scores(
-    reference_orbital: Array,
-    target_coefficients: Array,
-    *,
-    overlap_matrix: Array | None = None,
-) -> Array:
-    reference = jnp.asarray(reference_orbital)
-    targets = jnp.asarray(target_coefficients)
-    if reference.ndim != 1 or targets.ndim != 2:
-        raise ValueError("Expected reference_orbital=(nao,) and target_coefficients=(nao, nmo).")
-    if overlap_matrix is None:
-        return jnp.abs(jnp.einsum("p,pi->i", reference, targets))
-    overlap = jnp.asarray(overlap_matrix)
-    return jnp.abs(jnp.einsum("p,pq,qi->i", reference, overlap, targets))
-
-
-def _tracked_restricted_orbital_index(
-    reference_molecule: Any,
-    target_molecule: Any,
-    reference_index: Array,
-) -> Array:
-    reference_coeff, _, _ = _restricted_channel_with_energies(reference_molecule)
-    target_coeff, _, _ = _restricted_channel_with_energies(target_molecule)
-    if int(reference_coeff.shape[0]) != int(target_coeff.shape[0]):
-        raise ValueError("Reference and target orbitals must share the same AO dimension.")
-    overlap_matrix = getattr(target_molecule, "overlap_matrix", None)
-    if overlap_matrix is None:
-        overlap_matrix = getattr(reference_molecule, "overlap_matrix", None)
-    reference_orbital = jnp.take(reference_coeff, jnp.asarray(reference_index), axis=1)
-    scores = _orbital_overlap_scores(
-        reference_orbital,
-        target_coeff,
-        overlap_matrix=overlap_matrix,
-    )
-    return jnp.argmax(scores)
-
-
-def _tracked_spin_orbital_index(
-    reference_molecule: Any,
-    target_molecule: Any,
-    reference_spin: Any,
-    reference_index: Any,
-) -> Array:
-    reference_coeff, _, _ = _spin_resolved_orbital_blocks(reference_molecule)
-    target_coeff, _, _ = _spin_resolved_orbital_blocks(target_molecule)
-    overlap_matrix = getattr(target_molecule, "overlap_matrix", None)
-    if overlap_matrix is None:
-        overlap_matrix = getattr(reference_molecule, "overlap_matrix", None)
-    reference_orbital = reference_coeff[reference_spin, :, reference_index]
-    scores = _orbital_overlap_scores(
-        reference_orbital,
-        target_coeff[reference_spin],
-        overlap_matrix=overlap_matrix,
-    )
-    return jnp.argmax(scores)
-
-
-def janak_frontier_finite_difference_penalty(
-    params: PyTree,
-    functional: Any,
-    molecule: Any,
-    *,
-    delta: float = 0.1,
-    occupation_tolerance: float = 1e-8,
-    training_config: GroundStateTrainingConfig | None = None,
-    assume_self_consistent_input: bool = False,
-) -> tuple[Array, Array, Array, Array]:
-    """Match frontier orbital energies to variational finite-difference slopes."""
-
-    clipped_delta = jnp.clip(jnp.asarray(delta), 1e-3, 0.5)
-    base_molecule = (
-        molecule
-        if assume_self_consistent_input
-        else _resolve_training_molecule_with_mode(
-            params,
-            functional,
-            molecule,
-            _as_self_consistent_training_config(training_config),
-        )
-    )
-    pred_energies, pred_occ = _restricted_energies_and_occ(
-        base_molecule.mo_energy,
-        base_molecule.mo_occ,
-    )
-    homo_idx, lumo_idx = _restricted_frontier_indices(
-        pred_occ,
-        occupation_tolerance=occupation_tolerance,
-    )
-    frozen_functional, frozen_params = _freeze_functional_for_fractional_path(
-        params,
-        functional,
-        base_molecule,
-    )
-
-    mol_homo_minus, info_homo_minus = _resolve_variational_frontier_state_and_info(
-        frozen_params,
-        frozen_functional,
-        base_molecule,
-        homo_delta=-clipped_delta,
-        lumo_delta=0.0,
-        training_config=training_config,
-        occupation_tolerance=occupation_tolerance,
-    )
-    mol_lumo_plus, info_lumo_plus = _resolve_variational_frontier_state_and_info(
-        frozen_params,
-        frozen_functional,
-        base_molecule,
-        homo_delta=0.0,
-        lumo_delta=clipped_delta,
-        training_config=training_config,
-        occupation_tolerance=occupation_tolerance,
-    )
-    energy_0 = _predict_ground_state_total_energy_from_molecule(
-        frozen_params,
-        frozen_functional,
-        base_molecule,
-    )
-    energy_homo_minus = _predict_ground_state_total_energy_from_molecule(
-        frozen_params,
-        frozen_functional,
-        mol_homo_minus,
-    )
-    energy_lumo_plus = _predict_ground_state_total_energy_from_molecule(
-        frozen_params,
-        frozen_functional,
-        mol_lumo_plus,
-    )
-    homo_derivative = (energy_0 - energy_homo_minus) / clipped_delta
-    lumo_derivative = (energy_lumo_plus - energy_0) / clipped_delta
-
-    homo_energies, _ = _restricted_energies_and_occ(
-        mol_homo_minus.mo_energy,
-        mol_homo_minus.mo_occ,
-    )
-    lumo_energies, _ = _restricted_energies_and_occ(
-        mol_lumo_plus.mo_energy,
-        mol_lumo_plus.mo_occ,
-    )
-    tracked_homo_idx = _tracked_restricted_orbital_index(
-        base_molecule,
-        mol_homo_minus,
-        homo_idx,
-    )
-    tracked_lumo_idx = _tracked_restricted_orbital_index(
-        base_molecule,
-        mol_lumo_plus,
-        lumo_idx,
-    )
-    residual_homo = homo_derivative - homo_energies[tracked_homo_idx]
-    residual_lumo = lumo_derivative - lumo_energies[tracked_lumo_idx]
-    weight_homo = _fractional_branch_quality_weight(
-        info_homo_minus,
-        training_config,
-        dtype=residual_homo.dtype,
-    )
-    weight_lumo = _fractional_branch_quality_weight(
-        info_lumo_plus,
-        training_config,
-        dtype=residual_lumo.dtype,
-    )
-    weights = jnp.stack([weight_homo, weight_lumo], axis=0)
-    residual_abs = jnp.stack([jnp.abs(residual_homo), jnp.abs(residual_lumo)], axis=0)
-    residual_sq = jnp.stack([residual_homo**2, residual_lumo**2], axis=0)
-    normalization = jnp.maximum(jnp.sum(weights), 1e-8)
-    mse = jnp.sum(weights * residual_sq) / normalization
-    mae = jnp.sum(weights * residual_abs) / normalization
-    residual = jnp.stack([residual_homo, residual_lumo], axis=0)
-    occupation_derivative = jnp.stack([homo_derivative, lumo_derivative], axis=0)
-    return mse, mae, residual, occupation_derivative
-
-
-def strict_janak_frontier_autodiff_penalty(
-    params: PyTree,
-    functional: Any,
-    molecule: Any,
-    *,
-    eta: float = 0.1,
-    occupation_tolerance: float = 1e-8,
-    training_config: GroundStateTrainingConfig | None = None,
-    assume_self_consistent_input: bool = False,
-    force_eta_autodiff: bool = False,
-) -> tuple[Array, Array, Array, Array]:
-    clipped_eta = jnp.clip(jnp.asarray(eta), 1e-3, 0.5)
-    base_molecule_raw = (
-        molecule
-        if assume_self_consistent_input
-        else _resolve_training_molecule_with_mode(
-            params,
-            functional,
-            molecule,
-            _as_self_consistent_training_config(training_config),
-        )
-    )
-    base_molecule = _as_spin_resolved_molecule(
-        base_molecule_raw,
-        occupation_tolerance=occupation_tolerance,
-    )
-    homo_spin, homo_idx, lumo_spin, lumo_idx = _spin_orbital_frontier_indices(
-        base_molecule,
-        occupation_tolerance=occupation_tolerance,
-    )
-    frozen_functional, frozen_params = _freeze_functional_for_fractional_path(
-        params,
-        functional,
-        base_molecule,
-    )
-
-    def _homo_branch_energy(eta_value: Array) -> Array:
-        branch_molecule, _ = _resolve_variational_spin_orbital_state_and_info(
-            frozen_params,
-            frozen_functional,
-            base_molecule,
-            spin_index=homo_spin,
-            orbital_index=homo_idx,
-            delta=-eta_value,
-            training_config=training_config,
-        )
-        return _predict_ground_state_total_energy_from_molecule(
-            frozen_params,
-            frozen_functional,
-            branch_molecule,
-        )
-
-    def _lumo_branch_energy(eta_value: Array) -> Array:
-        branch_molecule, _ = _resolve_variational_spin_orbital_state_and_info(
-            frozen_params,
-            frozen_functional,
-            base_molecule,
-            spin_index=lumo_spin,
-            orbital_index=lumo_idx,
-            delta=eta_value,
-            training_config=training_config,
-        )
-        return _predict_ground_state_total_energy_from_molecule(
-            frozen_params,
-            frozen_functional,
-            branch_molecule,
-        )
-
-    def _finite_difference_branch_gradient(
-        energy_fn: Callable[[Array], Array],
-        eta_value: Array,
-    ) -> Array:
-        step = jnp.clip(0.25 * eta_value, 1e-4, 5e-3)
-        eta_minus = jnp.maximum(eta_value - step, 1e-4)
-        eta_plus = jnp.minimum(eta_value + step, 0.5)
-        denom = jnp.maximum(eta_plus - eta_minus, 1e-6)
-        return (energy_fn(eta_plus) - energy_fn(eta_minus)) / denom
-
-    training_semidiff = _tree_contains_jax_tracer(params) and not bool(force_eta_autodiff)
-    if training_semidiff:
-        step = jnp.clip(0.25 * clipped_eta, 1e-4, 5e-3)
-        eta_minus = jnp.maximum(clipped_eta - step, 1e-4)
-        eta_plus = jnp.minimum(clipped_eta + step, 0.5)
-        denom = jnp.maximum(eta_plus - eta_minus, 1e-6)
-
-        mol_homo_minus_fd, _ = _resolve_variational_spin_orbital_state_and_info(
-            frozen_params,
-            frozen_functional,
-            base_molecule,
-            spin_index=homo_spin,
-            orbital_index=homo_idx,
-            delta=-eta_minus,
-            training_config=training_config,
-        )
-        mol_homo_plus_fd, _ = _resolve_variational_spin_orbital_state_and_info(
-            frozen_params,
-            frozen_functional,
-            base_molecule,
-            spin_index=homo_spin,
-            orbital_index=homo_idx,
-            delta=-eta_plus,
-            training_config=training_config,
-        )
-        mol_lumo_minus_fd, _ = _resolve_variational_spin_orbital_state_and_info(
-            frozen_params,
-            frozen_functional,
-            base_molecule,
-            spin_index=lumo_spin,
-            orbital_index=lumo_idx,
-            delta=eta_minus,
-            training_config=training_config,
-        )
-        mol_lumo_plus_fd, _ = _resolve_variational_spin_orbital_state_and_info(
-            frozen_params,
-            frozen_functional,
-            base_molecule,
-            spin_index=lumo_spin,
-            orbital_index=lumo_idx,
-            delta=eta_plus,
-            training_config=training_config,
-        )
-        mol_homo_minus_fd = _detach_molecule_state(mol_homo_minus_fd)
-        mol_homo_plus_fd = _detach_molecule_state(mol_homo_plus_fd)
-        mol_lumo_minus_fd = _detach_molecule_state(mol_lumo_minus_fd)
-        mol_lumo_plus_fd = _detach_molecule_state(mol_lumo_plus_fd)
-        homo_grad = (
-            _predict_ground_state_total_energy_from_molecule(
-                frozen_params,
-                frozen_functional,
-                mol_homo_plus_fd,
-            )
-            - _predict_ground_state_total_energy_from_molecule(
-                frozen_params,
-                frozen_functional,
-                mol_homo_minus_fd,
-            )
-        ) / denom
-        lumo_grad = (
-            _predict_ground_state_total_energy_from_molecule(
-                frozen_params,
-                frozen_functional,
-                mol_lumo_plus_fd,
-            )
-            - _predict_ground_state_total_energy_from_molecule(
-                frozen_params,
-                frozen_functional,
-                mol_lumo_minus_fd,
-            )
-        ) / denom
-    else:
-        homo_grad = jax.grad(_homo_branch_energy)(clipped_eta)
-        lumo_grad = jax.grad(_lumo_branch_energy)(clipped_eta)
-        homo_grad = jax.lax.cond(
-            jnp.all(jnp.isfinite(homo_grad)),
-            lambda _: homo_grad,
-            lambda _: jnp.asarray(
-                _finite_difference_branch_gradient(_homo_branch_energy, clipped_eta),
-                dtype=homo_grad.dtype,
-            ),
-            operand=None,
-        )
-        lumo_grad = jax.lax.cond(
-            jnp.all(jnp.isfinite(lumo_grad)),
-            lambda _: lumo_grad,
-            lambda _: jnp.asarray(
-                _finite_difference_branch_gradient(_lumo_branch_energy, clipped_eta),
-                dtype=lumo_grad.dtype,
-            ),
-            operand=None,
-        )
-    mol_homo_minus, info_homo_minus = _resolve_variational_spin_orbital_state_and_info(
-        frozen_params,
-        frozen_functional,
-        base_molecule,
-        spin_index=homo_spin,
-        orbital_index=homo_idx,
-        delta=-clipped_eta,
-        training_config=training_config,
-    )
-    mol_lumo_plus, info_lumo_plus = _resolve_variational_spin_orbital_state_and_info(
-        frozen_params,
-        frozen_functional,
-        base_molecule,
-        spin_index=lumo_spin,
-        orbital_index=lumo_idx,
-        delta=clipped_eta,
-        training_config=training_config,
-    )
-    if training_semidiff:
-        mol_homo_minus = _detach_molecule_state(mol_homo_minus)
-        mol_lumo_plus = _detach_molecule_state(mol_lumo_plus)
-    homo_energies = _spin_resolved_orbital_blocks(mol_homo_minus)[2]
-    lumo_energies = _spin_resolved_orbital_blocks(mol_lumo_plus)[2]
-    tracked_homo_idx = _tracked_spin_orbital_index(
-        base_molecule,
-        mol_homo_minus,
-        homo_spin,
-        homo_idx,
-    )
-    tracked_lumo_idx = _tracked_spin_orbital_index(
-        base_molecule,
-        mol_lumo_plus,
-        lumo_spin,
-        lumo_idx,
-    )
-    effective_homo_derivative = -homo_grad
-    effective_lumo_derivative = lumo_grad
-    residual_homo = effective_homo_derivative - homo_energies[homo_spin, tracked_homo_idx]
-    residual_lumo = effective_lumo_derivative - lumo_energies[lumo_spin, tracked_lumo_idx]
-    weight_homo = _fractional_branch_quality_weight(
-        info_homo_minus,
-        training_config,
-        dtype=residual_homo.dtype,
-    )
-    weight_lumo = _fractional_branch_quality_weight(
-        info_lumo_plus,
-        training_config,
-        dtype=residual_lumo.dtype,
-    )
-    if training_semidiff:
-        weight_homo = jax.lax.stop_gradient(weight_homo)
-        weight_lumo = jax.lax.stop_gradient(weight_lumo)
-    weights = jnp.stack([weight_homo, weight_lumo], axis=0)
-    residual = jnp.stack([residual_homo, residual_lumo], axis=0)
-    residual_abs = jnp.abs(residual)
-    residual_sq = residual**2
-    normalization = jnp.maximum(jnp.sum(weights), 1e-8)
-    mse = jnp.sum(weights * residual_sq) / normalization
-    mae = jnp.sum(weights * residual_abs) / normalization
-    occupation_derivative = jnp.stack(
-        [effective_homo_derivative, effective_lumo_derivative],
-        axis=0,
-    )
-    return mse, mae, residual, occupation_derivative
-
-
-def fixed_orbital_janak_autodiff_penalty(
-    params: PyTree,
-    functional: Any,
-    molecule: Any,
-    *,
-    occupation_tolerance: float = 1e-8,
-    training_config: GroundStateTrainingConfig | None = None,
-    assume_self_consistent_input: bool = False,
-) -> tuple[Array, Array, Array, Array]:
-    """Evaluate Janak's partial derivative at fixed self-consistent orbitals.
-
-    This computes ``partial E(C, f; theta) / partial f`` with the molecular
-    orbital coefficients fixed at the current SCF state.  For descriptor-based
-    functionals, the functional is bound/frozen at the base state so the
-    derivative is only with respect to occupations, not descriptor changes.
-    """
-
-    base_molecule_raw = (
-        molecule
-        if assume_self_consistent_input
-        else _resolve_training_molecule_with_mode(
-            params,
-            functional,
-            molecule,
-            _as_self_consistent_training_config(training_config),
-        )
-    )
-    base_molecule_spin = _as_spin_resolved_molecule(
-        base_molecule_raw,
-        occupation_tolerance=occupation_tolerance,
-    )
-    # Janak's theorem is a partial derivative at the stationary orbital set.
-    # Stop gradients through the SCF state and keep only explicit theta
-    # dependence in the frozen functional.
-    base_molecule = _detach_molecule_state(base_molecule_spin)
-    frozen_functional, frozen_params = _freeze_functional_for_fractional_path(
-        params,
-        functional,
-        base_molecule,
-    )
-    mo_coeff_spin, mo_occ_spin, mo_energy_spin = _spin_resolved_orbital_blocks(
-        base_molecule,
-        occupation_tolerance=occupation_tolerance,
-    )
-    homo_spin, homo_idx, lumo_spin, lumo_idx = _spin_orbital_frontier_indices(
-        base_molecule,
-        occupation_tolerance=occupation_tolerance,
-    )
-
-    def _energy_from_occ(occ_spin: Array) -> Array:
-        occ_spin = jnp.asarray(occ_spin)
-        rdm1 = _rebuild_density_matrix_from_orbitals(mo_coeff_spin, occ_spin)
-        updates = {
-            "mo_occ": occ_spin,
-            "rdm1": rdm1,
-        }
-        electron_count = jnp.sum(occ_spin)
-        if hasattr(base_molecule, "electron_count"):
-            updates["electron_count"] = electron_count
-        if hasattr(base_molecule, "nelectron"):
-            updates["nelectron"] = electron_count
-        if hasattr(base_molecule, "scf_initial_density"):
-            updates["scf_initial_density"] = rdm1.sum(axis=0)
-        molecule_occ = _replace_molecule_copy(base_molecule, **updates)
-        return _predict_ground_state_total_energy_from_molecule(
-            frozen_params,
-            frozen_functional,
-            molecule_occ,
-        )
-
-    occupation_derivatives = jax.grad(_energy_from_occ)(mo_occ_spin)
-    homo_derivative = occupation_derivatives[homo_spin, homo_idx]
-    lumo_derivative = occupation_derivatives[lumo_spin, lumo_idx]
-    homo_energy = jax.lax.stop_gradient(mo_energy_spin[homo_spin, homo_idx])
-    lumo_energy = jax.lax.stop_gradient(mo_energy_spin[lumo_spin, lumo_idx])
-    residual_homo = homo_derivative - homo_energy
-    residual_lumo = lumo_derivative - lumo_energy
-    residual = jnp.stack([residual_homo, residual_lumo], axis=0)
-    occupation_derivative = jnp.stack([homo_derivative, lumo_derivative], axis=0)
-    residual_sq = residual**2
-    residual_abs = jnp.abs(residual)
-    mse = jnp.mean(residual_sq)
-    mae = jnp.mean(residual_abs)
-    return mse, mae, residual, occupation_derivative
-
-
-def _fixed_orbital_occupation_derivative(
-    params: PyTree,
-    functional: Any,
-    molecule: Any,
-    *,
-    spin_index: Any,
-    orbital_index: Any,
-    occupation_tolerance: float = 1e-8,
-) -> Array:
-    mo_coeff_spin, mo_occ_spin, _ = _spin_resolved_orbital_blocks(
-        molecule,
-        occupation_tolerance=occupation_tolerance,
-    )
-
-    def _energy_from_occ(occ_spin: Array) -> Array:
-        rdm1 = _rebuild_density_matrix_from_orbitals(mo_coeff_spin, occ_spin)
-        updates = {
-            "mo_occ": occ_spin,
-            "rdm1": rdm1,
-        }
-        electron_count = jnp.sum(occ_spin)
-        if hasattr(molecule, "electron_count"):
-            updates["electron_count"] = electron_count
-        if hasattr(molecule, "nelectron"):
-            updates["nelectron"] = electron_count
-        if hasattr(molecule, "scf_initial_density"):
-            updates["scf_initial_density"] = rdm1.sum(axis=0)
-        molecule_occ = _replace_molecule_copy(molecule, **updates)
-        return _predict_ground_state_total_energy_from_molecule(
-            params,
-            functional,
-            molecule_occ,
-        )
-
-    derivatives = jax.grad(_energy_from_occ)(mo_occ_spin)
-    return derivatives[spin_index, orbital_index]
-
-
-def half_charge_janak_autodiff_penalty(
-    params: PyTree,
-    functional: Any,
-    molecule: Any,
-    *,
-    occupation_tolerance: float = 1e-8,
-    training_config: GroundStateTrainingConfig | None = None,
-    assume_self_consistent_input: bool = False,
-) -> tuple[Array, Array, Array, Array]:
-    """Match half-charge fixed-orbital Janak derivatives to endpoint slopes."""
-
-    base_molecule_raw = (
-        molecule
-        if assume_self_consistent_input
-        else _resolve_training_molecule_with_mode(
-            params,
-            functional,
-            molecule,
-            _as_self_consistent_training_config(training_config),
-        )
-    )
-    base_molecule = _as_spin_resolved_molecule(
-        base_molecule_raw,
-        occupation_tolerance=occupation_tolerance,
-    )
-    homo_spin, homo_idx, lumo_spin, lumo_idx = _spin_orbital_frontier_indices(
-        base_molecule,
-        occupation_tolerance=occupation_tolerance,
-    )
-    frozen_functional, frozen_params = _freeze_functional_for_fractional_path(
-        params,
-        functional,
-        base_molecule,
-    )
-
-    def _branch(spin_index: Any, orbital_index: Any, delta: float) -> tuple[Any, Any]:
-        branch_molecule, info = _resolve_variational_spin_orbital_state_and_info(
-            frozen_params,
-            frozen_functional,
-            base_molecule,
-            spin_index=spin_index,
-            orbital_index=orbital_index,
-            delta=delta,
-            training_config=training_config,
-        )
-        return _detach_molecule_state(branch_molecule), info
-
-    base_energy_molecule = _detach_molecule_state(base_molecule)
-    mol_minus1, info_minus1 = _branch(homo_spin, homo_idx, -1.0)
-    mol_minus_half, info_minus_half = _branch(homo_spin, homo_idx, -0.5)
-    mol_plus_half, info_plus_half = _branch(lumo_spin, lumo_idx, 0.5)
-    mol_plus1, info_plus1 = _branch(lumo_spin, lumo_idx, 1.0)
-
-    energy_0 = _predict_ground_state_total_energy_from_molecule(
-        frozen_params,
-        frozen_functional,
-        base_energy_molecule,
-    )
-    energy_minus1 = _predict_ground_state_total_energy_from_molecule(
-        frozen_params,
-        frozen_functional,
-        mol_minus1,
-    )
-    energy_plus1 = _predict_ground_state_total_energy_from_molecule(
-        frozen_params,
-        frozen_functional,
-        mol_plus1,
-    )
-    removal_slope = energy_0 - energy_minus1
-    addition_slope = energy_plus1 - energy_0
-
-    tracked_homo_idx = _tracked_spin_orbital_index(
-        base_molecule,
-        mol_minus_half,
-        homo_spin,
-        homo_idx,
-    )
-    tracked_lumo_idx = _tracked_spin_orbital_index(
-        base_molecule,
-        mol_plus_half,
-        lumo_spin,
-        lumo_idx,
-    )
-    homo_derivative = _fixed_orbital_occupation_derivative(
-        frozen_params,
-        frozen_functional,
-        mol_minus_half,
-        spin_index=homo_spin,
-        orbital_index=tracked_homo_idx,
-        occupation_tolerance=occupation_tolerance,
-    )
-    lumo_derivative = _fixed_orbital_occupation_derivative(
-        frozen_params,
-        frozen_functional,
-        mol_plus_half,
-        spin_index=lumo_spin,
-        orbital_index=tracked_lumo_idx,
-        occupation_tolerance=occupation_tolerance,
-    )
-
-    residual_homo = homo_derivative - removal_slope
-    residual_lumo = lumo_derivative - addition_slope
-    remove_weight = jnp.minimum(
-        _fractional_branch_quality_weight(
-            info_minus1,
-            training_config,
-            dtype=residual_homo.dtype,
-        ),
-        _fractional_branch_quality_weight(
-            info_minus_half,
-            training_config,
-            dtype=residual_homo.dtype,
-        ),
-    )
-    add_weight = jnp.minimum(
-        _fractional_branch_quality_weight(
-            info_plus_half,
-            training_config,
-            dtype=residual_lumo.dtype,
-        ),
-        _fractional_branch_quality_weight(
-            info_plus1,
-            training_config,
-            dtype=residual_lumo.dtype,
-        ),
-    )
-    weights = jnp.stack([remove_weight, add_weight], axis=0)
-    residual = jnp.stack([residual_homo, residual_lumo], axis=0)
-    occupation_derivative = jnp.stack([homo_derivative, lumo_derivative], axis=0)
-    normalization = jnp.maximum(jnp.sum(weights), 1e-8)
-    mse = jnp.sum(weights * residual**2) / normalization
-    mae = jnp.sum(weights * jnp.abs(residual)) / normalization
-    return mse, mae, residual, occupation_derivative
-
-
-def _janak_frontier_penalty_by_mode(
-    params: PyTree,
-    functional: Any,
-    molecule: Any,
-    *,
-    training_config: GroundStateTrainingConfig | None = None,
-    assume_self_consistent_input: bool = False,
-    occupation_tolerance: float = 1e-8,
-) -> tuple[Array, Array, Array, Array]:
-    cfg = GroundStateTrainingConfig() if training_config is None else training_config
-    mode = getattr(cfg, "janak_frontier_mode", "finite_difference")
-    if mode == "finite_difference":
-        return janak_frontier_finite_difference_penalty(
-            params,
-            functional,
-            molecule,
-            delta=cfg.janak_frontier_delta,
-            occupation_tolerance=occupation_tolerance,
-            training_config=cfg,
-            assume_self_consistent_input=assume_self_consistent_input,
-        )
-    if mode == "autodiff":
-        return strict_janak_frontier_autodiff_penalty(
-            params,
-            functional,
-            molecule,
-            eta=cfg.janak_frontier_delta,
-            occupation_tolerance=occupation_tolerance,
-            training_config=cfg,
-            assume_self_consistent_input=assume_self_consistent_input,
-        )
-    if mode == "full_scf_ad":
-        return strict_janak_frontier_autodiff_penalty(
-            params,
-            functional,
-            molecule,
-            eta=cfg.janak_frontier_delta,
-            occupation_tolerance=occupation_tolerance,
-            training_config=cfg,
-            assume_self_consistent_input=assume_self_consistent_input,
-            force_eta_autodiff=True,
-        )
-    if mode == "fixed_orbital_ad":
-        return fixed_orbital_janak_autodiff_penalty(
-            params,
-            functional,
-            molecule,
-            occupation_tolerance=occupation_tolerance,
-            training_config=cfg,
-            assume_self_consistent_input=assume_self_consistent_input,
-        )
-    if mode == "half_charge_ad":
-        return half_charge_janak_autodiff_penalty(
-            params,
-            functional,
-            molecule,
-            occupation_tolerance=occupation_tolerance,
-            training_config=cfg,
-            assume_self_consistent_input=assume_self_consistent_input,
-        )
-    raise ValueError(f"Unsupported janak_frontier_mode={mode!r}")
 
 
 def _resolved_xc_object(
@@ -3014,7 +2254,7 @@ def _can_use_batched_self_consistent_ground_state_path(
     unsupported_weights = (
         "xc_potential_constraint_weight xc_kernel_constraint_weight "
         "stationarity_constraint_weight dm21_scf_regularization_weight "
-        "orbital_energy_constraint_weight janak_frontier_constraint_weight "
+        "orbital_energy_constraint_weight "
         "s1_constraint_weight first_excited_total_energy_constraint_weight "
         "excitation_constraint_weight oscillator_strength_constraint_weight "
         "spectrum_constraint_weight"
@@ -3265,7 +2505,6 @@ def _ground_state_mse_loss_batched_self_consistent(
         "xc_potential_penalty xc_potential_mse xc_kernel_penalty xc_kernel_mse "
         "self_consistent_energy_penalty self_consistent_energy_mse self_consistent_energy_mae "
         "orbital_energy_penalty orbital_energy_mse orbital_energy_mae "
-        "janak_frontier_penalty janak_frontier_mse janak_frontier_mae "
         "coefficient_prior_penalty coefficient_prior_mse stationarity_penalty "
         "dm21_scf_penalty dm21_scf_mse dm21_scf_delta_energy fractional_penalty "
         "s1_penalty s1_mse s1_mae s1_predicted s1_target "
@@ -3517,7 +2756,6 @@ def ground_state_mse_loss(
             or core_datum.density_matrix_constraint_weight != 0.0
             or core_cfg.self_consistent_energy_weight != 0.0
             or core_datum.orbital_energy_constraint_weight != 0.0
-            or core_datum.janak_frontier_constraint_weight != 0.0
         ):
             self_consistent_cfg = replace(cfg, mode="self_consistent")
             self_consistent_molecule, scf_info_for_datum = (
@@ -3653,34 +2891,6 @@ def ground_state_mse_loss(
                 core_cfg.orbital_energy_mse_weight * orbital_energy_mse
                 + core_cfg.orbital_energy_mae_weight * orbital_energy_mae
             )
-        janak_frontier_penalty = jnp.asarray(0.0)
-        janak_frontier_mse = jnp.asarray(0.0)
-        janak_frontier_mae = jnp.asarray(0.0)
-        if core_datum.janak_frontier_constraint_weight != 0.0:
-            janak_molecule = eval_molecule
-            if core_cfg.mode != "self_consistent":
-                if self_consistent_molecule is None:
-                    self_consistent_cfg = replace(cfg, mode="self_consistent")
-                    self_consistent_molecule, scf_info_for_datum = (
-                        _resolve_training_molecule_and_info_with_mode(
-                            params,
-                            functional,
-                            datum.molecule,
-                            self_consistent_cfg,
-                        )
-                    )
-                janak_molecule = self_consistent_molecule
-            janak_frontier_mse, janak_frontier_mae, _, _ = _janak_frontier_penalty_by_mode(
-                params,
-                functional,
-                janak_molecule,
-                occupation_tolerance=core_cfg.occupation_tolerance,
-                training_config=core_cfg,
-                assume_self_consistent_input=True,
-            )
-            janak_frontier_penalty = (
-                core_datum.janak_frontier_constraint_weight * janak_frontier_mae
-            )
         coefficient_prior_mse = jnp.asarray(0.0)
         coefficient_prior_penalty_value = jnp.asarray(0.0)
         if core_cfg.coefficient_prior_weight != 0.0:
@@ -3765,7 +2975,6 @@ def ground_state_mse_loss(
             + xc_kernel_penalty
             + self_consistent_energy_penalty
             + orbital_energy_penalty
-            + janak_frontier_penalty
             + coefficient_prior_penalty_value
             + stationarity_penalty
             + dm21_scf_penalty
@@ -3798,9 +3007,6 @@ def ground_state_mse_loss(
             "orbital_energy_penalty": orbital_energy_penalty,
             "orbital_energy_mse": orbital_energy_mse,
             "orbital_energy_mae": orbital_energy_mae,
-            "janak_frontier_penalty": janak_frontier_penalty,
-            "janak_frontier_mse": janak_frontier_mse,
-            "janak_frontier_mae": janak_frontier_mae,
             "coefficient_prior_penalty": coefficient_prior_penalty_value,
             "coefficient_prior_mse": coefficient_prior_mse,
             "stationarity_penalty": stationarity_penalty,
@@ -3839,16 +3045,14 @@ def _build_excited_state_solver(
     *,
     use_tda: bool,
 ) -> Any:
-    contains_tracer = any(
-        isinstance(leaf, jax.core.Tracer)
-        for leaf in jax.tree_util.tree_leaves(params)
-    )
     solver_cls = tdscf.TDA if bool(use_tda) else tdscf.TDDFT
+    eigensolver = "davidson" if _tree_contains_jax_tracer(params) else "auto"
     return solver_cls(
         molecule,
         xc_functional=functional,
         xc_params=params,
-        eigensolver="davidson" if contains_tracer else "auto",
+        eigensolver=eigensolver,
+        davidson_max_iter=8,
     )
 
 

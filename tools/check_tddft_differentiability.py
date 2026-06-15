@@ -10,7 +10,7 @@ from pyscf import dft, gto
 
 from td_graddft import neural_xc
 from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
-from td_graddft.tddft.response import build_restricted_response_matrices
+from td_graddft.tddft.response import build_restricted_tda_operator
 from td_graddft.training.targets import predict_excitation_energies
 from td_graddft.workflows.core import run_reference
 from td_graddft.workflows.types import SimulationConfig
@@ -134,13 +134,14 @@ def main() -> None:
             bound = functional.bind_to_molecule(p, molecule)
             return jnp.sum(bound.grid_response_tensor(molecule))
 
-        def a_matrix_sum(p):
-            matrices = build_restricted_response_matrices(
+        def tda_action_sum(p):
+            vind, diagonal, _ = build_restricted_tda_operator(
                 molecule,
                 functional,
                 xc_params=p,
             )
-            return jnp.sum(matrices.a_matrix)
+            trial = jnp.ones((1, int(diagonal.size)), dtype=diagonal.dtype)
+            return jnp.sum(vind(trial)) + 0.01 * jnp.sum(diagonal)
 
         def tda_s1(p):
             return predict_excitation_energies(
@@ -156,7 +157,7 @@ def main() -> None:
             ("gs_energy", gs_energy),
             ("gs_bound_potential_sum", gs_bound_potential_sum),
             ("es_response_tensor_sum", es_response_tensor_sum),
-            ("a_matrix_sum", a_matrix_sum),
+            ("tda_action_sum", tda_action_sum),
             ("tda_s1", tda_s1),
         ):
             value, grad = jax.value_and_grad(fn)(params)

@@ -9,7 +9,7 @@ import numpy as np
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("MPLCONFIGDIR", str(Path("outputs") / ".mplconfig"))
 
-from td_graddft.reference_legacy import unrestricted_reference_from_pyscf
+from td_graddft.data.reference import unrestricted_reference_from_pyscf
 from td_graddft.spectra import HARTREE_TO_EV
 from td_graddft import tdscf
 

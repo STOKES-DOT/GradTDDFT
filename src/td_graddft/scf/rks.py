@@ -20,6 +20,8 @@ from ..data.integrals.jax.direct_jk import _DIRECT_PACKED_JK_MAX_NAO
 from ..df import build_j_from_df, build_jk_from_df, build_jk_from_df_orbitals, eri_to_df_factors
 from ..features import (
     MoleculeLikeState,
+    _spin_density_and_gradient,
+    _spin_tau,
     molecule_grid_view,
     restricted_grid_features_with_gradients,
 )
@@ -167,7 +169,7 @@ def _orthonormal_diis_error(fock: Array, density: Array, overlap: Array, corth: 
     return corth.T @ error @ corth
 
 
-def _orbital_gradient_norm(fock: Array, mo_coeff: Array, mo_occ: Array) -> Array:
+def _mo_residual_norm(fock: Array, mo_coeff: Array, mo_occ: Array) -> Array:
     occ = jnp.asarray(mo_occ) > jnp.asarray(1e-12, dtype=mo_occ.dtype)
     vir = jnp.logical_not(occ)
     c_occ = jnp.where(occ[None, :], mo_coeff, jnp.zeros_like(mo_coeff))
@@ -540,16 +542,19 @@ def _array_xc_value_and_grad_kernel(
 
 def _xc_energy_and_potential_on_grid(
     *,
-    molecule,
+    rho: Array,
+    grad: Array,
+    tau: Array,
+    weights: Array,
     xc_spec: str,
     density_floor: float,
     potential_clip: float | None,
     xc_kind: str,
 ) -> tuple[Array, Array, Array]:
-    features, grad = restricted_grid_features_with_gradients(molecule)
-    rho = jnp.maximum(features.rho, density_floor)
-    tau = jnp.maximum(features.tau_a + features.tau_b, 0.0)
-    weights = jnp.asarray(molecule.grid.weights)
+    rho = jnp.maximum(jnp.asarray(rho), density_floor)
+    grad = jnp.asarray(grad)
+    tau = jnp.maximum(jnp.asarray(tau), 0.0)
+    weights = jnp.asarray(weights)
 
     if xc_kind == "HF":
         zeros = jnp.zeros_like(rho)
@@ -662,29 +667,23 @@ def _fock_components_for_density(
     xc_kind: str,
 ) -> tuple[Array, Array, Array, Array]:
     j_mat, k_mat = jk_builder(density, mo_coeff, mo_occ, density_last, j_last, k_last)
-    molecule = _restricted_spin_view(
-        ao=ao,
-        ao_deriv1=ao_deriv1,
-        weights=weights,
-        density=density,
-        mo_coeff=mo_coeff,
-        mo_occ=mo_occ,
-        mo_energy=mo_energy,
-    )
+    del mo_energy
+    rho, grad = _spin_density_and_gradient(ao, ao_deriv1, density)
+    tau = _spin_tau(ao_deriv1, mo_coeff, mo_occ)
     xc_energy, vxc_rho, vxc_grad = _xc_energy_and_potential_on_grid(
-        molecule=molecule,
+        rho=rho,
+        grad=grad,
+        tau=tau,
+        weights=weights,
         xc_spec=cfg.xc_spec,
         density_floor=cfg.density_floor,
         potential_clip=cfg.potential_clip,
         xc_kind=xc_kind,
     )
-    ao_laplacian = getattr(molecule, "ao_laplacian", None)
-    if ao_laplacian is None:
-        ao_laplacian = jnp.zeros_like(ao)
     vxc_matrix = _vxc_matrix_from_grid_potential(
         ao=ao,
         ao_deriv1=ao_deriv1,
-        ao_laplacian=ao_laplacian,
+        ao_laplacian=jnp.zeros_like(ao),
         weights=weights,
         vxc_rho=vxc_rho,
         vxc_grad=vxc_grad,
@@ -797,7 +796,7 @@ def _maybe_run_extra_final_cycle(
         grad_tol = jnp.sqrt(jnp.asarray(cfg.conv_tol, dtype=h.dtype)) * jnp.asarray(3.0, dtype=h.dtype)
         converged_final = jnp.logical_or(
             jnp.abs(total_final - energy) < tol_e,
-            _orbital_gradient_norm(raw_fock_final, mo_coeff_final, mo_occ_fixed) < grad_tol,
+            _mo_residual_norm(raw_fock_final, mo_coeff_final, mo_occ_fixed) < grad_tol,
         )
         return (
             density_final,
@@ -880,7 +879,7 @@ def _advance_scf_iteration_with_fock_builder(
         k_mat,
     )
     energy_converged = jnp.abs(total_new - energy) < tol_e
-    residual_converged = _orbital_gradient_norm(raw_fock_new, mo_coeff_new, mo_occ_fixed) < grad_tol
+    residual_converged = _mo_residual_norm(raw_fock_new, mo_coeff_new, mo_occ_fixed) < grad_tol
     converged_step = jnp.where(
         jnp.asarray(energy_only_convergence),
         energy_converged,

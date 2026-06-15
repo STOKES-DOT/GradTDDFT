@@ -64,7 +64,6 @@ class GroundStateCoreDatum:
     target_orbital_occupations: Array | None = None
     orbital_energy_constraint_weight: float = 0.0
     orbital_energy_constraint_window: int | None = None
-    janak_frontier_constraint_weight: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -98,7 +97,6 @@ class ExcitedStateDatum:
         "dm21_scf_regularization_weight",
         "orbital_energy_constraint_weight",
         "orbital_energy_constraint_window",
-        "janak_frontier_constraint_weight",
         "s1_constraint_weight",
         "first_excited_total_energy_constraint_weight",
         "excitation_constraint_weight",
@@ -137,7 +135,6 @@ class GroundStateDatum:
     target_orbital_occupations: Array | None = None
     orbital_energy_constraint_weight: float = 0.0
     orbital_energy_constraint_window: int | None = None
-    janak_frontier_constraint_weight: float = 0.0
     s1_constraint_weight: float = 0.0
     first_excited_total_energy_constraint_weight: float = 0.0
     excitation_constraint_weight: float = 0.0
@@ -215,7 +212,6 @@ class GroundStateDatum:
             target_orbital_occupations=core.target_orbital_occupations,
             orbital_energy_constraint_weight=core.orbital_energy_constraint_weight,
             orbital_energy_constraint_window=core.orbital_energy_constraint_window,
-            janak_frontier_constraint_weight=core.janak_frontier_constraint_weight,
             target_s1_energy=extension.target_s1_energy,
             target_first_excited_total_energy=extension.target_first_excited_total_energy,
             target_excitation_energies=extension.target_excitation_energies,
@@ -256,7 +252,6 @@ class GroundStateDatum:
             target_orbital_occupations=self.target_orbital_occupations,
             orbital_energy_constraint_weight=self.orbital_energy_constraint_weight,
             orbital_energy_constraint_window=self.orbital_energy_constraint_window,
-            janak_frontier_constraint_weight=self.janak_frontier_constraint_weight,
         )
 
     def excited_state_extension(self) -> ExcitedStateDatum:
@@ -298,14 +293,6 @@ class GroundStateCoreTrainingConfig:
     coefficient_prior_mode: Literal["pointwise", "mean"] = "pointwise"
     fractional_linearity_weight: float = 0.0
     fractional_linearity_delta: float = 0.1
-    janak_frontier_mode: Literal[
-        "finite_difference",
-        "autodiff",
-        "full_scf_ad",
-        "fixed_orbital_ad",
-        "half_charge_ad",
-    ] = "finite_difference"
-    janak_frontier_delta: float = 0.1
     fractional_branch_rms_soft_threshold: float | None = 1.0
     occupation_tolerance: float = 1e-8
     dm21_scf_gap_floor: float = 1e-3
@@ -368,14 +355,6 @@ class GroundStateTrainingConfig:
     coefficient_prior_mode: Literal["pointwise", "mean"] = "pointwise"
     fractional_linearity_weight: float = 0.0
     fractional_linearity_delta: float = 0.1
-    janak_frontier_mode: Literal[
-        "finite_difference",
-        "autodiff",
-        "full_scf_ad",
-        "fixed_orbital_ad",
-        "half_charge_ad",
-    ] = "finite_difference"
-    janak_frontier_delta: float = 0.1
     fractional_branch_rms_soft_threshold: float | None = 1.0
     s1_constraint_use_tda: bool = False
     excitation_constraint_use_tda: bool = True
@@ -436,8 +415,6 @@ class GroundStateTrainingConfig:
             coefficient_prior_mode=core.coefficient_prior_mode,
             fractional_linearity_weight=core.fractional_linearity_weight,
             fractional_linearity_delta=core.fractional_linearity_delta,
-            janak_frontier_mode=core.janak_frontier_mode,
-            janak_frontier_delta=core.janak_frontier_delta,
             fractional_branch_rms_soft_threshold=core.fractional_branch_rms_soft_threshold,
             s1_constraint_use_tda=extension.s1_constraint_use_tda,
             excitation_constraint_use_tda=extension.excitation_constraint_use_tda,
@@ -494,8 +471,6 @@ class GroundStateTrainingConfig:
             coefficient_prior_mode=self.coefficient_prior_mode,
             fractional_linearity_weight=self.fractional_linearity_weight,
             fractional_linearity_delta=self.fractional_linearity_delta,
-            janak_frontier_mode=self.janak_frontier_mode,
-            janak_frontier_delta=self.janak_frontier_delta,
             fractional_branch_rms_soft_threshold=self.fractional_branch_rms_soft_threshold,
             occupation_tolerance=self.occupation_tolerance,
             dm21_scf_gap_floor=self.dm21_scf_gap_floor,

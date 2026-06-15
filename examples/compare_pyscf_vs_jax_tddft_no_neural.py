@@ -14,7 +14,7 @@ import numpy as np
 from pyscf import dft, gto
 
 from td_graddft import tdscf
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
 from td_graddft.spectra import HARTREE_TO_EV
 from td_graddft.tddft._semilocal_response import SemilocalResponseFunctional
 

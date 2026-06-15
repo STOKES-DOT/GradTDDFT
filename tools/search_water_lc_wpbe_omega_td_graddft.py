@@ -13,8 +13,6 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/td_graddft_matplotlib")
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.search_water_rsh_params_pyscf import _evaluate
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -85,6 +83,17 @@ def _bounded_omega_search(
     return result, history
 
 
+def _evaluate_td_graddft_omega(*, vector: list[float], args: argparse.Namespace) -> dict[str, Any]:
+    try:
+        from tools.search_water_rsh_params_pyscf import _evaluate
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "tools.search_water_lc_wpbe_omega_td_graddft requires "
+            "tools.search_water_rsh_params_pyscf for full CLI evaluation."
+        ) from exc
+    return _evaluate(vector=vector, args=args)
+
+
 def _write_plot(history: list[dict[str, Any]], outdir: Path) -> Path | None:
     try:
         import matplotlib.pyplot as plt
@@ -150,7 +159,7 @@ def main() -> None:
     def evaluate(omega: float) -> dict[str, Any]:
         key = round(float(omega), 10)
         if key not in cache:
-            row = _evaluate(vector=[0.0, 1.0, float(omega)], args=eval_args)
+            row = _evaluate_td_graddft_omega(vector=[0.0, 1.0, float(omega)], args=eval_args)
             cache[key] = row
             print(
                 f"eval={len(cache):03d} omega={row['omega']:.6f} "

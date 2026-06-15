@@ -93,18 +93,6 @@ def parse_args() -> argparse.Namespace:
         help="fractional electron step used in the linearity penalty",
     )
     parser.add_argument(
-        "--janak-frontier-weight",
-        type=float,
-        default=0.0,
-        help="weight for the frontier Janak finite-difference penalty",
-    )
-    parser.add_argument(
-        "--janak-frontier-delta",
-        type=float,
-        default=0.1,
-        help="occupation step used in the Janak frontier finite-difference penalty",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=0,
@@ -478,8 +466,6 @@ def main() -> None:
             orbital_energy_mae_weight=args.orbital_energy_loss_mae_weight,
             fractional_linearity_weight=args.fractional_linearity_weight,
             fractional_linearity_delta=args.fractional_linearity_delta,
-            janak_frontier_constraint_weight=args.janak_frontier_weight,
-            janak_frontier_delta=args.janak_frontier_delta,
             energy_mse_weight=0.0,
             energy_mae_weight=1.0,
             energy_normalization="none",
@@ -594,8 +580,6 @@ def main() -> None:
         handle.write(
             f"fractional_linearity_delta={args.fractional_linearity_delta:.10f}\n"
         )
-        handle.write(f"janak_frontier_weight={args.janak_frontier_weight:.10f}\n")
-        handle.write(f"janak_frontier_delta={args.janak_frontier_delta:.10f}\n")
         handle.write(f"first4_state_mae_ev={state_mae_ev:.10f}\n")
         handle.write(f"orbital_scf_converged={bool(getattr(scf_info, 'converged', False))}\n")
         handle.write(f"orbital_scf_cycles={int(getattr(scf_info, 'cycles', -1))}\n")

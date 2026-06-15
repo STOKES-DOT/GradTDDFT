@@ -20,10 +20,8 @@ from pyscf import dft, gto
 from td_graddft import tdscf
 from td_graddft.features import restricted_grid_features_with_gradients
 from td_graddft.xc_backend.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
-from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
-from td_graddft.tddft.response import build_restricted_response_matrices
-from td_graddft.tddft.tda import solve_tda
+from td_graddft.data.reference import restricted_reference_from_pyscf
+from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum
 
 
 ATOMIC_SYMBOL = {
@@ -172,15 +170,9 @@ def _write_summary(
     auto_nojit_mean, auto_nojit_std = _summarize(rows, task="tda_auto", mode="nojit")
     auto_jit_first_mean, _ = _summarize(rows, task="tda_auto", mode="jit_compile")
     auto_jit_warm_mean, auto_jit_warm_std = _summarize(rows, task="tda_auto", mode="jit_warm")
-    tda_nojit_mean, tda_nojit_std = _summarize(rows, task="tda_dense", mode="nojit")
-    tda_jit_first_mean, _ = _summarize(rows, task="tda_dense", mode="jit_compile")
-    tda_jit_warm_mean, tda_jit_warm_std = _summarize(rows, task="tda_dense", mode="jit_warm")
     spec_auto_nojit_mean, spec_auto_nojit_std = _summarize(rows, task="spectrum_auto", mode="nojit")
     spec_auto_jit_first_mean, _ = _summarize(rows, task="spectrum_auto", mode="jit_compile")
     spec_auto_jit_warm_mean, spec_auto_jit_warm_std = _summarize(rows, task="spectrum_auto", mode="jit_warm")
-    spec_nojit_mean, spec_nojit_std = _summarize(rows, task="spectrum_dense", mode="nojit")
-    spec_jit_first_mean, _ = _summarize(rows, task="spectrum_dense", mode="jit_compile")
-    spec_jit_warm_mean, spec_jit_warm_std = _summarize(rows, task="spectrum_dense", mode="jit_warm")
 
     with path.open("w", encoding="utf-8") as f:
         f.write("QH9 JAX TDA JIT benchmark\n")
@@ -191,7 +183,7 @@ def _write_summary(
         f.write(f"nstates = {nstates}\n")
         f.write(f"repeats = {repeats}\n")
         f.write("\n")
-        f.write("notes = benchmark reports both dense and auto paths; the auto path is expected to select Davidson for this problem size.\n")
+        f.write("notes = benchmark reports the operator/Davidson TD-SCF path.\n")
         f.write("\n")
         f.write(f"tda_auto_nojit_mean_s = {auto_nojit_mean:.10f}\n")
         f.write(f"tda_auto_nojit_std_s = {auto_nojit_std:.10f}\n")
@@ -202,15 +194,6 @@ def _write_summary(
             f"tda_auto_warm_speedup = {auto_nojit_mean / auto_jit_warm_mean:.6f}\n"
         )
         f.write("\n")
-        f.write(f"tda_dense_nojit_mean_s = {tda_nojit_mean:.10f}\n")
-        f.write(f"tda_dense_nojit_std_s = {tda_nojit_std:.10f}\n")
-        f.write(f"tda_dense_jit_compile_first_s = {tda_jit_first_mean:.10f}\n")
-        f.write(f"tda_dense_jit_warm_mean_s = {tda_jit_warm_mean:.10f}\n")
-        f.write(f"tda_dense_jit_warm_std_s = {tda_jit_warm_std:.10f}\n")
-        f.write(
-            f"tda_dense_warm_speedup = {tda_nojit_mean / tda_jit_warm_mean:.6f}\n"
-        )
-        f.write("\n")
         f.write(f"spectrum_auto_nojit_mean_s = {spec_auto_nojit_mean:.10f}\n")
         f.write(f"spectrum_auto_nojit_std_s = {spec_auto_nojit_std:.10f}\n")
         f.write(f"spectrum_auto_jit_compile_first_s = {spec_auto_jit_first_mean:.10f}\n")
@@ -219,15 +202,6 @@ def _write_summary(
         f.write(
             f"spectrum_auto_warm_speedup = {spec_auto_nojit_mean / spec_auto_jit_warm_mean:.6f}\n"
         )
-        f.write("\n")
-        f.write(f"spectrum_dense_nojit_mean_s = {spec_nojit_mean:.10f}\n")
-        f.write(f"spectrum_dense_nojit_std_s = {spec_nojit_std:.10f}\n")
-        f.write(f"spectrum_dense_jit_compile_first_s = {spec_jit_first_mean:.10f}\n")
-        f.write(f"spectrum_dense_jit_warm_mean_s = {spec_jit_warm_mean:.10f}\n")
-        f.write(f"spectrum_dense_jit_warm_std_s = {spec_jit_warm_std:.10f}\n")
-        f.write(
-            f"spectrum_dense_warm_speedup = {spec_nojit_mean / spec_jit_warm_mean:.6f}\n"
-        )
 
 
 def _plot(path: Path, rows: list[TimingRow]) -> None:
@@ -235,15 +209,9 @@ def _plot(path: Path, rows: list[TimingRow]) -> None:
         ("tda_auto", "nojit", "TDA auto\nno-jit"),
         ("tda_auto", "jit_compile", "TDA auto\njit first"),
         ("tda_auto", "jit_warm", "TDA auto\njit warm"),
-        ("tda_dense", "nojit", "TDA dense\nno-jit"),
-        ("tda_dense", "jit_compile", "TDA dense\njit first"),
-        ("tda_dense", "jit_warm", "TDA dense\njit warm"),
         ("spectrum_auto", "nojit", "Spectrum auto\nno-jit"),
         ("spectrum_auto", "jit_compile", "Spectrum auto\njit first"),
         ("spectrum_auto", "jit_warm", "Spectrum auto\njit warm"),
-        ("spectrum_dense", "nojit", "Spectrum dense\nno-jit"),
-        ("spectrum_dense", "jit_compile", "Spectrum dense\njit first"),
-        ("spectrum_dense", "jit_warm", "Spectrum dense\njit warm"),
     ]
     means = []
     stds = []
@@ -262,12 +230,6 @@ def _plot(path: Path, rows: list[TimingRow]) -> None:
         "#72B7B2",
         "#F58518",
         "#54A24B",
-        "#FFBF79",
-        "#E45756",
-        "#B279A2",
-        "#E45756",
-        "#B279A2",
-        "#FF9DA6",
     ]
 
     fig, ax = plt.subplots(figsize=(10.8, 5.2))
@@ -326,25 +288,8 @@ def main() -> None:
             eta=float(args.eta_ev),
         )
 
-    def run_dense_tda():
-        mats = build_restricted_response_matrices(reference, xc_func)
-        return solve_tda(mats, nstates=nstates, eigensolver="dense").excitation_energies
-
-    def run_dense_spectrum():
-        mats = build_restricted_response_matrices(reference, xc_func)
-        result = solve_tda(mats, nstates=nstates, eigensolver="dense")
-        strengths = oscillator_strengths(reference, result)
-        return lorentzian_spectrum(
-            result.excitation_energies * HARTREE_TO_EV,
-            strengths,
-            grid_ev,
-            eta=float(args.eta_ev),
-        )
-
     jit_auto_tda = jax.jit(run_auto_tda)
     jit_auto_spectrum = jax.jit(run_auto_spectrum)
-    jit_dense_tda = jax.jit(run_dense_tda)
-    jit_dense_spectrum = jax.jit(run_dense_spectrum)
 
     rows: list[TimingRow] = []
 
@@ -359,26 +304,10 @@ def main() -> None:
         )
         rows.append(
             TimingRow(
-                task="tda_dense",
-                mode="nojit",
-                repeat=repeat,
-                elapsed_s=_block_and_time(run_dense_tda),
-            )
-        )
-        rows.append(
-            TimingRow(
                 task="spectrum_auto",
                 mode="nojit",
                 repeat=repeat,
                 elapsed_s=_block_and_time(run_auto_spectrum),
-            )
-        )
-        rows.append(
-            TimingRow(
-                task="spectrum_dense",
-                mode="nojit",
-                repeat=repeat,
-                elapsed_s=_block_and_time(run_dense_spectrum),
             )
         )
 
@@ -392,26 +321,10 @@ def main() -> None:
     )
     rows.append(
         TimingRow(
-            task="tda_dense",
-            mode="jit_compile",
-            repeat=1,
-            elapsed_s=_block_and_time(jit_dense_tda),
-        )
-    )
-    rows.append(
-        TimingRow(
             task="spectrum_auto",
             mode="jit_compile",
             repeat=1,
             elapsed_s=_block_and_time(jit_auto_spectrum),
-        )
-    )
-    rows.append(
-        TimingRow(
-            task="spectrum_dense",
-            mode="jit_compile",
-            repeat=1,
-            elapsed_s=_block_and_time(jit_dense_spectrum),
         )
     )
 
@@ -426,26 +339,10 @@ def main() -> None:
         )
         rows.append(
             TimingRow(
-                task="tda_dense",
-                mode="jit_warm",
-                repeat=repeat,
-                elapsed_s=_block_and_time(jit_dense_tda),
-            )
-        )
-        rows.append(
-            TimingRow(
                 task="spectrum_auto",
                 mode="jit_warm",
                 repeat=repeat,
                 elapsed_s=_block_and_time(jit_auto_spectrum),
-            )
-        )
-        rows.append(
-            TimingRow(
-                task="spectrum_dense",
-                mode="jit_warm",
-                repeat=repeat,
-                elapsed_s=_block_and_time(jit_dense_spectrum),
             )
         )
 
@@ -468,12 +365,8 @@ def main() -> None:
 
     tda_auto_nojit_mean, _ = _summarize(rows, task="tda_auto", mode="nojit")
     tda_auto_jit_warm_mean, _ = _summarize(rows, task="tda_auto", mode="jit_warm")
-    tda_nojit_mean, _ = _summarize(rows, task="tda_dense", mode="nojit")
-    tda_jit_warm_mean, _ = _summarize(rows, task="tda_dense", mode="jit_warm")
     spec_auto_nojit_mean, _ = _summarize(rows, task="spectrum_auto", mode="nojit")
     spec_auto_jit_warm_mean, _ = _summarize(rows, task="spectrum_auto", mode="jit_warm")
-    spec_nojit_mean, _ = _summarize(rows, task="spectrum_dense", mode="nojit")
-    spec_jit_warm_mean, _ = _summarize(rows, task="spectrum_dense", mode="jit_warm")
 
     print(f"db_id={args.db_id}")
     print(f"formula={formula}")
@@ -481,15 +374,9 @@ def main() -> None:
     print(f"tda_auto_nojit_mean_s={tda_auto_nojit_mean:.6f}")
     print(f"tda_auto_jit_warm_mean_s={tda_auto_jit_warm_mean:.6f}")
     print(f"tda_auto_warm_speedup={tda_auto_nojit_mean / tda_auto_jit_warm_mean:.4f}")
-    print(f"tda_dense_nojit_mean_s={tda_nojit_mean:.6f}")
-    print(f"tda_dense_jit_warm_mean_s={tda_jit_warm_mean:.6f}")
-    print(f"tda_dense_warm_speedup={tda_nojit_mean / tda_jit_warm_mean:.4f}")
     print(f"spectrum_auto_nojit_mean_s={spec_auto_nojit_mean:.6f}")
     print(f"spectrum_auto_jit_warm_mean_s={spec_auto_jit_warm_mean:.6f}")
     print(f"spectrum_auto_warm_speedup={spec_auto_nojit_mean / spec_auto_jit_warm_mean:.4f}")
-    print(f"spectrum_dense_nojit_mean_s={spec_nojit_mean:.6f}")
-    print(f"spectrum_dense_jit_warm_mean_s={spec_jit_warm_mean:.6f}")
-    print(f"spectrum_dense_warm_speedup={spec_nojit_mean / spec_jit_warm_mean:.4f}")
     print(f"csv={csv_path}")
     print(f"summary={summary_path}")
     print(f"plot={plot_path}")

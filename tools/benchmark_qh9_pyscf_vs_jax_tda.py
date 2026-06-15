@@ -20,10 +20,8 @@ from pyscf import dft, gto
 from td_graddft import tdscf
 from td_graddft.features import restricted_grid_features_with_gradients
 from td_graddft.xc_backend.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
-from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
-from td_graddft.tddft.response import build_restricted_response_matrices
-from td_graddft.tddft.tda import solve_tda
+from td_graddft.data.reference import restricted_reference_from_pyscf
+from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum
 
 
 ATOMIC_SYMBOL = {
@@ -190,12 +188,8 @@ def _write_summary(
         ("pyscf", "spectrum"),
         ("jax_auto", "tda"),
         ("jax_auto_jit_warm", "tda"),
-        ("jax_dense", "tda"),
-        ("jax_dense_jit_warm", "tda"),
         ("jax_auto", "spectrum"),
         ("jax_auto_jit_warm", "spectrum"),
-        ("jax_dense", "spectrum"),
-        ("jax_dense_jit_warm", "spectrum"),
     ]
 
     with path.open("w", encoding="utf-8") as f:
@@ -207,7 +201,7 @@ def _write_summary(
         f.write(f"nstates = {nstates}\n")
         f.write(f"repeats = {repeats}\n")
         f.write("\n")
-        f.write("notes = benchmark isolates the excited-state layer after a fixed SCF reference. It reports both the default JAX auto path and the dense JAX path, with and without jit warm-start.\n")
+        f.write("notes = benchmark isolates the excited-state layer after a fixed SCF reference. JAX uses the operator/Davidson path.\n")
         f.write("\n")
         for backend, task in labels:
             mean, std = _summarize(rows, backend=backend, task=task)
@@ -216,14 +210,10 @@ def _write_summary(
         f.write("\n")
         pyscf_tda_mean, _ = _summarize(rows, backend="pyscf", task="tda")
         jax_auto_tda_jit_mean, _ = _summarize(rows, backend="jax_auto_jit_warm", task="tda")
-        jax_tda_jit_mean, _ = _summarize(rows, backend="jax_dense_jit_warm", task="tda")
         pyscf_spec_mean, _ = _summarize(rows, backend="pyscf", task="spectrum")
         jax_auto_spec_jit_mean, _ = _summarize(rows, backend="jax_auto_jit_warm", task="spectrum")
-        jax_spec_jit_mean, _ = _summarize(rows, backend="jax_dense_jit_warm", task="spectrum")
         f.write(f"tda_jax_auto_jit_vs_pyscf_speedup = {pyscf_tda_mean / jax_auto_tda_jit_mean:.6f}\n")
-        f.write(f"tda_jax_jit_vs_pyscf_speedup = {pyscf_tda_mean / jax_tda_jit_mean:.6f}\n")
         f.write(f"spectrum_jax_auto_jit_vs_pyscf_speedup = {pyscf_spec_mean / jax_auto_spec_jit_mean:.6f}\n")
-        f.write(f"spectrum_jax_jit_vs_pyscf_speedup = {pyscf_spec_mean / jax_spec_jit_mean:.6f}\n")
 
 
 def _plot(path: Path, rows: list[TimingRow]) -> None:
@@ -232,12 +222,8 @@ def _plot(path: Path, rows: list[TimingRow]) -> None:
         ("pyscf", "spectrum", "PySCF\nSpectrum"),
         ("jax_auto", "tda", "JAX auto\nTDA"),
         ("jax_auto_jit_warm", "tda", "JAX auto jit\nTDA"),
-        ("jax_dense", "tda", "JAX dense\nTDA"),
-        ("jax_dense_jit_warm", "tda", "JAX dense jit\nTDA"),
         ("jax_auto", "spectrum", "JAX auto\nSpectrum"),
         ("jax_auto_jit_warm", "spectrum", "JAX auto jit\nSpectrum"),
-        ("jax_dense", "spectrum", "JAX dense\nSpectrum"),
-        ("jax_dense_jit_warm", "spectrum", "JAX dense jit\nSpectrum"),
     ]
     means = []
     stds = []
@@ -256,10 +242,6 @@ def _plot(path: Path, rows: list[TimingRow]) -> None:
         "#BAB0AC",
         "#F58518",
         "#54A24B",
-        "#E45756",
-        "#B279A2",
-        "#FF9DA6",
-        "#8E6C8A",
     ]
 
     fig, ax = plt.subplots(figsize=(11.2, 5.4))
@@ -339,25 +321,8 @@ def main() -> None:
             eta=float(args.eta_ev),
         )
 
-    def run_jax_dense_tda():
-        mats = build_restricted_response_matrices(reference, xc_func)
-        return solve_tda(mats, nstates=nstates, eigensolver="dense").excitation_energies
-
-    def run_jax_dense_spectrum():
-        mats = build_restricted_response_matrices(reference, xc_func)
-        result = solve_tda(mats, nstates=nstates, eigensolver="dense")
-        strengths = oscillator_strengths(reference, result)
-        return lorentzian_spectrum(
-            result.excitation_energies * HARTREE_TO_EV,
-            strengths,
-            grid_ev_jax,
-            eta=float(args.eta_ev),
-        )
-
     jit_jax_auto_tda = jax.jit(run_jax_auto_tda)
     jit_jax_auto_spectrum = jax.jit(run_jax_auto_spectrum)
-    jit_jax_dense_tda = jax.jit(run_jax_dense_tda)
-    jit_jax_dense_spectrum = jax.jit(run_jax_dense_spectrum)
 
     rows: list[TimingRow] = []
 
@@ -394,27 +359,8 @@ def main() -> None:
                 elapsed_s=_block_and_time(run_jax_auto_spectrum),
             )
         )
-        rows.append(
-            TimingRow(
-                backend="jax_dense",
-                task="tda",
-                repeat=repeat,
-                elapsed_s=_block_and_time(run_jax_dense_tda),
-            )
-        )
-        rows.append(
-            TimingRow(
-                backend="jax_dense",
-                task="spectrum",
-                repeat=repeat,
-                elapsed_s=_block_and_time(run_jax_dense_spectrum),
-            )
-        )
-
     _block_and_time(jit_jax_auto_tda)
     _block_and_time(jit_jax_auto_spectrum)
-    _block_and_time(jit_jax_dense_tda)
-    _block_and_time(jit_jax_dense_spectrum)
     for repeat in range(1, int(args.repeats) + 1):
         rows.append(
             TimingRow(
@@ -432,23 +378,6 @@ def main() -> None:
                 elapsed_s=_block_and_time(jit_jax_auto_spectrum),
             )
         )
-        rows.append(
-            TimingRow(
-                backend="jax_dense_jit_warm",
-                task="tda",
-                repeat=repeat,
-                elapsed_s=_block_and_time(jit_jax_dense_tda),
-            )
-        )
-        rows.append(
-            TimingRow(
-                backend="jax_dense_jit_warm",
-                task="spectrum",
-                repeat=repeat,
-                elapsed_s=_block_and_time(jit_jax_dense_spectrum),
-            )
-        )
-
     stem = f"qh9_id{args.db_id}_{formula}_{str(args.xc).lower()}_{str(args.basis).lower()}".replace("*", "star")
     csv_path = outdir / f"{stem}_pyscf_vs_jax_tda_benchmark.csv"
     summary_path = outdir / f"{stem}_pyscf_vs_jax_tda_benchmark_summary.txt"
@@ -471,8 +400,6 @@ def main() -> None:
     pyscf_spec_mean, _ = _summarize(rows, backend="pyscf", task="spectrum")
     jax_auto_tda_jit_mean, _ = _summarize(rows, backend="jax_auto_jit_warm", task="tda")
     jax_auto_spec_jit_mean, _ = _summarize(rows, backend="jax_auto_jit_warm", task="spectrum")
-    jax_tda_jit_mean, _ = _summarize(rows, backend="jax_dense_jit_warm", task="tda")
-    jax_spec_jit_mean, _ = _summarize(rows, backend="jax_dense_jit_warm", task="spectrum")
 
     print(f"db_id={args.db_id}")
     print(f"formula={formula}")
@@ -480,13 +407,9 @@ def main() -> None:
     print(f"jax_auto_jit_tda_mean_s={jax_auto_tda_jit_mean:.6f}")
     print(f"pyscf_tda_mean_s={pyscf_tda_mean:.6f}")
     print(f"tda_auto_speedup_vs_pyscf={pyscf_tda_mean / jax_auto_tda_jit_mean:.4f}")
-    print(f"jax_dense_jit_tda_mean_s={jax_tda_jit_mean:.6f}")
-    print(f"tda_speedup_vs_pyscf={pyscf_tda_mean / jax_tda_jit_mean:.4f}")
     print(f"jax_auto_jit_spectrum_mean_s={jax_auto_spec_jit_mean:.6f}")
     print(f"pyscf_spectrum_mean_s={pyscf_spec_mean:.6f}")
     print(f"spectrum_auto_speedup_vs_pyscf={pyscf_spec_mean / jax_auto_spec_jit_mean:.4f}")
-    print(f"jax_dense_jit_spectrum_mean_s={jax_spec_jit_mean:.6f}")
-    print(f"spectrum_speedup_vs_pyscf={pyscf_spec_mean / jax_spec_jit_mean:.4f}")
     print(f"csv={csv_path}")
     print(f"summary={summary_path}")
     print(f"plot={plot_path}")

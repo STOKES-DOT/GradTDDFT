@@ -112,6 +112,19 @@ def resolve_canonical_hfx_feature_channels(
     strict_feature_alignment: bool = True,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     target_channels = max(int(hfx_channels), 1)
+    if hf_spin_energy_density is not None:
+        hfx_a = jnp.asarray(hf_spin_energy_density[0])
+        hfx_b = jnp.asarray(hf_spin_energy_density[1])
+        if hfx_a.ndim == features.rho.ndim:
+            hfx_a = hfx_a[..., None]
+        if hfx_b.ndim == features.rho.ndim:
+            hfx_b = hfx_b[..., None]
+        if hfx_a.shape[-1] == 1 and target_channels > 1:
+            hfx_a = jnp.repeat(hfx_a, target_channels, axis=-1)
+        if hfx_b.shape[-1] == 1 and target_channels > 1:
+            hfx_b = jnp.repeat(hfx_b, target_channels, axis=-1)
+        return hfx_a, hfx_b
+
     cached = getattr(molecule, "hfx_local", None) if molecule is not None else None
     if cached is not None:
         cached = jnp.asarray(cached)
@@ -126,19 +139,6 @@ def resolve_canonical_hfx_feature_channels(
             "molecule.hfx_local must have shape (2, ngrids, n_omega), "
             f"got {cached.shape}."
         )
-
-    if hf_spin_energy_density is not None:
-        hfx_a = jnp.asarray(hf_spin_energy_density[0])
-        hfx_b = jnp.asarray(hf_spin_energy_density[1])
-        if hfx_a.ndim == features.rho.ndim:
-            hfx_a = hfx_a[..., None]
-        if hfx_b.ndim == features.rho.ndim:
-            hfx_b = hfx_b[..., None]
-        if hfx_a.shape[-1] == 1 and target_channels > 1:
-            hfx_a = jnp.repeat(hfx_a, target_channels, axis=-1)
-        if hfx_b.shape[-1] == 1 and target_channels > 1:
-            hfx_b = jnp.repeat(hfx_b, target_channels, axis=-1)
-        return hfx_a, hfx_b
 
     if strict_feature_alignment and molecule is not None:
         raise ValueError(
@@ -168,6 +168,7 @@ def build_coefficient_inputs(
     density_floor: float,
     hfx_channels: int,
     strict_feature_alignment: bool,
+    include_hfx_channel: bool = True,
     pt2_energy_density: Any | None = None,
     molecule: Any | None = None,
     hf_spin_energy_density: tuple[Any, Any] | None = None,
@@ -179,14 +180,20 @@ def build_coefficient_inputs(
         else jnp.asarray(pt2_energy_density)
     )
     if input_feature_mode == "canonical":
-        hfx_a, hfx_b = resolve_canonical_hfx_feature_channels(
-            molecule,
-            features,
-            hf_energy_density=hf_energy_density,
-            hf_spin_energy_density=hf_spin_energy_density,
-            hfx_channels=hfx_channels,
-            strict_feature_alignment=strict_feature_alignment,
-        )
+        if include_hfx_channel:
+            hfx_a, hfx_b = resolve_canonical_hfx_feature_channels(
+                molecule,
+                features,
+                hf_energy_density=hf_energy_density,
+                hf_spin_energy_density=hf_spin_energy_density,
+                hfx_channels=hfx_channels,
+                strict_feature_alignment=strict_feature_alignment,
+            )
+        else:
+            target_channels = max(int(hfx_channels), 1)
+            zeros = jnp.zeros_like(features.rho)[..., None]
+            hfx_a = jnp.repeat(zeros, target_channels, axis=-1)
+            hfx_b = hfx_a
         base = canonical_input_features(
             features,
             hfx_a,
@@ -216,21 +223,27 @@ def build_coefficient_inputs(
         semilocal_descriptor,
         density_floor=density_floor,
     )
-    hf_total = jnp.asarray(hf_energy_density)
-    if hf_input_mode == "total_only":
-        extras = [hf_total[..., None]]
-    elif hf_input_mode == "spin_resolved":
-        if hf_spin_energy_density is None:
-            hf_a = hf_total
-            hf_b = hf_total
+    extras = []
+    if include_hfx_channel:
+        hf_total = jnp.asarray(hf_energy_density)
+        if hf_input_mode == "total_only":
+            extras = [hf_total[..., None]]
+        elif hf_input_mode == "spin_resolved":
+            if hf_spin_energy_density is None:
+                hf_a = hf_total
+                hf_b = hf_total
+            else:
+                hf_a, hf_b = hf_spin_energy_density
+            extras = [
+                hf_total[..., None],
+                jnp.asarray(hf_a)[..., None],
+                jnp.asarray(hf_b)[..., None],
+            ]
         else:
-            hf_a, hf_b = hf_spin_energy_density
-        extras = [hf_total[..., None], jnp.asarray(hf_a)[..., None], jnp.asarray(hf_b)[..., None]]
-    else:
-        raise ValueError(
-            f"Unsupported hf_input_mode={hf_input_mode!r}. "
-            "Expected 'total_only' or 'spin_resolved'."
-        )
+            raise ValueError(
+                f"Unsupported hf_input_mode={hf_input_mode!r}. "
+                "Expected 'total_only' or 'spin_resolved'."
+            )
     if include_pt2_channel:
         extras.append(pt2_total[..., None])
     return jnp.concatenate([base, *extras], axis=-1)
@@ -241,6 +254,7 @@ def assemble_basis_channels(
     *,
     hf_projected: Any,
     include_pt2_channel: bool,
+    include_hfx_channel: bool = True,
     pt2_projected: Any | None = None,
 ) -> jnp.ndarray:
     channels = [jnp.asarray(semilocal_local_channels)]
@@ -248,7 +262,8 @@ def assemble_basis_channels(
         if pt2_projected is None:
             raise ValueError("pt2_projected must be provided when include_pt2_channel=True.")
         channels.append(jnp.asarray(pt2_projected)[..., None])
-    channels.append(jnp.asarray(hf_projected)[..., None])
+    if include_hfx_channel:
+        channels.append(jnp.asarray(hf_projected)[..., None])
     return jnp.concatenate(channels, axis=-1)
 
 
@@ -260,6 +275,7 @@ def _int1e_rinv_name(mol: Any) -> str:
     return "int1e_rinv_cart" if bool(getattr(mol, "cart", False)) else "int1e_rinv_sph"
 
 
+@jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True)
 class ChunkedHFXNu:
     """Lazy grid-chunk API for local HFX ``nu`` matrices.
@@ -271,8 +287,53 @@ class ChunkedHFXNu:
 
     shape: tuple[int, int, int, int]
     chunk_size: int
-    _grid_chunk_fn: Any
+    _grid_chunk_fn: Any | None
     _grid_chunk_padded_fn: Any | None = None
+    _source_kind: str = "static"
+    _dense_array: Any | None = None
+    _hdf5_filename: str | None = None
+    _hdf5_dataset_path: str | None = None
+
+    def tree_flatten(self):
+        if self._source_kind == "dense":
+            return (
+                (self._dense_array,),
+                (self.shape, int(self.chunk_size), "dense"),
+            )
+        if self._source_kind == "hdf5":
+            return (
+                (),
+                (
+                    self.shape,
+                    int(self.chunk_size),
+                    "hdf5",
+                    self._hdf5_filename,
+                    self._hdf5_dataset_path,
+                ),
+            )
+        return (), (self.shape, int(self.chunk_size), "static", self)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        shape = tuple(int(dim) for dim in aux_data[0])
+        chunk_size = int(aux_data[1])
+        source_kind = str(aux_data[2])
+        if source_kind == "dense":
+            (dense_array,) = children
+            return cls(
+                shape=shape,
+                chunk_size=chunk_size,
+                _grid_chunk_fn=None,
+                _source_kind="dense",
+                _dense_array=dense_array,
+            )
+        if source_kind == "hdf5":
+            return cls.from_hdf5_dataset(
+                aux_data[3],
+                aux_data[4],
+                chunk_size=chunk_size,
+            )
+        return aux_data[3]
 
     @property
     def ndim(self) -> int:
@@ -288,78 +349,42 @@ class ChunkedHFXNu:
             )
 
         shape = tuple(int(dim) for dim in array.shape)
-
-        def grid_chunk(start: int, stop: int) -> np.ndarray:
-            return np.asarray(array[:, int(start) : int(stop)])
-
-        def grid_chunk_padded(start: Any, chunk_size: int) -> jnp.ndarray:
-            chunk_size_i = int(chunk_size)
-            dense = jnp.asarray(array)
-            indices = jnp.asarray(start, dtype=jnp.int32) + jnp.arange(
-                chunk_size_i,
-                dtype=jnp.int32,
-            )
-            chunk = jnp.take(dense, indices, axis=1, mode="clip")
-            valid = indices < int(shape[1])
-            return jnp.where(
-                valid.reshape((1, chunk_size_i, 1, 1)),
-                chunk,
-                jnp.zeros_like(chunk),
-            )
-
         return cls(
             shape=shape,
             chunk_size=int(chunk_size),
-            _grid_chunk_fn=grid_chunk,
-            _grid_chunk_padded_fn=grid_chunk_padded,
+            _grid_chunk_fn=None,
+            _grid_chunk_padded_fn=None,
+            _source_kind="dense",
+            _dense_array=array,
         )
 
     @classmethod
     def from_hdf5_dataset(
         cls,
-        filename: str,
+        filename: str | Path,
         dataset_path: str,
         *,
         chunk_size: int = 512,
     ) -> "ChunkedHFXNu":
-        try:
-            import h5py
-        except ModuleNotFoundError as exc:
-            raise ImportError("h5py is required for HDF5-backed HFX nu chunks.") from exc
+        import h5py
 
-        filename = str(Path(filename).resolve())
-        dataset_path = str(dataset_path)
-        with h5py.File(filename, "r") as handle:
-            dataset = handle[dataset_path]
+        filename_s = str(Path(filename).expanduser().resolve())
+        dataset_path_s = str(dataset_path)
+        with h5py.File(filename_s, "r") as handle:
+            dataset = handle[dataset_path_s]
+            if dataset.ndim != 4:
+                raise ValueError(
+                    "HDF5 HFX nu cache must have shape (n_omega, ngrids, nao, nao), "
+                    f"got {dataset.shape}."
+                )
             shape = tuple(int(dim) for dim in dataset.shape)
-            dataset_dtype = np.dtype(dataset.dtype)
-        if len(shape) != 4:
-            raise ValueError(
-                "HDF5 HFX nu dataset must have shape (n_omega, ngrids, nao, nao), "
-                f"got {shape}."
+            callback_dtype = np.dtype(
+                jax.dtypes.canonicalize_dtype(np.dtype(dataset.dtype))
             )
-        callback_dtype = np.dtype(jax.dtypes.canonicalize_dtype(dataset_dtype))
 
         def grid_chunk(start: int, stop: int) -> np.ndarray:
-            start_i = int(start)
-            stop_i = int(stop)
-            chunk_shape = (shape[0], max(0, stop_i - start_i), shape[2], shape[3])
-
-            def read_chunk(start_arg: Any, stop_arg: Any) -> np.ndarray:
-                read_start = int(np.asarray(start_arg))
-                read_stop = int(np.asarray(stop_arg))
-                with h5py.File(filename, "r") as handle:
-                    return np.asarray(
-                        handle[dataset_path][:, read_start:read_stop],
-                        dtype=callback_dtype,
-                    )
-
-            return jax.pure_callback(
-                read_chunk,
-                jax.ShapeDtypeStruct(chunk_shape, callback_dtype),
-                np.asarray(start_i, dtype=np.int32),
-                np.asarray(stop_i, dtype=np.int32),
-            )
+            with h5py.File(filename_s, "r") as handle:
+                return np.asarray(handle[dataset_path_s][:, int(start) : int(stop)])
 
         def grid_chunk_padded(start: Any, chunk_size: int) -> jnp.ndarray:
             chunk_size_i = int(chunk_size)
@@ -367,15 +392,13 @@ class ChunkedHFXNu:
 
             def read_chunk(start_arg: Any) -> np.ndarray:
                 read_start = int(np.asarray(start_arg))
-                output = np.zeros(chunk_shape, dtype=callback_dtype)
-                if read_start >= shape[1] or chunk_size_i <= 0:
-                    return output
                 read_stop = min(read_start + chunk_size_i, shape[1])
+                output = np.zeros(chunk_shape, dtype=callback_dtype)
                 if read_stop <= read_start:
                     return output
-                with h5py.File(filename, "r") as handle:
+                with h5py.File(filename_s, "r") as handle:
                     data = np.asarray(
-                        handle[dataset_path][:, read_start:read_stop],
+                        handle[dataset_path_s][:, read_start:read_stop],
                         dtype=callback_dtype,
                     )
                 output[:, : data.shape[1]] = data
@@ -392,6 +415,10 @@ class ChunkedHFXNu:
             chunk_size=int(chunk_size),
             _grid_chunk_fn=grid_chunk,
             _grid_chunk_padded_fn=grid_chunk_padded,
+            _source_kind="hdf5",
+            _dense_array=None,
+            _hdf5_filename=filename_s,
+            _hdf5_dataset_path=dataset_path_s,
         )
 
     @classmethod
@@ -464,12 +491,31 @@ class ChunkedHFXNu:
         )
 
     def grid_chunk(self, start: int, stop: int) -> Any:
+        if self._source_kind == "dense" and self._dense_array is not None:
+            return jnp.asarray(self._dense_array)[:, int(start) : int(stop)]
+        if self._grid_chunk_fn is None:
+            raise AttributeError("This HFX nu source does not expose a grid chunk callback.")
         return self._grid_chunk_fn(int(start), int(stop))
 
     def grid_chunk_padded(self, start: Any, chunk_size: int) -> Any:
         chunk_size_i = int(chunk_size)
+        if self._source_kind == "dense" and self._dense_array is not None:
+            dense = jnp.asarray(self._dense_array)
+            indices = jnp.asarray(start, dtype=jnp.int32) + jnp.arange(
+                chunk_size_i,
+                dtype=jnp.int32,
+            )
+            chunk = jnp.take(dense, indices, axis=1, mode="clip")
+            valid = indices < int(self.shape[1])
+            return jnp.where(
+                valid.reshape((1, chunk_size_i, 1, 1)),
+                chunk,
+                jnp.zeros_like(chunk),
+            )
         if self._grid_chunk_padded_fn is not None:
             return self._grid_chunk_padded_fn(start, chunk_size_i)
+        if self._grid_chunk_fn is None:
+            raise AttributeError("This HFX nu source does not expose a grid chunk callback.")
         start_i = int(start)
         stop_i = min(start_i + chunk_size_i, self.shape[1])
         chunk = jnp.asarray(self.grid_chunk(start_i, stop_i))
@@ -479,6 +525,8 @@ class ChunkedHFXNu:
         return jnp.pad(chunk, ((0, 0), (0, pad), (0, 0), (0, 0)))
 
     def materialize(self) -> np.ndarray:
+        if self._source_kind == "dense" and self._dense_array is not None:
+            return np.asarray(jax.device_get(self._dense_array))
         chunks = [
             np.asarray(
                 self.grid_chunk(start, min(start + int(self.chunk_size), self.shape[1]))

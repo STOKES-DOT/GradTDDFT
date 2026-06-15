@@ -25,7 +25,7 @@ from td_graddft.neural_xc_presets import (
     DM21_B3LYP_NEURAL_XC_PRESET,
     resolve_coefficient_prior_values,
 )
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
 from td_graddft.scf import DifferentiableSCF, DifferentiableSCFConfig
 from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
 from td_graddft.training import (

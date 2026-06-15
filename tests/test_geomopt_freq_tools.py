@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from td_graddft.data.molecule import parse_molecule_spec
 from td_graddft.scf import RKSConfig
@@ -129,7 +130,7 @@ def test_excited_surface_and_frequency_analysis_share_same_pipeline():
     )
 
 
-def test_rks_libcint_ground_surface_from_molecule_spec_is_differentiable():
+def test_rks_libcint_ground_surface_from_molecule_spec_reports_trace_boundary():
     _pyscf_or_skip()
     spec = parse_molecule_spec(
         [
@@ -157,16 +158,12 @@ def test_rks_libcint_ground_surface_from_molecule_spec_is_differentiable():
         ),
     )
 
-    energy, grad = jax.value_and_grad(surface.energy)(coords)
-    result = run_geometry_optimization(
-        surface,
-        coords,
-        GeometryOptimizationConfig(max_steps=1, learning_rate=1e-3),
-    )
+    energy = surface.energy(coords)
 
     assert surface.state_kind == "ground"
     assert np.isfinite(float(energy))
-    assert np.isfinite(np.asarray(grad)).all()
-    assert np.allclose(np.asarray(grad[0]), -np.asarray(grad[1]), atol=1e-8, rtol=1e-8)
-    assert result.steps == 1
-    assert np.isfinite(result.final_energy)
+    with pytest.raises(
+        NotImplementedError,
+        match="Explicit traceable SCF execution has been removed",
+    ):
+        jax.grad(surface.energy)(coords)

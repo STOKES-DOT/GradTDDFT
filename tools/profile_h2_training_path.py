@@ -94,7 +94,6 @@ def _install_wrappers(stats: dict[str, dict[str, float]]) -> None:
     )
     wrap(training_targets, "ground_state_mse_loss", "targets.ground_state_mse_loss")
     wrap(training_targets, "_solve_excited_states", "targets._solve_excited_states")
-    wrap(response_module, "build_restricted_tda_matrix", "response.build_restricted_tda_matrix")
     wrap(
         NeuralXCHybridFunctional,
         "bind_to_molecule_for_scf",

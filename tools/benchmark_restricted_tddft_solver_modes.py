@@ -12,7 +12,7 @@ import numpy as np
 from pyscf import dft, gto
 
 from td_graddft import tdscf
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
 
 
 def _linear_acene_atoms(n_rings: int, *, c_c: float = 1.397, c_h: float = 1.09):
@@ -195,22 +195,22 @@ def main() -> None:
     reference = _build_reference(args.molecule, args.basis, args.xc)
 
     rows: list[BenchmarkRow] = []
-    for mode in ("dense", "davidson"):
-        for run in range(1, int(args.runs) + 1):
-            measured = _benchmark_once(reference, nstates=int(args.nstates), mode=mode)
-            rows.extend(
-                BenchmarkRow(
-                    stage=row.stage,
-                    mode=row.mode,
-                    run=run,
-                    elapsed_s=row.elapsed_s,
-                    nstates=row.nstates,
-                    first_excitation_ha=row.first_excitation_ha,
-                )
-                for row in measured
+    mode = "davidson"
+    for run in range(1, int(args.runs) + 1):
+        measured = _benchmark_once(reference, nstates=int(args.nstates), mode=mode)
+        rows.extend(
+            BenchmarkRow(
+                stage=row.stage,
+                mode=row.mode,
+                run=run,
+                elapsed_s=row.elapsed_s,
+                nstates=row.nstates,
+                first_excitation_ha=row.first_excitation_ha,
             )
-            print(asdict(rows[-2]))
-            print(asdict(rows[-1]))
+            for row in measured
+        )
+        print(asdict(rows[-2]))
+        print(asdict(rows[-1]))
 
     def _steady(stage: str, mode: str) -> BenchmarkRow:
         candidates = [r for r in rows if r.stage == stage and r.mode == mode]
@@ -222,18 +222,11 @@ def main() -> None:
         "xc": args.xc,
         "nstates": int(args.nstates),
         "runs": int(args.runs),
-        "tda_speedup_davidson_over_dense": _steady("tda", "dense").elapsed_s
-        / _steady("tda", "davidson").elapsed_s,
-        "kernel_speedup_davidson_over_dense": _steady("kernel", "dense").elapsed_s
-        / _steady("kernel", "davidson").elapsed_s,
-        "tda_first_excitation_abs_diff_ha": abs(
-            _steady("tda", "dense").first_excitation_ha
-            - _steady("tda", "davidson").first_excitation_ha
-        ),
-        "kernel_first_excitation_abs_diff_ha": abs(
-            _steady("kernel", "dense").first_excitation_ha
-            - _steady("kernel", "davidson").first_excitation_ha
-        ),
+        "solver": "davidson",
+        "tda_elapsed_s": _steady("tda", "davidson").elapsed_s,
+        "kernel_elapsed_s": _steady("kernel", "davidson").elapsed_s,
+        "tda_first_excitation_ha": _steady("tda", "davidson").first_excitation_ha,
+        "kernel_first_excitation_ha": _steady("kernel", "davidson").first_excitation_ha,
     }
 
     csv_path = outdir / f"{args.molecule}_{args.xc}_{args.basis}_solver_modes.csv"
