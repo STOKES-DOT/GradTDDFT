@@ -53,6 +53,7 @@ class RestrictedMolecule:
     hfx_nu: jnp.ndarray | None = None
     hfx_nu_api: Any | None = None
     pt2_local: jnp.ndarray | None = None
+    neural_xc_grid_payload: Any | None = None
     scf_initial_density: jnp.ndarray | None = None
     df_factors: jnp.ndarray | None = None
     eri_pair_matrix: jnp.ndarray | None = None
@@ -68,7 +69,13 @@ class RestrictedMolecule:
 
 
 @pytree_dataclass(
-    static_fields=("nocc_alpha", "nocc_beta", "runtime_scf_backend", "runtime_scf_options")
+    static_fields=(
+        "nocc_alpha",
+        "nocc_beta",
+        "runtime_scf_backend",
+        "runtime_scf_options",
+        "hfx_nu_api",
+    )
 )
 @dataclass(frozen=True)
 class UnrestrictedMolecule:
@@ -96,6 +103,7 @@ class UnrestrictedMolecule:
     hfx_omega_values: jnp.ndarray | None = None
     hfx_local: jnp.ndarray | None = None
     hfx_nu: jnp.ndarray | None = None
+    hfx_nu_api: Any | None = None
     pt2_local: jnp.ndarray | None = None
     scf_initial_density: jnp.ndarray | None = None
     runtime_scf_backend: str | None = None

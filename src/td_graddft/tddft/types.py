@@ -24,22 +24,11 @@ def _pytree_dataclass(cls):
 
 @_pytree_dataclass
 @dataclass(frozen=True)
-class TDDFTMatrices:
-    """Response matrices for a restricted closed-shell reference."""
-
-    orbital_energy_differences: Array
-    a_matrix: Array
-    b_matrix: Array
-
-
-@_pytree_dataclass
-@dataclass(frozen=True)
 class TDAResult:
     """Excitation energies and amplitudes from TDA."""
 
     excitation_energies: Array
     amplitudes: Array
-    a_matrix: Optional[Array]
     posthoc_correction: Optional[Array] = None
 
 
@@ -51,7 +40,4 @@ class TDDFTResult:
     excitation_energies: Array
     x_amplitudes: Array
     y_amplitudes: Array
-    a_matrix: Optional[Array]
-    b_matrix: Optional[Array]
-    casida_matrix: Optional[Array]
     posthoc_correction: Optional[Array] = None

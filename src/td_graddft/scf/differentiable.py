@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Any, Literal
 
 import jax
@@ -13,10 +13,7 @@ from jaxtyping import Array, PyTree
 
 from ..data.integrals import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix
 from ..neural_xc.inputs import (
-    hfx_nu_grid_chunk_padded,
-    hfx_nu_shape,
     hfx_nu_source,
-    is_chunked_hfx_nu,
 )
 from .core import _build_density_from_occ, _diagonalize_fock, _orthogonalizer
 from .implicit import (
@@ -33,7 +30,38 @@ from .rks import (
 from .uks import run_unrestricted_scf_scan
 
 
+_GRID_PAYLOAD_DEPENDENCY_FIELDS = frozenset(
+    (
+        "ao",
+        "ao_deriv1",
+        "ao_laplacian",
+        "grid",
+        "rdm1",
+        "mo_coeff",
+        "mo_occ",
+        "mo_energy",
+        "hfx_local",
+        "hfx_nu",
+        "hfx_nu_api",
+        "pt2_local",
+    )
+)
+
+
+def _supports_neural_xc_grid_payload(molecule: Any) -> bool:
+    if is_dataclass(molecule):
+        return any(field.name == "neural_xc_grid_payload" for field in fields(molecule))
+    return hasattr(molecule, "neural_xc_grid_payload")
+
+
 def _replace_molecule(molecule: Any, **updates: Any) -> Any:
+    if (
+        "neural_xc_grid_payload" not in updates
+        and _supports_neural_xc_grid_payload(molecule)
+        and _GRID_PAYLOAD_DEPENDENCY_FIELDS.intersection(updates)
+    ):
+        updates = dict(updates)
+        updates["neural_xc_grid_payload"] = None
     if is_dataclass(molecule):
         return replace(molecule, **updates)
     molecule_out = copy.copy(molecule)
@@ -541,98 +569,6 @@ def _build_vxc_matrix_from_components(
         xc_kind=kind,
     )
 
-def _restricted_hfx_features_from_nu(
-    *,
-    ao: Array,
-    density: Array,
-    nu_cache: Any,
-) -> Array:
-    """Recompute Neural XC local-HF density features hfx_local from current density."""
-
-    n_omega, ngrid, nao, nao2 = hfx_nu_shape(nu_cache)
-    if int(ao.shape[0]) != ngrid:
-        raise ValueError(
-            "hfx_nu grid axis must match ao first axis "
-            f"(got {ngrid} vs {ao.shape[0]})."
-        )
-    if int(ao.shape[1]) != nao or int(ao.shape[1]) != nao2:
-        raise ValueError(
-            "hfx_nu AO dimensions must match ao second axis "
-            f"(got {(nao, nao2)} vs {(ao.shape[1], ao.shape[1])})."
-        )
-    density_half = 0.5 * density
-    if is_chunked_hfx_nu(nu_cache):
-        chunk_size = max(1, min(int(getattr(nu_cache, "chunk_size", ngrid)), ngrid))
-        n_chunks = (ngrid + chunk_size - 1) // chunk_size
-        padded = n_chunks * chunk_size
-        zero = jnp.zeros((n_omega, padded), dtype=ao.dtype)
-
-        def exx_chunk_from_start(start: Array) -> Array:
-            indices = start + jnp.arange(chunk_size)
-            ao_chunk = jnp.take(ao, indices, axis=0, mode="clip")
-            valid = indices < ngrid
-            ao_chunk = jnp.where(valid[:, None], ao_chunk, jnp.zeros_like(ao_chunk))
-            nu_chunk = hfx_nu_grid_chunk_padded(
-                nu_cache,
-                start,
-                chunk_size,
-                n_omega=n_omega,
-                dtype=ao.dtype,
-            )
-            e_chunk = jnp.einsum(
-                "rp,pq->rq",
-                ao_chunk,
-                density_half,
-                precision=Precision.HIGHEST,
-            )
-            fxx_chunk = jnp.einsum(
-                "wgbc,gc->wgb",
-                nu_chunk,
-                e_chunk,
-                precision=Precision.HIGHEST,
-            )
-            exx_chunk = -0.5 * jnp.einsum(
-                "gb,wgb->wg",
-                e_chunk,
-                fxx_chunk,
-                precision=Precision.HIGHEST,
-            )
-
-        exx_chunk_from_start = jax.checkpoint(exx_chunk_from_start)
-
-        def body(carry: Array, chunk_idx: Array) -> tuple[Array, None]:
-            start = chunk_idx * chunk_size
-            exx_chunk = exx_chunk_from_start(start)
-            return jax.lax.dynamic_update_slice(carry, exx_chunk, (0, start)), None
-
-        exx, _ = jax.lax.scan(body, zero, jnp.arange(n_chunks))
-        exx = exx[:, :ngrid]
-    else:
-        nu = jnp.asarray(nu_cache, dtype=ao.dtype)
-        e = jnp.einsum(
-            "rp,pq->rq",
-            ao,
-            density_half,
-            precision=Precision.HIGHEST,
-        )
-        fxx = jnp.einsum(
-            "wgbc,gc->wgb",
-            nu,
-            e,
-            precision=Precision.HIGHEST,
-        )
-        exx = -0.5 * jnp.einsum(
-            "gb,wgb->wg",
-            e,
-            fxx,
-            precision=Precision.HIGHEST,
-        )
-    exx = jnp.nan_to_num(exx, nan=0.0, posinf=0.0, neginf=0.0)
-    # Restricted reference: alpha and beta channels share the same exx profile.
-    exx_grid = exx.T
-    return jnp.stack([exx_grid, exx_grid], axis=0)
-
-
 def _restricted_iteration_molecule(
     molecule: Any,
     *,
@@ -642,9 +578,8 @@ def _restricted_iteration_molecule(
     mo_energy: Array,
     ao: Array,
     hfx_nu: Any = None,
-    hfx_local: Any = None,
-    stop_gradient_hfx_local: bool = False,
 ) -> Any:
+    del ao
     updates = dict(
         rdm1=jnp.stack([0.5 * density, 0.5 * density], axis=0),
         mo_coeff=jnp.stack([mo_coeff, mo_coeff], axis=0),
@@ -653,25 +588,12 @@ def _restricted_iteration_molecule(
     )
     if hasattr(molecule, "hfx_local"):
         nu_source = hfx_nu if hfx_nu is not None else hfx_nu_source(molecule)
-        local_ref = hfx_local if hfx_local is not None else getattr(molecule, "hfx_local", None)
-        if local_ref is not None:
-            local = jnp.asarray(local_ref)
-            updates["hfx_local"] = (
-                jax.lax.stop_gradient(local)
-                if stop_gradient_hfx_local
-                else local
-            )
-        elif nu_source is not None:
-            local = _restricted_hfx_features_from_nu(
-                ao=ao,
-                density=density,
-                nu_cache=nu_source,
-            )
-            updates["hfx_local"] = (
-                jax.lax.stop_gradient(local)
-                if stop_gradient_hfx_local
-                else local
-            )
+        if nu_source is not None:
+            updates["hfx_local"] = None
+        else:
+            local_ref = getattr(molecule, "hfx_local", None)
+            if local_ref is not None:
+                updates["hfx_local"] = jax.lax.stop_gradient(jnp.asarray(local_ref))
     return _replace_molecule(molecule, **updates)
 
 
@@ -839,7 +761,6 @@ class _RestrictedSCFContext:
     mo_occ_total: Array
     mo_occ_stacked: Array
     hfx_nu: Any
-    hfx_local_ref: Any
     uses_explicit_hfx_fock: bool
 
 
@@ -860,6 +781,14 @@ class DifferentiableSCF:
 
     def __init__(self, config: DifferentiableSCFConfig | None = None):
         self.config = DifferentiableSCFConfig() if config is None else config
+
+    def _with_neural_xc_grid_payload(self, molecule: Any, xc_functional: Any) -> Any:
+        if not _supports_neural_xc_grid_payload(molecule):
+            return molecule
+        payload_builder = getattr(xc_functional, "restricted_grid_payload_for_molecule", None)
+        if not callable(payload_builder):
+            return molecule
+        return _replace_molecule(molecule, neural_xc_grid_payload=payload_builder(molecule))
 
     def _fixed_cycle_info(self, mode: str, rms_history: Array) -> DifferentiableSCFInfo:
         best_idx = jnp.argmin(rms_history)
@@ -1037,7 +966,6 @@ class DifferentiableSCF:
             mo_occ_total=mo_occ_total,
             mo_occ_stacked=_restricted_stacked_occupations_from_total(mo_occ_total),
             hfx_nu=hfx_nu_source(molecule),
-            hfx_local_ref=getattr(molecule, "hfx_local", None),
             uses_explicit_hfx_fock=uses_explicit_hfx_fock,
         )
 
@@ -1069,8 +997,6 @@ class DifferentiableSCF:
             mo_energy=mo_energy,
             ao=ctx.ao,
             hfx_nu=ctx.hfx_nu,
-            hfx_local=ctx.hfx_local_ref,
-            stop_gradient_hfx_local=True,
         )
         return _restricted_xc_fock_terms(
             params=params,
@@ -1333,6 +1259,7 @@ class DifferentiableSCF:
             mo_energy=mo_energy_final,
             mo_occ_stacked=problem.ctx.mo_occ_stacked,
         )
+        molecule_final = self._with_neural_xc_grid_payload(molecule_final, xc_functional)
         return molecule_final, self._rks_loop_info(
             "self_consistent",
             converged=converged,
@@ -1785,7 +1712,6 @@ class DifferentiableSCF:
                 mo_occ_total=mo_occ_total_arg,
                 mo_occ_stacked=mo_occ_stacked_arg,
                 hfx_nu=hfx_nu_source(molecule_arg),
-                hfx_local_ref=getattr(molecule_arg, "hfx_local", None),
                 uses_explicit_hfx_fock=ctx.uses_explicit_hfx_fock,
             )
 
@@ -1863,6 +1789,7 @@ class DifferentiableSCF:
             mo_energy=mo_energy_implicit,
             mo_occ_stacked=ctx.mo_occ_stacked,
         )
+        molecule_final = self._with_neural_xc_grid_payload(molecule_final, xc_functional)
         return molecule_final, self._rks_loop_info(
             "self_consistent_implicit",
             converged=converged,

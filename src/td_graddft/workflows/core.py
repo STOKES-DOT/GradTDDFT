@@ -99,7 +99,6 @@ def _canonicalize_graddft_ground_state_config(
         config,
         input_feature_mode="canonical",
         hf_input_mode="spin_resolved",
-        response_hf_mode="strict",
         response_pt2_mode="approx",
         density_supervision="spin_resolved",
         strict_feature_alignment=True,
@@ -117,7 +116,6 @@ def _canonicalize_graddft_ground_state_config(
         "stationarity_constraint_weight": float(aligned.stationarity_constraint_weight),
         "dm21_scf_regularization_weight": float(aligned.dm21_scf_regularization_weight),
         "orbital_energy_constraint_weight": float(aligned.orbital_energy_constraint_weight),
-        "janak_frontier_constraint_weight": float(aligned.janak_frontier_constraint_weight),
         "coefficient_prior_weight": float(aligned.coefficient_prior_weight),
         "s1_constraint_weight": float(aligned.s1_constraint_weight),
         "excitation_constraint_weight": float(aligned.excitation_constraint_weight),
@@ -401,7 +399,6 @@ def train_neural_xc(
         hf_input_mode=config.hf_input_mode,
         include_pt2_channel=config.include_pt2_channel,
         pt2_channel_mode=config.pt2_channel_mode,
-        response_hf_mode=config.response_hf_mode,
         response_pt2_mode=config.response_pt2_mode,
         strict_feature_alignment=config.strict_feature_alignment,
         hidden_dims=config.hidden_dims,
@@ -499,7 +496,6 @@ def train_neural_xc(
         target_orbital_occupations=jnp.asarray(reference.molecule.mo_occ),
         orbital_energy_constraint_weight=config.orbital_energy_constraint_weight,
         orbital_energy_constraint_window=int(config.orbital_energy_constraint_window),
-        janak_frontier_constraint_weight=config.janak_frontier_constraint_weight,
     )
     datum_excited = ExcitedStateDatum(
         target_s1_energy=s1_target,
@@ -538,8 +534,6 @@ def train_neural_xc(
         coefficient_prior_mode=config.coefficient_prior_mode,
         fractional_linearity_weight=config.fractional_linearity_weight,
         fractional_linearity_delta=config.fractional_linearity_delta,
-        janak_frontier_mode=config.janak_frontier_mode,
-        janak_frontier_delta=config.janak_frontier_delta,
         dm21_scf_gap_floor=config.dm21_scf_gap_floor,
         occupation_tolerance=1e-8,
         scf_max_cycle=config.scf_max_cycle,
@@ -718,7 +712,6 @@ def train_neural_xc(
             stationarity_penalty_val = float(step_metrics["stationarity_penalty"][0])
             dm21_scf_penalty_val = float(step_metrics["dm21_scf_penalty"][0])
             orbital_energy_penalty_val = float(step_metrics["orbital_energy_penalty"][0])
-            janak_frontier_penalty_val = float(step_metrics["janak_frontier_penalty"][0])
             coefficient_prior_penalty_val = float(step_metrics["coefficient_prior_penalty"][0])
             s1_penalty_val = float(step_metrics["s1_penalty"][0])
             excitation_penalty_val = float(step_metrics["excitation_penalty"][0])
@@ -744,7 +737,6 @@ def train_neural_xc(
                 f"stationarity_penalty={stationarity_penalty_val:.6e} "
                 f"dm21_scf_penalty={dm21_scf_penalty_val:.6e} "
                 f"orbital_energy_penalty={orbital_energy_penalty_val:.6e} "
-                f"janak_frontier_penalty={janak_frontier_penalty_val:.6e} "
                 f"coefficient_prior_penalty={coefficient_prior_penalty_val:.6e} "
                 f"s1_penalty={s1_penalty_val:.6e} "
                 f"excitation_penalty={excitation_penalty_val:.6e} "

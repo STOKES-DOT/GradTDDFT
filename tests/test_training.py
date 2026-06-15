@@ -35,7 +35,6 @@ from td_graddft.training import (
     xc_kernel_matching_penalty,
 )
 from td_graddft.training.targets import _electron_count, orbital_energy_matching_penalty
-from td_graddft.training.targets import janak_frontier_finite_difference_penalty
 from td_graddft.scf.molecules import QuadratureGrid, UnrestrictedMolecule
 from td_graddft.workflows.core import run_molecule_from_spec
 from td_graddft.workflows.types import MoleculeSpecConfig, SimulationConfig
@@ -692,6 +691,7 @@ def test_predict_excitation_energies_uses_davidson_for_traced_params(monkeypatch
 
     assert jnp.allclose(excitation, jnp.asarray([0.31]))
     assert calls[0]["eigensolver"] == "davidson"
+    assert calls[0].get("davidson_max_subspace") is None
 
 
 def test_strict_jax_self_consistent_losses_have_finite_gradients():
@@ -1123,6 +1123,53 @@ def test_s1_only_loss_skips_ground_state_total_energy_assembly(monkeypatch):
     assert metrics["s1_penalty"][0] > 0.0
 
 
+def test_s1_only_loss_solves_three_roots_but_uses_first(monkeypatch):
+    molecule = _make_toy_molecule()
+    calls: list[tuple[int, bool]] = []
+
+    def fake_solve_excited_states(
+        params,
+        functional,
+        molecule_arg,
+        *,
+        nstates: int,
+        use_tda: bool,
+    ):
+        del params, functional, molecule_arg
+        calls.append((int(nstates), bool(use_tda)))
+        return SimpleNamespace(excitation_energies=jnp.asarray([0.25, 0.50, 0.75]))
+
+    monkeypatch.setattr(
+        training_targets,
+        "_solve_excited_states",
+        fake_solve_excited_states,
+    )
+
+    constrained = GroundStateDatum(
+        molecule=molecule,
+        target_total_energy=jnp.array(2.125),
+        target_s1_energy=jnp.asarray(0.35),
+        s1_constraint_weight=0.5,
+    )
+    cfg = GroundStateTrainingConfig(
+        energy_mse_weight=0.0,
+        energy_mae_weight=0.0,
+        s1_constraint_use_tda=True,
+    )
+
+    loss, metrics = ground_state_mse_loss(
+        {},
+        object(),
+        constrained,
+        training_config=cfg,
+    )
+
+    assert calls == [(3, True)]
+    assert jnp.isfinite(loss)
+    assert metrics["s1_predicted"][0] == 0.25
+    assert metrics["s1_penalty"][0] > 0.0
+
+
 def test_s1_only_loss_skips_oscillator_strength_assembly(monkeypatch):
     molecule = _make_toy_molecule()
     functional = _make_trainable_functional()
@@ -1517,620 +1564,6 @@ def test_fractional_linearity_penalty_is_reported_and_nonnegative():
     assert constrained_loss >= plain_loss
 
 
-def test_janak_frontier_penalty_is_reported_and_nonnegative():
-    molecule = _make_hybrid_toy_molecule()
-    functional = _make_hybrid_only_functional()
-    params = functional.init_from_molecule(jax.random.PRNGKey(17), molecule)
-
-    janak_mse, janak_mae, residual, finite_difference = (
-        janak_frontier_finite_difference_penalty(
-            params,
-            functional,
-            molecule,
-            delta=0.1,
-        )
-    )
-    assert residual.shape == (2,)
-    assert finite_difference.shape == (2,)
-    assert janak_mse >= 0.0
-    assert janak_mae >= 0.0
-
-    plain_datum = GroundStateDatum(molecule=molecule, target_total_energy=jnp.array(-1.0))
-    constrained_datum = GroundStateDatum(
-        molecule=molecule,
-        target_total_energy=jnp.array(-1.0),
-        janak_frontier_constraint_weight=0.5,
-    )
-    training_cfg = GroundStateTrainingConfig(
-        mode="self_consistent",
-        janak_frontier_delta=0.1,
-        scf_max_cycle=32,
-        scf_damping=0.5,
-    )
-
-    plain_loss, _ = ground_state_mse_loss(
-        params,
-        functional,
-        plain_datum,
-        training_config=training_cfg,
-    )
-    constrained_loss, metrics = ground_state_mse_loss(
-        params,
-        functional,
-        constrained_datum,
-        training_config=training_cfg,
-    )
-
-    assert metrics["janak_frontier_penalty"].shape == (1,)
-    assert metrics["janak_frontier_penalty"][0] >= 0.0
-    assert metrics["janak_frontier_mse"].shape == (1,)
-    assert metrics["janak_frontier_mse"][0] >= 0.0
-    assert metrics["janak_frontier_mae"].shape == (1,)
-    assert metrics["janak_frontier_mae"][0] >= 0.0
-    assert constrained_loss >= plain_loss
-
-
-def test_janak_frontier_penalty_reoptimizes_fractional_frontier_states(monkeypatch):
-    molecule = _make_hybrid_toy_molecule()
-    functional = _make_hybrid_only_functional()
-    params = functional.init_from_molecule(jax.random.PRNGKey(23), molecule)
-
-    resolve_count = {"value": 0}
-    info = type(
-        "_Info",
-        (),
-        {
-            "mode": "self_consistent",
-            "selected_rms_density": jnp.asarray(0.0),
-        },
-    )()
-
-    def _fake_resolve(params_in, functional_in, molecule_in, training_config_in):
-        del params_in, functional_in, training_config_in
-        resolve_count["value"] += 1
-        return molecule_in, info
-
-    monkeypatch.setattr(
-        training_targets,
-        "_resolve_training_molecule_and_info_with_mode",
-        _fake_resolve,
-    )
-
-    janak_mse, janak_mae, residual, finite_difference = (
-        training_targets.janak_frontier_finite_difference_penalty(
-            params,
-            functional,
-            molecule,
-            delta=0.1,
-            training_config=GroundStateTrainingConfig(mode="self_consistent"),
-            assume_self_consistent_input=True,
-        )
-    )
-
-    assert resolve_count["value"] >= 2
-    assert residual.shape == (2,)
-    assert finite_difference.shape == (2,)
-    assert janak_mse >= 0.0
-    assert janak_mae >= 0.0
-
-
-def test_janak_frontier_penalty_freezes_functional_binding_on_base_state(monkeypatch):
-    molecule = _make_hybrid_toy_molecule()
-    params = {}
-    bound_occupations = []
-    info = type(
-        "_Info",
-        (),
-        {
-            "mode": "self_consistent",
-            "selected_rms_density": jnp.asarray(0.0),
-        },
-    )()
-
-    class _Bound:
-        def __init__(self, scale):
-            self.scale = scale
-
-        def energy_from_molecule(self, molecule_in):
-            return self.scale * jnp.sum(jnp.asarray(molecule_in.mo_occ))
-
-    class _Functional:
-        def bind_to_molecule(self, _params, molecule_in):
-            occ = jnp.asarray(molecule_in.mo_occ)
-            bound_occupations.append(occ)
-            return _Bound(jnp.sum(occ))
-
-    def _fake_resolve(params_in, functional_in, molecule_in, training_config_in):
-        del params_in, functional_in, training_config_in
-        return molecule_in, info
-
-    monkeypatch.setattr(
-        training_targets,
-        "_resolve_training_molecule_and_info_with_mode",
-        _fake_resolve,
-    )
-
-    janak_mse, janak_mae, residual, derivative = (
-        training_targets.janak_frontier_finite_difference_penalty(
-            params,
-            _Functional(),
-            molecule,
-            delta=0.1,
-            training_config=GroundStateTrainingConfig(mode="self_consistent"),
-            assume_self_consistent_input=True,
-        )
-    )
-
-    assert len(bound_occupations) == 1
-    assert jnp.allclose(bound_occupations[0], jnp.asarray(molecule.mo_occ))
-    assert residual.shape == (2,)
-    assert derivative.shape == (2,)
-    assert janak_mse >= 0.0
-    assert janak_mae >= 0.0
-
-
-def test_janak_frontier_penalty_tracks_base_orbitals_by_overlap(monkeypatch):
-    lumo = jnp.array([0.4, jnp.sqrt(1.0 - 0.4**2)])
-    homo = jnp.array([-lumo[1], lumo[0]])
-    base_coeff = jnp.stack([homo, lumo], axis=1)
-    base_molecule = _ToyMolecule(
-        ao=jnp.eye(2),
-        grid=_Grid(weights=jnp.array([1.0, 1.0])),
-        rep_tensor=jnp.zeros((2, 2, 2, 2)),
-        mo_coeff=jnp.stack([base_coeff, base_coeff], axis=0),
-        mo_occ=jnp.array([[1.0, 0.0], [1.0, 0.0]]),
-        mo_energy=jnp.array([[0.5, 1.5], [0.5, 1.5]]),
-        rdm1=jnp.array(
-            [
-                [[1.0, 0.0], [0.0, 0.0]],
-                [[1.0, 0.0], [0.0, 0.0]],
-            ]
-        ),
-        h1e=jnp.zeros((2, 2)),
-        nuclear_repulsion=0.0,
-        overlap_matrix=jnp.array([[1.5, 0.0], [0.0, 0.5]]),
-    )
-    target_coeff = jnp.eye(2)
-    homo_minus = training_targets._replace_molecule_copy(
-        base_molecule,
-        mo_coeff=jnp.stack([target_coeff, target_coeff], axis=0),
-        mo_energy=jnp.array([[2.0, 6.0], [2.0, 6.0]]),
-    )
-    lumo_plus = training_targets._replace_molecule_copy(
-        base_molecule,
-        mo_coeff=jnp.stack([target_coeff, target_coeff], axis=0),
-        mo_energy=jnp.array([[3.0, 7.0], [3.0, 7.0]]),
-    )
-    info = type(
-        "_Info",
-        (),
-        {
-            "mode": "self_consistent",
-            "selected_rms_density": jnp.asarray(0.0),
-        },
-    )()
-
-    def _fake_fractional_state(_params, _functional, _molecule, *, homo_delta=0.0, lumo_delta=0.0, **_kwargs):
-        if float(jnp.asarray(homo_delta)) < 0.0:
-            return homo_minus, info
-        if float(jnp.asarray(lumo_delta)) > 0.0:
-            return lumo_plus, info
-        raise AssertionError("Unexpected fractional branch request.")
-
-    monkeypatch.setattr(
-        training_targets,
-        "_resolve_variational_frontier_state_and_info",
-        _fake_fractional_state,
-    )
-    monkeypatch.setattr(
-        training_targets,
-        "_predict_ground_state_total_energy_from_molecule",
-        lambda *_args, **_kwargs: jnp.asarray(0.0),
-    )
-
-    _, _, residual, derivative = training_targets.janak_frontier_finite_difference_penalty(
-        {},
-        object(),
-        base_molecule,
-        delta=0.1,
-        training_config=GroundStateTrainingConfig(mode="self_consistent"),
-        assume_self_consistent_input=True,
-    )
-
-    assert derivative.shape == (2,)
-    assert jnp.allclose(residual[1], -3.0, atol=1e-6)
-
-
-def test_strict_janak_frontier_autodiff_penalty_matches_unrestricted_noninteracting_limit():
-    molecule = _ToyMolecule(
-        ao=jnp.eye(2),
-        grid=_Grid(weights=jnp.array([1.0, 1.0])),
-        rep_tensor=jnp.zeros((2, 2, 2, 2)),
-        mo_coeff=jnp.stack([jnp.eye(2), jnp.eye(2)], axis=0),
-        mo_occ=jnp.array([[1.0, 0.0], [0.0, 0.0]]),
-        mo_energy=jnp.array([[-0.8, 0.2], [-0.8, 0.2]]),
-        rdm1=jnp.array(
-            [
-                [[1.0, 0.0], [0.0, 0.0]],
-                [[0.0, 0.0], [0.0, 0.0]],
-            ]
-        ),
-        h1e=jnp.diag(jnp.array([-0.8, 0.2])),
-        nuclear_repulsion=0.0,
-        overlap_matrix=jnp.eye(2),
-    )
-
-    class _Functional:
-        def bind_to_molecule_for_scf(self, _params, _molecule):
-            class _Bound:
-                exact_exchange_fraction = jnp.asarray(0.0)
-
-                def unrestricted_scf_components(self, molecule_in):
-                    ngrids = int(molecule_in.ao.shape[0])
-                    nao = int(molecule_in.ao.shape[1])
-                    zeros_v = jnp.zeros((ngrids,), dtype=jnp.float32)
-                    zeros_grad = jnp.zeros((ngrids, 3), dtype=jnp.float32)
-                    zeros_mat = jnp.zeros((nao, nao), dtype=jnp.float32)
-                    return (
-                        zeros_v,
-                        zeros_v,
-                        zeros_grad,
-                        zeros_grad,
-                        "LDA",
-                        jnp.asarray(0.0, dtype=jnp.float32),
-                        zeros_mat,
-                        zeros_mat,
-                    )
-
-                def energy_from_molecule(self, _molecule_in):
-                    return jnp.asarray(0.0, dtype=jnp.float32)
-
-            return _Bound()
-
-        bind_to_molecule = bind_to_molecule_for_scf
-
-    cfg = GroundStateTrainingConfig(
-        mode="self_consistent",
-        scf_gradient_mode="impl",
-        scf_max_cycle=4,
-        scf_damping=0.0,
-        scf_level_shift=0.0,
-        scf_iterate_selection="final",
-        fractional_branch_scf_max_cycle=4,
-        fractional_branch_scf_damping=0.0,
-        fractional_branch_scf_level_shift=0.0,
-        fractional_branch_scf_iterate_selection="final",
-    )
-
-    mse, mae, residual, derivative = training_targets.strict_janak_frontier_autodiff_penalty(
-        {},
-        _Functional(),
-        molecule,
-        eta=0.1,
-        training_config=cfg,
-        assume_self_consistent_input=True,
-    )
-
-    assert residual.shape == (2,)
-    assert derivative.shape == (2,)
-    assert mse >= 0.0
-    assert mae >= 0.0
-    assert jnp.allclose(derivative, jnp.array([-0.8, -0.8]), atol=1e-5)
-    assert jnp.allclose(residual, jnp.zeros((2,)), atol=1e-5)
-
-
-def test_fixed_orbital_janak_autodiff_penalty_matches_noninteracting_limit():
-    molecule = _ToyMolecule(
-        ao=jnp.eye(2),
-        grid=_Grid(weights=jnp.array([1.0, 1.0])),
-        rep_tensor=jnp.zeros((2, 2, 2, 2)),
-        mo_coeff=jnp.stack([jnp.eye(2), jnp.eye(2)], axis=0),
-        mo_occ=jnp.array([[1.0, 0.0], [1.0, 0.0]]),
-        mo_energy=jnp.array([[-0.8, 0.2], [-0.8, 0.2]]),
-        rdm1=jnp.array(
-            [
-                [[1.0, 0.0], [0.0, 0.0]],
-                [[1.0, 0.0], [0.0, 0.0]],
-            ]
-        ),
-        h1e=jnp.diag(jnp.array([-0.8, 0.2])),
-        nuclear_repulsion=0.0,
-        overlap_matrix=jnp.eye(2),
-    )
-
-    class _Functional:
-        def bind_to_molecule(self, _params, _molecule):
-            class _Bound:
-                def energy_from_molecule(self, _molecule_in):
-                    return jnp.asarray(0.0, dtype=jnp.float32)
-
-            return _Bound()
-
-    mse, mae, residual, derivative = training_targets.fixed_orbital_janak_autodiff_penalty(
-        {},
-        _Functional(),
-        molecule,
-        assume_self_consistent_input=True,
-    )
-
-    assert residual.shape == (2,)
-    assert derivative.shape == (2,)
-    assert jnp.allclose(derivative, jnp.array([-0.8, 0.2]), atol=1e-6)
-    assert jnp.allclose(residual, jnp.zeros((2,)), atol=1e-6)
-    assert jnp.allclose(mse, 0.0, atol=1e-6)
-    assert jnp.allclose(mae, 0.0, atol=1e-6)
-
-
-def test_half_charge_janak_autodiff_penalty_matches_endpoint_slopes(monkeypatch):
-    molecule = _ToyMolecule(
-        ao=jnp.eye(2),
-        grid=_Grid(weights=jnp.array([1.0, 1.0])),
-        rep_tensor=jnp.zeros((2, 2, 2, 2)),
-        mo_coeff=jnp.stack([jnp.eye(2), jnp.eye(2)], axis=0),
-        mo_occ=jnp.array([[1.0, 0.0], [1.0, 0.0]]),
-        mo_energy=jnp.array([[-0.7, 0.3], [-0.7, 0.3]]),
-        rdm1=jnp.array(
-            [
-                [[1.0, 0.0], [0.0, 0.0]],
-                [[1.0, 0.0], [0.0, 0.0]],
-            ]
-        ),
-        h1e=jnp.zeros((2, 2)),
-        nuclear_repulsion=0.0,
-        overlap_matrix=jnp.eye(2),
-    )
-
-    def _state(spin_index, orbital_index, delta, energy):
-        state = training_targets._perturb_spin_orbital_occupation(
-            molecule,
-            spin_index=spin_index,
-            orbital_index=orbital_index,
-            delta=delta,
-        )
-        state = training_targets._replace_molecule_copy(
-            state,
-            total_energy=jnp.asarray(energy),
-        )
-        return state
-
-    state_energies = {
-        -1.0: -9.0,
-        -0.5: -9.5,
-        0.5: -9.8,
-        1.0: -9.4,
-    }
-
-    def _fake_branch(
-        _params,
-        _functional,
-        _molecule,
-        *,
-        spin_index,
-        orbital_index,
-        delta,
-        **_kwargs,
-    ):
-        return _state(
-            spin_index,
-            orbital_index,
-            delta,
-            state_energies[float(delta)],
-        ), SimpleNamespace(mode="self_consistent", selected_rms_density=0.0)
-
-    class _Functional:
-        def bind_to_molecule(self, _params, _molecule):
-            class _Bound:
-                def energy_from_molecule(self, molecule_in):
-                    occ = jnp.asarray(molecule_in.mo_occ)
-                    if hasattr(molecule_in, "total_energy"):
-                        return jnp.asarray(molecule_in.total_energy)
-                    return (
-                        -10.0
-                        - 1.0 * (occ[0, 0] - 1.0)
-                        + 0.6 * jnp.sum(occ[:, 1])
-                    )
-
-            return _Bound()
-
-    monkeypatch.setattr(
-        training_targets,
-        "_resolve_variational_spin_orbital_state_and_info",
-        _fake_branch,
-    )
-
-    mse, mae, residual, derivative = training_targets.half_charge_janak_autodiff_penalty(
-        {},
-        _Functional(),
-        molecule,
-        training_config=GroundStateTrainingConfig(mode="self_consistent"),
-        assume_self_consistent_input=True,
-    )
-
-    assert derivative.shape == (2,)
-    assert residual.shape == (2,)
-    assert jnp.allclose(derivative, jnp.array([-1.0, 0.6]), atol=1e-6)
-    assert jnp.allclose(residual, jnp.zeros((2,)), atol=1e-6)
-    assert jnp.allclose(mse, 0.0, atol=1e-6)
-    assert jnp.allclose(mae, 0.0, atol=1e-6)
-
-
-def test_strict_janak_frontier_autodiff_penalty_falls_back_when_autodiff_is_nonfinite(monkeypatch):
-    molecule = _ToyMolecule(
-        ao=jnp.eye(2),
-        grid=_Grid(weights=jnp.array([1.0, 1.0])),
-        rep_tensor=jnp.zeros((2, 2, 2, 2)),
-        mo_coeff=jnp.stack([jnp.eye(2), jnp.eye(2)], axis=0),
-        mo_occ=jnp.array([[1.0, 0.0], [0.0, 0.0]]),
-        mo_energy=jnp.array([[-0.8, 0.2], [-0.8, 0.2]]),
-        rdm1=jnp.array(
-            [
-                [[1.0, 0.0], [0.0, 0.0]],
-                [[0.0, 0.0], [0.0, 0.0]],
-            ]
-        ),
-        h1e=jnp.diag(jnp.array([-0.8, 0.2])),
-        nuclear_repulsion=0.0,
-        overlap_matrix=jnp.eye(2),
-    )
-
-    class _Functional:
-        def bind_to_molecule_for_scf(self, _params, _molecule):
-            class _Bound:
-                exact_exchange_fraction = jnp.asarray(0.0)
-
-                def unrestricted_scf_components(self, molecule_in):
-                    ngrids = int(molecule_in.ao.shape[0])
-                    nao = int(molecule_in.ao.shape[1])
-                    zeros_v = jnp.zeros((ngrids,), dtype=jnp.float32)
-                    zeros_grad = jnp.zeros((ngrids, 3), dtype=jnp.float32)
-                    zeros_mat = jnp.zeros((nao, nao), dtype=jnp.float32)
-                    return (
-                        zeros_v,
-                        zeros_v,
-                        zeros_grad,
-                        zeros_grad,
-                        "LDA",
-                        jnp.asarray(0.0, dtype=jnp.float32),
-                        zeros_mat,
-                        zeros_mat,
-                    )
-
-                def energy_from_molecule(self, _molecule_in):
-                    return jnp.asarray(0.0, dtype=jnp.float32)
-
-            return _Bound()
-
-        bind_to_molecule = bind_to_molecule_for_scf
-
-    real_grad = training_targets.jax.grad
-
-    def _nan_grad(_fn):
-        def _wrapped(_eta):
-            return jnp.asarray(jnp.nan, dtype=jnp.float32)
-
-        return _wrapped
-
-    monkeypatch.setattr(training_targets.jax, "grad", _nan_grad)
-    try:
-        mse, mae, residual, derivative = training_targets.strict_janak_frontier_autodiff_penalty(
-            {},
-            _Functional(),
-            molecule,
-            eta=0.1,
-            training_config=GroundStateTrainingConfig(
-                mode="self_consistent",
-                janak_frontier_mode="autodiff",
-                scf_gradient_mode="impl",
-                scf_max_cycle=4,
-                scf_damping=0.0,
-                scf_level_shift=0.0,
-                scf_iterate_selection="final",
-                fractional_branch_scf_max_cycle=4,
-                fractional_branch_scf_damping=0.0,
-                fractional_branch_scf_level_shift=0.0,
-                fractional_branch_scf_iterate_selection="final",
-            ),
-            assume_self_consistent_input=True,
-        )
-    finally:
-        monkeypatch.setattr(training_targets.jax, "grad", real_grad)
-
-    assert jnp.isfinite(mse)
-    assert jnp.isfinite(mae)
-    assert jnp.all(jnp.isfinite(residual))
-    assert jnp.all(jnp.isfinite(derivative))
-    assert jnp.allclose(derivative, jnp.array([-0.8, -0.8]), atol=1e-4)
-
-
-def test_strict_janak_frontier_autodiff_penalty_training_path_skips_eta_autodiff(monkeypatch):
-    molecule = _ToyMolecule(
-        ao=jnp.eye(2),
-        grid=_Grid(weights=jnp.array([1.0, 1.0])),
-        rep_tensor=jnp.zeros((2, 2, 2, 2)),
-        mo_coeff=jnp.stack([jnp.eye(2), jnp.eye(2)], axis=0),
-        mo_occ=jnp.array([[1.0, 0.0], [0.0, 0.0]]),
-        mo_energy=jnp.array([[-0.8, 0.2], [-0.8, 0.2]]),
-        rdm1=jnp.array(
-            [
-                [[1.0, 0.0], [0.0, 0.0]],
-                [[0.0, 0.0], [0.0, 0.0]],
-            ]
-        ),
-        h1e=jnp.diag(jnp.array([-0.8, 0.2])),
-        nuclear_repulsion=0.0,
-        overlap_matrix=jnp.eye(2),
-    )
-
-    class _ScalarFunctional:
-        def bind_to_molecule_for_scf(self, params, _molecule):
-            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
-
-            class _Bound:
-                exact_exchange_fraction = jnp.asarray(0.0)
-
-                def unrestricted_scf_components(self, molecule_in):
-                    ngrids = int(molecule_in.ao.shape[0])
-                    nao = int(molecule_in.ao.shape[1])
-                    zeros_grad = jnp.zeros((ngrids, 3), dtype=jnp.float32)
-                    zeros_mat = jnp.zeros((nao, nao), dtype=jnp.float32)
-                    v_alpha = strength * jnp.ones((ngrids,), dtype=jnp.float32)
-                    v_beta = -strength * jnp.ones((ngrids,), dtype=jnp.float32)
-                    return (
-                        v_alpha,
-                        v_beta,
-                        zeros_grad,
-                        zeros_grad,
-                        "LDA",
-                        jnp.asarray(0.0, dtype=jnp.float32),
-                        zeros_mat,
-                        zeros_mat,
-                    )
-
-                def energy_from_molecule(self, _molecule_in):
-                    return jnp.asarray(0.0, dtype=jnp.float32)
-
-            return _Bound()
-
-        bind_to_molecule = bind_to_molecule_for_scf
-
-    monkeypatch.setattr(training_targets, "_tree_contains_jax_tracer", lambda _tree: True)
-
-    def _should_not_be_called(_fn):
-        raise AssertionError("strict training path should not call jax.grad on eta branches")
-
-    monkeypatch.setattr(training_targets.jax, "grad", _should_not_be_called)
-
-    cfg = GroundStateTrainingConfig(
-        mode="self_consistent",
-        janak_frontier_mode="autodiff",
-        scf_gradient_mode="impl",
-        scf_max_cycle=4,
-        scf_damping=0.0,
-        scf_level_shift=0.0,
-        scf_iterate_selection="final",
-        fractional_branch_scf_max_cycle=4,
-        fractional_branch_scf_damping=0.0,
-        fractional_branch_scf_level_shift=0.0,
-        fractional_branch_scf_iterate_selection="final",
-    )
-
-    def _loss_fn(strength):
-        _, mae, _, _ = training_targets.strict_janak_frontier_autodiff_penalty(
-            {"strength": strength},
-            _ScalarFunctional(),
-            molecule,
-            eta=0.1,
-            training_config=cfg,
-            assume_self_consistent_input=True,
-        )
-        return mae
-
-    value, grad = jax.value_and_grad(_loss_fn)(jnp.asarray(0.05, dtype=jnp.float32))
-
-    assert jnp.isfinite(value)
-    assert jnp.isfinite(grad)
-
-
 def test_fractional_branch_quality_weight_softly_downweights_bad_scf():
     info = type(
         "_Info",
@@ -2169,25 +1602,6 @@ def test_fractional_branch_training_config_uses_stabilized_overrides():
     assert branch_cfg.scf_iterate_selection == "best_rms"
 
 
-def test_strict_janak_branch_training_config_preserves_implicit_mode():
-    cfg = GroundStateTrainingConfig(
-        mode="self_consistent",
-        janak_frontier_mode="autodiff",
-        scf_gradient_mode="impl",
-        fractional_branch_scf_max_cycle=6,
-        fractional_branch_scf_damping=0.4,
-        fractional_branch_scf_level_shift=0.6,
-        fractional_branch_scf_iterate_selection="best_rms",
-    )
-
-    branch_cfg = training_targets._strict_janak_branch_training_config(cfg)
-
-    assert branch_cfg.scf_gradient_mode == "impl"
-    assert branch_cfg.scf_max_cycle == 6
-    assert jnp.allclose(branch_cfg.scf_damping, 0.4, atol=1e-6)
-    assert jnp.allclose(branch_cfg.scf_level_shift, 0.6, atol=1e-6)
-
-
 def test_replace_molecule_copy_supports_frozen_dataclass_with_extra_fields():
     @dataclass(frozen=True)
     class _FrozenMol:
@@ -2204,94 +1618,6 @@ def test_replace_molecule_copy_supports_frozen_dataclass_with_extra_fields():
     assert jnp.allclose(updated.mo_coeff, 2.0 * jnp.eye(2))
     assert getattr(updated, "nocc_alpha") == 1
     assert getattr(updated, "nocc_beta") == 1
-
-
-def test_ground_state_loss_uses_strict_janak_dispatch_when_requested(monkeypatch):
-    molecule = _make_hybrid_toy_molecule()
-    functional = _make_hybrid_only_functional()
-    params = functional.init_from_molecule(jax.random.PRNGKey(31), molecule)
-    datum = GroundStateDatum(
-        molecule=molecule,
-        target_total_energy=jnp.array(-1.0),
-        janak_frontier_constraint_weight=0.5,
-    )
-
-    called = {"strict": 0}
-
-    def _fake_strict(*_args, **_kwargs):
-        called["strict"] += 1
-        return (
-            jnp.asarray(4.0),
-            jnp.asarray(2.0),
-            jnp.asarray([1.0, -1.0]),
-            jnp.asarray([0.5, 0.6]),
-        )
-
-    monkeypatch.setattr(
-        training_targets,
-        "strict_janak_frontier_autodiff_penalty",
-        _fake_strict,
-    )
-
-    loss, metrics = ground_state_mse_loss(
-        params,
-        functional,
-        datum,
-        training_config=GroundStateTrainingConfig(
-            mode="self_consistent",
-            janak_frontier_mode="autodiff",
-            janak_frontier_delta=0.1,
-            scf_gradient_mode="impl",
-            scf_max_cycle=6,
-        ),
-    )
-
-    assert called["strict"] == 1
-    assert jnp.isfinite(loss)
-    assert jnp.allclose(metrics["janak_frontier_mse"][0], 4.0, atol=1e-6)
-    assert jnp.allclose(metrics["janak_frontier_mae"][0], 2.0, atol=1e-6)
-
-
-def test_janak_full_scf_ad_dispatch_enables_training_eta_autodiff(monkeypatch):
-    molecule = _make_hybrid_toy_molecule()
-    functional = _make_hybrid_only_functional()
-    params = functional.init_from_molecule(jax.random.PRNGKey(37), molecule)
-    called = {"strict": 0}
-
-    def _fake_strict(*_args, **kwargs):
-        called["strict"] += 1
-        assert kwargs["force_eta_autodiff"] is True
-        return (
-            jnp.asarray(4.0),
-            jnp.asarray(2.0),
-            jnp.asarray([1.0, -1.0]),
-            jnp.asarray([0.5, 0.6]),
-        )
-
-    monkeypatch.setattr(
-        training_targets,
-        "strict_janak_frontier_autodiff_penalty",
-        _fake_strict,
-    )
-
-    mse, mae, residual, derivative = training_targets._janak_frontier_penalty_by_mode(
-        params,
-        functional,
-        molecule,
-        training_config=GroundStateTrainingConfig(
-            mode="self_consistent",
-            janak_frontier_mode="full_scf_ad",
-            scf_gradient_mode="impl",
-            scf_max_cycle=3,
-        ),
-        assume_self_consistent_input=True,
-    )
-
-    assert called["strict"] == 1
-    assert jnp.allclose(mse, 4.0, atol=1e-6)
-    assert jnp.allclose(mae, 2.0, atol=1e-6)
-    assert residual.shape == (2,)
-    assert derivative.shape == (2,)
 
 
 def test_self_consistent_energy_penalty_is_reported_and_nonnegative():

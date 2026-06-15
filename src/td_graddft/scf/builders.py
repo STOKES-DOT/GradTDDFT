@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..data.integrals import eri_pair_matrix_to_mo_eri_slices, precompile_eri_kernels
+from ..data.integrals import precompile_eri_kernels
 from ..data.integrals.libcint import LibcintGeometryGradPolicy
 from ..data.molecule import MoleculeSpec
 from ..xc_backend.jax_libxc import hybrid_coeff, parse_xc
@@ -17,7 +17,6 @@ from ..neural_xc.inputs import (
     _local_pt2_feature_from_unrestricted_orbitals,
 )
 from .core import _contains_jax_tracer, _host_float_unless_traced
-from .features import _restricted_response_eri_slices_from_mo_tensor
 from .inputs import build_rks_integral_inputs, build_uks_integral_inputs
 from .molecules import QuadratureGrid, RestrictedMolecule, UnrestrictedMolecule
 from .rks import RKSConfig, run_rks_from_integrals
@@ -229,12 +228,12 @@ def restricted_molecule_from_spec_with_jax_rks(
         else _host_float_unless_traced(energy_target)
     )
     nocc = int(np.count_nonzero(np.asarray(rks.mo_occ) > 1e-8))
+    eri_ovov = None
+    eri_ovvo = None
+    eri_oovv = None
     if cfg.jk_backend == "df":
         if df_factors is None:
             raise RuntimeError("DF backend requested but df_factors were not constructed.")
-        eri_ovov = None
-        eri_ovvo = None
-        eri_oovv = None
         rep_tensor = _empty_rep_tensor_like(s, traced=False)
     else:
         if eri is None and eri_pair_matrix is None:
@@ -242,23 +241,10 @@ def restricted_molecule_from_spec_with_jax_rks(
                 eri_pair_matrix = scf_inputs.response_eri_pair_matrix()
             else:
                 raise RuntimeError("Full ERI backend requested but exact ERI data is missing.")
-        needs_exchange_slices = abs(exact_exchange_fraction) > 1e-14
         if eri_pair_matrix is not None:
             reference_eri_pair_matrix = _host_array(eri_pair_matrix, np.asarray(s).dtype)
-            eri_ovov, eri_ovvo, eri_oovv = eri_pair_matrix_to_mo_eri_slices(
-                eri_pair_matrix,
-                rks.mo_coeff,
-                nocc=nocc,
-                include_oovv=needs_exchange_slices,
-            )
             rep_tensor = _empty_rep_tensor_like(s, traced=False)
         else:
-            eri_ovov, eri_ovvo, eri_oovv = _restricted_response_eri_slices_from_mo_tensor(
-                np.asarray(eri),
-                np.asarray(rks.mo_coeff),
-                nocc,
-                include_oovv=needs_exchange_slices,
-            )
             rep_tensor = jnp.asarray(eri)
 
     if compute_local_pt2_features:

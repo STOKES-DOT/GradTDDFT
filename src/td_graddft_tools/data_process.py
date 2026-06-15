@@ -35,7 +35,6 @@ _SCALAR_FIELD_NAMES = (
     "dm21_scf_regularization_weight",
     "orbital_energy_constraint_weight",
     "orbital_energy_constraint_window",
-    "janak_frontier_constraint_weight",
     "s1_constraint_weight",
     "first_excited_total_energy_constraint_weight",
     "excitation_constraint_weight",
@@ -298,7 +297,6 @@ class GroundStateTargetBundle:
     target_orbital_occupations: np.ndarray | None = None
     orbital_energy_constraint_weight: float = 0.0
     orbital_energy_constraint_window: int | None = None
-    janak_frontier_constraint_weight: float = 0.0
     s1_constraint_weight: float = 0.0
     first_excited_total_energy_constraint_weight: float = 0.0
     excitation_constraint_weight: float = 0.0
@@ -438,7 +436,6 @@ def build_ground_state_target_bundle(
     target_orbital_occupations: Any | None = None,
     orbital_energy_constraint_weight: float = 0.0,
     orbital_energy_constraint_window: int | None = None,
-    janak_frontier_constraint_weight: float = 0.0,
     s1_constraint_weight: float = 0.0,
     first_excited_total_energy_constraint_weight: float = 0.0,
     excitation_constraint_weight: float = 0.0,
@@ -493,7 +490,6 @@ def build_ground_state_target_bundle(
         target_orbital_occupations=_to_jax_or_none(_to_numpy_or_none(inferred_orbital_occupations)),
         orbital_energy_constraint_weight=float(orbital_energy_constraint_weight),
         orbital_energy_constraint_window=orbital_energy_constraint_window,
-        janak_frontier_constraint_weight=float(janak_frontier_constraint_weight),
         s1_constraint_weight=float(s1_constraint_weight),
         first_excited_total_energy_constraint_weight=float(
             first_excited_total_energy_constraint_weight

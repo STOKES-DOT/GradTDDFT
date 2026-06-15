@@ -76,7 +76,7 @@ def _optimize_with_jax_surface(
             state_index=state_index,
             response_method=response_method,
             coordinate_unit="angstrom",
-            eigensolver="dense",
+            eigensolver="auto",
         ),
     )
 

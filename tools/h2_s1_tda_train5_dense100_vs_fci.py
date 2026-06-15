@@ -32,7 +32,6 @@ from td_graddft.neural_xc import (
     DEFAULT_NETWORK_HIDDEN_DIMS,
 )
 from td_graddft.spectra import HARTREE_TO_EV
-from td_graddft.tddft import refresh_restricted_response_eri_slices
 from td_graddft.training import (
     ExcitedStateDatum,
     GroundStateCoreDatum,
@@ -769,12 +768,11 @@ def _rebuild_points_with_fixed_density_checkpoint(
             point.molecule,
             training_config=prediction_config,
         )
-        predicted_molecule = refresh_restricted_response_eri_slices(predicted_molecule)
         rebuilt.append(replace(point, molecule=predicted_molecule))
         logger.log(
             f"[{label}] {idx:3d}/{len(points):3d} "
             f"R={float(point.r_angstrom):.4f} A "
-            "fixed density rebuilt; response ERI cached"
+            "fixed density rebuilt"
         )
     logger.log(f"[{label}] done in {time.perf_counter() - t0:.2f} s")
     return rebuilt

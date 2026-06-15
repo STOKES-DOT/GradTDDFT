@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--response-hf-mode",
         choices=("approx", "strict"),
-        default="strict",
+        default=neural_xc.DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     )
     parser.add_argument(
         "--response-pt2-mode",

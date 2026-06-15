@@ -7,6 +7,7 @@ import numpy as np
 
 from td_graddft.data import reference as reference_module
 from td_graddft.neural_xc.inputs import ChunkedHFXNu
+from td_graddft.scf.molecules import UnrestrictedMolecule
 
 
 class _CommonOrigin:
@@ -87,6 +88,36 @@ class _FakeLargeMF(_FakeMF):
     mol = _FakeLargeMol()
 
 
+class _FakeUKSMol(_FakeMol):
+    spin = 1
+
+
+class _FakeUKSMF:
+    mol = _FakeUKSMol()
+    grids = _FakeGrids()
+    mo_coeff = np.stack([np.eye(2, dtype=np.float64), np.eye(2, dtype=np.float64)], axis=0)
+    mo_occ = np.asarray([[1.0, 0.0], [0.0, 0.0]], dtype=np.float64)
+    mo_energy = np.asarray([[-0.5, 0.1], [-0.4, 0.2]], dtype=np.float64)
+    e_tot = -0.5
+    xc = "b3lyp"
+    _numint = None
+
+    def make_rdm1(self):
+        return np.asarray(
+            [
+                [[1.0, 0.0], [0.0, 0.0]],
+                [[0.0, 0.0], [0.0, 0.0]],
+            ],
+            dtype=np.float64,
+        )
+
+    def get_hcore(self):
+        return np.eye(2, dtype=np.float64)
+
+    def get_ovlp(self):
+        return np.eye(2, dtype=np.float64)
+
+
 def test_chunked_hfx_nu_reads_dense_equivalent_grid_slices():
     dense = np.arange(2 * 5 * 3 * 3, dtype=np.float64).reshape(2, 5, 3, 3)
     api = ChunkedHFXNu.from_dense(dense, chunk_size=2)
@@ -145,7 +176,7 @@ def test_restricted_reference_host_backend_keeps_hfx_nu_on_host(monkeypatch):
     assert molecule.rep_tensor.shape == (0, 0, 0, 0)
     assert isinstance(molecule.eri_pair_matrix, np.ndarray)
     assert molecule.eri_pair_matrix.shape == (3, 3)
-    assert isinstance(molecule.eri_ovov, np.ndarray)
+    assert molecule.eri_ovov is None
     assert isinstance(molecule.hfx_local, np.ndarray)
     assert isinstance(molecule.hfx_nu, np.ndarray)
     assert molecule.hfx_nu_api is None
@@ -193,3 +224,47 @@ def test_restricted_reference_uses_chunked_hfx_nu_api_for_more_than_three_atoms(
     assert molecule.hfx_nu_api is not None
     assert molecule.hfx_nu_api.shape == (2, 2, 2, 2)
     assert isinstance(molecule.hfx_local, np.ndarray)
+
+
+def test_unrestricted_reference_host_backend_keeps_hfx_cache_on_host(monkeypatch):
+    fake_numint = types.SimpleNamespace(
+        eval_ao=lambda mol, coords, deriv=0: (
+            np.ones((2, 2), dtype=np.float64)
+            if deriv == 0
+            else np.ones((4, 2, 2), dtype=np.float64)
+        )
+    )
+    fake_dft = types.ModuleType("pyscf.dft")
+    fake_dft.numint = fake_numint
+    fake_pyscf = types.ModuleType("pyscf")
+    fake_pyscf.dft = fake_dft
+    monkeypatch.setitem(sys.modules, "pyscf", fake_pyscf)
+    monkeypatch.setitem(sys.modules, "pyscf.dft", fake_dft)
+
+    def fake_local_hfx(mol, ao, dm_spin, coords, **kwargs):
+        del mol, ao, coords
+        assert kwargs["return_nu"] is True
+        assert dm_spin[0].shape == (2, 2)
+        assert dm_spin[1].shape == (2, 2)
+        return (
+            np.zeros((2, 2, 2), dtype=np.float64),
+            np.zeros((2, 2, 2, 2), dtype=np.float64),
+        )
+
+    monkeypatch.setattr(reference_module, "_local_hfx_features_from_dm", fake_local_hfx)
+
+    molecule = reference_module.unrestricted_reference_from_pyscf(
+        _FakeUKSMF(),
+        compute_local_hfx_features=True,
+        compute_local_hfx_aux=True,
+        array_backend="host",
+    )
+
+    assert isinstance(molecule, UnrestrictedMolecule)
+    assert isinstance(molecule.ao, np.ndarray)
+    assert isinstance(molecule.rep_tensor, np.ndarray)
+    assert molecule.rep_tensor.shape == (3, 3)
+    assert molecule.nocc_alpha == 1
+    assert molecule.nocc_beta == 0
+    assert isinstance(molecule.hfx_local, np.ndarray)
+    assert isinstance(molecule.hfx_nu, np.ndarray)

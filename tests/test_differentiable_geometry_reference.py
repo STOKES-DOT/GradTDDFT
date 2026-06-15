@@ -198,7 +198,7 @@ def test_restricted_libcint_tda_oscillator_strength_is_differentiable_by_geometr
                 jk_backend="full",
             ),
         )
-        tda = RestrictedCasidaTDDFT(ref, eigensolver="dense").tda(nstates=1)
+        tda = RestrictedCasidaTDDFT(ref, eigensolver="davidson").tda(nstates=1)
         return jnp.sum(oscillator_strengths(ref, tda))
 
     coords0 = jnp.asarray(

@@ -6,7 +6,6 @@ from typing import Any, Callable, Literal, Sequence
 from .defaults import (
     DEFAULT_NETWORK_ARCHITECTURE,
     DEFAULT_NEURAL_XC_HF_INPUT_MODE,
-    DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
     DEFAULT_INPUT_FEATURE_MODE,
@@ -17,9 +16,7 @@ from .defaults import (
 SemilocalBackend = Literal["jax_libxc"]
 HFChannelMode = Literal["total_only", "spin_resolved"]
 PT2ChannelMode = Literal["off", "scaled_projected", "local_exact"]
-ResponseHFMode = Literal["approx", "strict"]
 ResponsePT2Mode = Literal["approx", "strict"]
-StrictHFXResponseMode = Literal["dense", "low_memory"]
 InputFeatureMode = Literal["enhanced", "canonical"]
 
 
@@ -39,8 +36,8 @@ class ComponentSpec:
 @dataclass(frozen=True)
 class ChannelSpec:
     hf: HFChannelMode = DEFAULT_NEURAL_XC_HF_INPUT_MODE
+    include_hfx: bool = False
     pt2: PT2ChannelMode = "off"
-    response_hf: ResponseHFMode = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE
     response_pt2: ResponsePT2Mode = DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE
     hfx_channels: int = 2
 
@@ -66,8 +63,6 @@ class Config:
     allow_experimental_jax_xc: bool = False
     density_floor: float = 1e-12
     response_density_floor: float | None = 1e-5
-    response_grid_chunk_size: int | None = 1024
-    strict_hfx_response_mode: StrictHFXResponseMode = "dense"
     kernel_clip: float = 5.0
     response_kernel_clip: float | None = 5.0
     name: str = "neural_xc"
@@ -81,8 +76,6 @@ __all__ = [
     "InputFeatureMode",
     "NetworkSpec",
     "PT2ChannelMode",
-    "ResponseHFMode",
     "ResponsePT2Mode",
     "SemilocalBackend",
-    "StrictHFXResponseMode",
 ]

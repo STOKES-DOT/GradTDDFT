@@ -25,7 +25,7 @@ import optax
 from pyscf import ao2mo, dft, fci, gto, scf
 
 from td_graddft import neural_xc, tdscf
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
 from td_graddft.scf import DifferentiableSCF, DifferentiableSCFConfig
 from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum
 from td_graddft.training import (

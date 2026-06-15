@@ -265,7 +265,7 @@ def test_unrestricted_scf_components_prefer_direct_hfx_fock_path():
     assert np.allclose(np.asarray(extra_b), np.asarray(extra))
 
 
-def test_restricted_iteration_molecule_prefers_cached_hfx_when_aux_is_present():
+def test_restricted_iteration_molecule_drops_cached_hfx_when_nu_is_present():
     molecule = _make_toy_restricted_reference()
     cached_hfx = jnp.asarray(
         [
@@ -293,10 +293,10 @@ def test_restricted_iteration_molecule_prefers_cached_hfx_when_aux_is_present():
         ao=molecule.ao,
     )
 
-    assert np.allclose(np.asarray(molecule_iter.hfx_local), np.asarray(cached_hfx))
+    assert molecule_iter.hfx_local is None
 
 
-def test_restricted_iteration_molecule_recomputes_hfx_from_chunked_nu_api():
+def test_restricted_iteration_molecule_does_not_materialize_hfx_from_chunked_nu_api():
     molecule = _make_toy_restricted_reference()
     dense_nu = jnp.asarray(
         [
@@ -316,11 +316,6 @@ def test_restricted_iteration_molecule_recomputes_hfx_from_chunked_nu_api():
     mo_occ = jnp.asarray([[1.0, 0.0], [1.0, 0.0]], dtype=jnp.float32)
     mo_energy = jnp.asarray([-0.8, 0.2], dtype=jnp.float32)
 
-    expected = scf_differentiable._restricted_hfx_features_from_nu(
-        ao=molecule.ao,
-        density=density,
-        nu_cache=dense_nu,
-    )
     molecule_iter = _restricted_iteration_molecule(
         molecule,
         density=density,
@@ -330,7 +325,7 @@ def test_restricted_iteration_molecule_recomputes_hfx_from_chunked_nu_api():
         ao=molecule.ao,
     )
 
-    assert np.allclose(np.asarray(molecule_iter.hfx_local), np.asarray(expected))
+    assert molecule_iter.hfx_local is None
 
 
 def test_differentiable_scf_fixed_density_returns_same_density():
@@ -353,6 +348,7 @@ def test_restricted_scf_density_update_drops_response_eri_cache():
     molecule.eri_ovov = jnp.ones((1, 1, 1, 1), dtype=jnp.float32)
     molecule.eri_ovvo = jnp.ones((1, 1, 1, 1), dtype=jnp.float32)
     molecule.eri_oovv = jnp.ones((1, 1, 1, 1), dtype=jnp.float32)
+    molecule.neural_xc_grid_payload = (None, None, None, None)
     solver = DifferentiableSCF(DifferentiableSCFConfig(mode="self_consistent"))
 
     updated = solver._restricted_molecule_from_total_density(
@@ -367,6 +363,7 @@ def test_restricted_scf_density_update_drops_response_eri_cache():
     assert updated.eri_ovov is None
     assert updated.eri_ovvo is None
     assert updated.eri_oovv is None
+    assert updated.neural_xc_grid_payload is None
     assert molecule.eri_ovov is not None
     assert updated.rep_tensor is molecule.rep_tensor
 

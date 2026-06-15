@@ -33,6 +33,39 @@ def test_closed_shell_s1_training_can_skip_final_evaluation():
     assert args.skip_final_evaluation is True
 
 
+def test_streaming_skip_final_evaluation_skips_final_step_eval():
+    module = _load_training_tool()
+
+    one_step = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--stream-train",
+            "--steps",
+            "1",
+            "--skip-final-evaluation",
+        ]
+    )
+    multi_step = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--stream-train",
+            "--steps",
+            "5",
+            "--eval-interval",
+            "2",
+            "--skip-final-evaluation",
+        ]
+    )
+
+    assert module._streaming_should_eval_step(one_step, step=1) is False
+    assert module._streaming_should_eval_step(multi_step, step=1) is False
+    assert module._streaming_should_eval_step(multi_step, step=2) is True
+    assert module._streaming_should_eval_step(multi_step, step=5) is False
+    assert module._streaming_should_log_train_step(multi_step, step=1) is True
+
+
 def test_closed_shell_s1_training_accepts_low_memory_strict_hfx_response_mode():
     module = _load_training_tool()
 
@@ -46,6 +79,86 @@ def test_closed_shell_s1_training_accepts_low_memory_strict_hfx_response_mode():
     )
 
     assert args.strict_hfx_response_mode == "low_memory"
+
+
+def test_closed_shell_s1_training_accepts_scf_hfx_grid_block_size_alias():
+    module = _load_training_tool()
+
+    args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--scf-hfx-grid-block-size",
+            "256",
+        ]
+    )
+    legacy_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--response-grid-chunk-size",
+            "128",
+        ]
+    )
+
+    assert args.scf_hfx_grid_block_size == 256
+    assert legacy_args.scf_hfx_grid_block_size == 128
+
+
+def test_closed_shell_s1_training_accepts_response_hf_mode():
+    module = _load_training_tool()
+
+    default_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+        ]
+    )
+    approx_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--response-hf-mode",
+            "approx",
+        ]
+    )
+    strict_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--response-hf-mode",
+            "strict",
+        ]
+    )
+    with pytest.raises(SystemExit):
+        module.parse_args(
+            [
+                "--reference-csv",
+                "refs.csv",
+                "--response-hf-mode",
+                "none",
+            ]
+        )
+
+    assert default_args.response_hf_mode == "approx"
+    assert approx_args.response_hf_mode == "approx"
+    assert strict_args.response_hf_mode == "strict"
+
+
+def test_closed_shell_s1_training_accepts_functional_hfx_channel_toggle():
+    module = _load_training_tool()
+
+    default_args = module.parse_args(["--reference-csv", "refs.csv"])
+    hfx_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--include-hfx-channel",
+        ]
+    )
+
+    assert default_args.include_hfx_channel is False
+    assert hfx_args.include_hfx_channel is True
 
 
 def test_stream_train_defaults_to_host_reference_cache():
@@ -221,6 +334,28 @@ def test_hdf5_chunked_hfx_nu_reads_at_runtime_under_jit(tmp_path):
     assert second_grad == pytest.approx(float(np.sum(updated[:, 1:3])))
 
 
+def test_dense_chunked_hfx_nu_padded_reads_with_dynamic_scan_start_under_jit():
+    import jax
+    import jax.numpy as jnp
+
+    from td_graddft.neural_xc.inputs import ChunkedHFXNu, hfx_nu_grid_chunk_padded
+
+    hfx_nu = np.arange(2 * 5 * 2 * 2, dtype=np.float64).reshape(2, 5, 2, 2)
+    api = ChunkedHFXNu.from_dense(hfx_nu, chunk_size=2)
+
+    @jax.jit
+    def scan_chunk_sums():
+        def body(carry, chunk_idx):
+            start = chunk_idx * 2
+            chunk = hfx_nu_grid_chunk_padded(api, start, 2, n_omega=1)
+            return carry + jnp.sum(chunk), None
+
+        total, _ = jax.lax.scan(body, jnp.asarray(0.0, dtype=jnp.float64), jnp.arange(3))
+        return total
+
+    assert float(scan_chunk_sums()) == pytest.approx(float(np.sum(hfx_nu[:1])))
+
+
 def test_hdf5_cache_materializes_chunked_hfx_nu_api(tmp_path):
     h5py = pytest.importorskip("h5py")
     from td_graddft.data.hdf5_cache import (
@@ -266,6 +401,73 @@ def test_hdf5_cache_materializes_chunked_hfx_nu_api(tmp_path):
     assert np.allclose(loaded.hfx_nu_api.materialize(), hfx_nu)
 
 
+def test_streaming_preserves_chunked_hfx_nu_api():
+    module = _load_training_tool()
+    from td_graddft.neural_xc.inputs import ChunkedHFXNu
+    from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule
+    from td_graddft.training import ExcitedStateDatum, GroundStateCoreDatum, GroundStateDatum
+
+    hfx_nu = np.arange(2 * 5 * 2 * 2, dtype=np.float64).reshape(2, 5, 2, 2)
+
+    molecule = RestrictedMolecule(
+        ao=np.ones((5, 2)),
+        grid=QuadratureGrid(weights=np.ones((5,)), coords=np.ones((5, 3))),
+        dipole_integrals=np.ones((3, 2, 2)),
+        rep_tensor=np.ones((2, 2, 2, 2)),
+        mo_coeff=np.ones((2, 2, 2)),
+        mo_occ=np.ones((2, 2)),
+        mo_energy=np.ones((2, 2)),
+        rdm1=np.ones((2, 2, 2)),
+        h1e=np.ones((2, 2)),
+        nuclear_repulsion=1.0,
+        atom_coords=np.ones((4, 3)),
+        nocc=1,
+        hfx_nu=None,
+        hfx_nu_api=ChunkedHFXNu.from_dense(hfx_nu, chunk_size=2),
+    )
+    datum = GroundStateDatum.from_parts(
+        molecule,
+        core=GroundStateCoreDatum(
+            target_total_energy=np.asarray(-1.0),
+            target_density=np.ones((5,)),
+            density_constraint_weight=0.25,
+        ),
+        excited_state=ExcitedStateDatum(
+            target_s1_energy=np.asarray(2.0),
+            s1_constraint_weight=0.5,
+        ),
+        weight=3.0,
+    )
+
+    seen: list[GroundStateDatum] = []
+
+    def eval_kernel(params, local_datum):
+        del params
+        seen.append(local_datum)
+        return np.asarray(0.0), {
+            "s1_mae": np.asarray([0.0]),
+            "s1_mse": np.asarray([0.0]),
+        }
+
+    loss, metrics = module._streaming_average_eval(None, (datum,), eval_kernel)
+
+    assert datum.molecule.hfx_nu is None
+    assert datum.molecule.hfx_nu_api is not None
+    assert loss == pytest.approx(0.0)
+    assert metrics["s1_mae"] == pytest.approx(0.0)
+    assert len(seen) == 1
+    streamed = seen[0]
+    assert streamed.molecule.hfx_nu is None
+    assert streamed.molecule.hfx_nu_api is datum.molecule.hfx_nu_api
+    assert np.allclose(streamed.molecule.hfx_nu_api.materialize(), hfx_nu)
+    assert streamed.weight == pytest.approx(3.0)
+    assert streamed.density_constraint_weight == pytest.approx(0.25)
+    assert streamed.s1_constraint_weight == pytest.approx(0.5)
+    assert streamed.target_total_energy == pytest.approx(-1.0)
+    assert streamed.target_s1_energy == pytest.approx(2.0)
+    assert np.allclose(streamed.target_density, np.ones((5,)))
+
+
 def test_training_cache_uses_chunked_hfx_nu_only_for_large_low_memory_refs(tmp_path):
     h5py = pytest.importorskip("h5py")
     module = _load_training_tool()
@@ -294,17 +496,6 @@ def test_training_cache_uses_chunked_hfx_nu_only_for_large_low_memory_refs(tmp_p
             == "chunked"
         )
 
-        args.strict_hfx_response_mode = "dense"
-        assert (
-            module._cache_hfx_nu_storage(
-                group,
-                args=args,
-                input_feature_mode="canonical",
-            )
-            == "array"
-        )
-
-        args.strict_hfx_response_mode = "low_memory"
         del group["atom_coords"]
         group.create_dataset("atom_coords", data=np.ones((3, 3)))
         assert (

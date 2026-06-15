@@ -36,7 +36,7 @@ from td_graddft.orbital_compare import (
     plot_orbital_compare_panel,
     render_restricted_orbital_surfaces,
 )
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
 from td_graddft.scf import DifferentiableSCF, DifferentiableSCFConfig
 from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
 from td_graddft.training import (

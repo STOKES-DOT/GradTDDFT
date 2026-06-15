@@ -8,9 +8,9 @@ from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.spectra import oscillator_strengths, transition_dipoles
 from td_graddft.tddft._semilocal_response import SemilocalResponseFunctional
 from td_graddft.tddft import RestrictedCasidaTDDFT
-from td_graddft.tddft.casida import solve_casida
+from td_graddft.tddft.casida import solve_casida_from_tdhf_operator
 from td_graddft.tddft.types import TDDFTResult
-from td_graddft.tddft.types import TDDFTMatrices
+from td_graddft.xc_backend.jax_xc_adapter import MissingJAXXCError, load_jax_xc
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,53 @@ def _pyscf_or_skip():
         from pyscf import dft, gto  # noqa: F401
     except ModuleNotFoundError:
         pytest.skip("PySCF is required for TDDFT comparison tests.")
+
+
+def _jax_xc_or_skip():
+    try:
+        load_jax_xc()
+    except MissingJAXXCError:
+        pytest.skip("jax_xc is required for semilocal TDDFT comparison tests.")
+
+
+def _operator_matrices(vind, dim: int) -> tuple[np.ndarray, np.ndarray]:
+    eye = jnp.eye(dim)
+    zeros = jnp.zeros_like(eye)
+    a_cols = vind(jnp.concatenate([eye, zeros], axis=-1))[:, :dim]
+    b_cols = vind(jnp.concatenate([zeros, eye], axis=-1))[:, :dim]
+    return np.asarray(a_cols.T), np.asarray(b_cols.T)
+
+
+def _matrix_tdhf_vind(flat_a, flat_b):
+    def vind(rows):
+        rows = jnp.asarray(rows).reshape(-1, 2 * flat_a.shape[0])
+        x = rows[:, : flat_a.shape[0]]
+        y = rows[:, flat_a.shape[0] :]
+        upper = x @ jnp.asarray(flat_a).T + y @ jnp.asarray(flat_b).T
+        lower = -(x @ jnp.asarray(flat_b).T + y @ jnp.asarray(flat_a).T)
+        return jnp.concatenate([upper, lower], axis=-1)
+
+    return vind
+
+
+def _dense_tda_reference(flat_a: np.ndarray, nstates: int) -> np.ndarray:
+    flat_a = 0.5 * (flat_a + flat_a.T)
+    return np.linalg.eigvalsh(flat_a)[:nstates]
+
+
+def _dense_casida_reference(
+    flat_a: np.ndarray,
+    flat_b: np.ndarray,
+    nstates: int,
+    *,
+    matrix_eps: float = 1e-10,
+) -> np.ndarray:
+    flat_a = 0.5 * (flat_a + flat_a.T)
+    flat_b = 0.5 * (flat_b + flat_b.T)
+    dim = flat_a.shape[0]
+    factor = np.linalg.cholesky(flat_a - flat_b + matrix_eps * np.eye(dim))
+    w2 = np.linalg.eigvalsh(factor.T @ (flat_a + flat_b) @ factor)
+    return np.sqrt(np.maximum(w2[:nstates], 0.0))
 
 
 def _make_water_reference(xc: str):
@@ -88,9 +135,6 @@ def _pyscf_xy_to_td_result(td) -> TDDFTResult:
         excitation_energies=np.asarray(td.e),
         x_amplitudes=x,
         y_amplitudes=y,
-        a_matrix=np.zeros((nocc, nvir, nocc, nvir)),
-        b_matrix=np.zeros((nocc, nvir, nocc, nvir)),
-        casida_matrix=np.zeros((nocc * nvir, nocc * nvir)),
     )
 
 
@@ -115,9 +159,10 @@ def test_restricted_tdhf_matches_pyscf_water_reference():
         molecule=reference,
         xc_functional=hf_xc,
     )
-    matrices = solver.build_matrices()
-    pred_a = np.asarray(matrices.a_matrix, dtype=float)
-    pred_b = np.asarray(matrices.b_matrix, dtype=float)
+    dim = int(np.prod(np.asarray(ref_a).shape[:2]))
+    pred_a, pred_b = _operator_matrices(solver.gen_tdhf_vind(), dim)
+    pred_a = pred_a.reshape(np.asarray(ref_a).shape)
+    pred_b = pred_b.reshape(np.asarray(ref_b).shape)
     result = solver.kernel(nstates=4)
     pred_energies = np.asarray(result.excitation_energies, dtype=float)
     pred_osc = np.asarray(oscillator_strengths(reference, result), dtype=float)
@@ -161,23 +206,24 @@ def test_cached_mo_response_slices_match_ao_tensor_path():
         xc_functional=hf_xc,
     )
 
-    cached = cached_solver.build_matrices()
-    direct = uncached_solver.build_matrices()
+    dim = int(reference.nocc * (reference.mo_coeff.shape[-1] - reference.nocc))
+    cached_a, cached_b = _operator_matrices(cached_solver.gen_tdhf_vind(), dim)
+    direct_a, direct_b = _operator_matrices(uncached_solver.gen_tdhf_vind(), dim)
     np.testing.assert_allclose(
-        np.asarray(cached.a_matrix),
-        np.asarray(direct.a_matrix),
+        cached_a,
+        direct_a,
         atol=1e-8,
         rtol=1e-8,
     )
     np.testing.assert_allclose(
-        np.asarray(cached.b_matrix),
-        np.asarray(direct.b_matrix),
+        cached_b,
+        direct_b,
         atol=1e-8,
         rtol=1e-8,
     )
 
 
-def test_restricted_casida_davidson_matches_dense():
+def test_restricted_casida_davidson_matches_numpy_reference():
     _pyscf_or_skip()
     mf = _make_water_reference("hf")
     reference = restricted_reference_from_pyscf(mf)
@@ -186,11 +232,6 @@ def test_restricted_casida_davidson_matches_dense():
         energy_density_fn=lambda rho: jnp.zeros_like(rho),
         exact_exchange_fraction=1.0,
     )
-    dense_solver = RestrictedCasidaTDDFT(
-        molecule=reference,
-        xc_functional=hf_xc,
-        eigensolver="dense",
-    )
     davidson_solver = RestrictedCasidaTDDFT(
         molecule=reference,
         xc_functional=hf_xc,
@@ -198,17 +239,19 @@ def test_restricted_casida_davidson_matches_dense():
         davidson_max_iter=80,
         davidson_max_subspace=24,
     )
-    dense = dense_solver.kernel(nstates=4)
+    dim = int(reference.nocc * (reference.mo_coeff.shape[-1] - reference.nocc))
+    flat_a, flat_b = _operator_matrices(davidson_solver.gen_tdhf_vind(), dim)
+    ref = _dense_casida_reference(flat_a, flat_b, 4)
     davidson = davidson_solver.kernel(nstates=4)
     np.testing.assert_allclose(
         np.asarray(davidson.excitation_energies),
-        np.asarray(dense.excitation_energies),
+        ref,
         atol=1e-6,
         rtol=1e-6,
     )
 
 
-def test_restricted_tda_davidson_matches_dense():
+def test_restricted_tda_davidson_matches_numpy_reference():
     _pyscf_or_skip()
     mf = _make_water_reference("hf")
     reference = restricted_reference_from_pyscf(mf)
@@ -217,11 +260,6 @@ def test_restricted_tda_davidson_matches_dense():
         energy_density_fn=lambda rho: jnp.zeros_like(rho),
         exact_exchange_fraction=1.0,
     )
-    dense_solver = RestrictedCasidaTDDFT(
-        molecule=reference,
-        xc_functional=hf_xc,
-        eigensolver="dense",
-    )
     davidson_solver = RestrictedCasidaTDDFT(
         molecule=reference,
         xc_functional=hf_xc,
@@ -229,11 +267,13 @@ def test_restricted_tda_davidson_matches_dense():
         davidson_max_iter=80,
         davidson_max_subspace=24,
     )
-    dense = dense_solver.tda(nstates=4)
+    dim = int(reference.nocc * (reference.mo_coeff.shape[-1] - reference.nocc))
+    flat_a, _ = _operator_matrices(davidson_solver.gen_tdhf_vind(), dim)
+    ref = _dense_tda_reference(flat_a, 4)
     davidson = davidson_solver.tda(nstates=4)
     np.testing.assert_allclose(
         np.asarray(davidson.excitation_energies),
-        np.asarray(dense.excitation_energies),
+        ref,
         atol=1e-6,
         rtol=1e-6,
     )
@@ -253,13 +293,15 @@ def test_restricted_b3lyp_h2_pyscf_matrices_are_solved_correctly_by_local_casida
     if mo_energy.ndim == 2:
         mo_energy = mo_energy[0]
     delta_eps = mo_energy[reference.nocc :] - mo_energy[: reference.nocc][:, None]
-    matrices = TDDFTMatrices(
-        orbital_energy_differences=jnp.asarray(delta_eps),
-        a_matrix=jnp.asarray(ref_a),
-        b_matrix=jnp.asarray(ref_b),
+    flat_a = np.asarray(ref_a).reshape(delta_eps.size, delta_eps.size)
+    flat_b = np.asarray(ref_b).reshape(delta_eps.size, delta_eps.size)
+    result = solve_casida_from_tdhf_operator(
+        jnp.asarray(delta_eps),
+        _matrix_tdhf_vind(flat_a, flat_b),
+        nstates=1,
+        davidson_max_iter=80,
+        davidson_max_subspace=24,
     )
-
-    result = solve_casida(matrices, nstates=1, eigensolver="dense")
     np.testing.assert_allclose(
         np.asarray(result.excitation_energies),
         ref_energies[:1],
@@ -270,6 +312,7 @@ def test_restricted_b3lyp_h2_pyscf_matrices_are_solved_correctly_by_local_casida
 
 def test_restricted_b3lyp_h2_response_matrices_are_close_to_pyscf_reference():
     _pyscf_or_skip()
+    _jax_xc_or_skip()
     mf = _make_h2_reference("b3lyp")
     td = mf.TDDFT()
     td.nstates = 1
@@ -281,16 +324,17 @@ def test_restricted_b3lyp_h2_response_matrices_are_close_to_pyscf_reference():
         molecule=reference,
         xc_functional=SemilocalResponseFunctional("b3lyp"),
     )
-    matrices = solver.build_matrices()
+    dim = int(reference.nocc * (reference.mo_coeff.shape[-1] - reference.nocc))
+    pred_a, pred_b = _operator_matrices(solver.gen_tdhf_vind(), dim)
 
     np.testing.assert_allclose(
-        np.asarray(matrices.a_matrix, dtype=float),
+        np.asarray(pred_a.reshape(np.asarray(ref_a).shape), dtype=float),
         np.asarray(ref_a, dtype=float),
         atol=2e-3,
         rtol=2e-3,
     )
     np.testing.assert_allclose(
-        np.asarray(matrices.b_matrix, dtype=float),
+        np.asarray(pred_b.reshape(np.asarray(ref_b).shape), dtype=float),
         np.asarray(ref_b, dtype=float),
         atol=2e-3,
         rtol=2e-3,
@@ -299,6 +343,7 @@ def test_restricted_b3lyp_h2_response_matrices_are_close_to_pyscf_reference():
 
 def test_restricted_pbe0_h2_response_matrices_match_pyscf_reference():
     _pyscf_or_skip()
+    _jax_xc_or_skip()
     mf = _make_h2_reference("pbe0")
     td = mf.TDDFT()
     td.nstates = 1
@@ -310,17 +355,18 @@ def test_restricted_pbe0_h2_response_matrices_match_pyscf_reference():
         molecule=reference,
         xc_functional=SemilocalResponseFunctional("pbe0"),
     )
-    matrices = solver.build_matrices()
+    dim = int(reference.nocc * (reference.mo_coeff.shape[-1] - reference.nocc))
+    pred_a, pred_b = _operator_matrices(solver.gen_tdhf_vind(), dim)
     result = solver.kernel(nstates=1)
 
     np.testing.assert_allclose(
-        np.asarray(matrices.a_matrix, dtype=float),
+        np.asarray(pred_a.reshape(np.asarray(ref_a).shape), dtype=float),
         np.asarray(ref_a, dtype=float),
         atol=1e-6,
         rtol=1e-6,
     )
     np.testing.assert_allclose(
-        np.asarray(matrices.b_matrix, dtype=float),
+        np.asarray(pred_b.reshape(np.asarray(ref_b).shape), dtype=float),
         np.asarray(ref_b, dtype=float),
         atol=1e-6,
         rtol=1e-6,
@@ -357,6 +403,7 @@ def test_transition_dipoles_and_oscillator_strengths_match_pyscf_xy(xc: str):
 
 def test_restricted_b3lyp_water_excitation_energies_match_pyscf_reference():
     _pyscf_or_skip()
+    _jax_xc_or_skip()
     mf = _make_water_reference("b3lyp")
     td = mf.TDDFT()
     td.nstates = 4

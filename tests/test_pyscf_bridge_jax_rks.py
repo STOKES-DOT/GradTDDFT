@@ -59,9 +59,10 @@ def test_restricted_reference_from_pyscf_with_jax_rks_shapes_and_target_energy()
     assert ref.ao.shape[1] == nao
     assert ref.h1e.shape == (nao, nao)
     assert np.asarray(ref.rep_tensor).size == 0
-    assert ref.eri_ovov is not None
-    assert ref.eri_ovvo is not None
-    assert ref.eri_oovv is not None
+    assert ref.eri_pair_matrix is not None
+    assert ref.eri_ovov is None
+    assert ref.eri_ovvo is None
+    assert ref.eri_oovv is None
     assert ref.mo_coeff.shape[0] == 2
     assert ref.mo_occ.shape[0] == 2
     assert ref.rdm1.shape == (2, nao, nao)
@@ -271,9 +272,10 @@ def test_restricted_molecule_from_spec_with_jax_rks_direct_backend_matches_water
     )
 
     assert np.asarray(ref.rep_tensor).size == 0
-    assert ref.eri_ovov is not None
-    assert ref.eri_ovvo is not None
-    assert ref.eri_oovv is not None
+    assert ref.eri_pair_matrix is not None
+    assert ref.eri_ovov is None
+    assert ref.eri_ovvo is None
+    assert ref.eri_oovv is None
     assert np.isclose(float(ref.mf_energy), float(mf.e_tot), atol=2e-4, rtol=2e-6)
 
 
@@ -505,9 +507,10 @@ def test_restricted_molecule_from_spec_with_jax_rks_libcint_full_uses_packed_eri
 
     assert "s4" in seen_aosym
     assert np.asarray(ref.rep_tensor).size == 0
-    assert ref.eri_ovov is not None
-    assert ref.eri_ovvo is not None
-    assert ref.eri_oovv is not None
+    assert ref.eri_pair_matrix is not None
+    assert ref.eri_ovov is None
+    assert ref.eri_ovvo is None
+    assert ref.eri_oovv is None
     assert np.isfinite(float(ref.mf_energy))
 
 
