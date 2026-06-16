@@ -2273,8 +2273,7 @@ class _PT2ResponsiveChannelModel(nn.Module):
     @nn.compact
     def __call__(self, inputs):
         coeff = jnp.zeros(inputs.shape[:-1] + (3,), dtype=inputs.dtype)
-        pt2_coeff = 0.25 + jnp.square(inputs[..., -1])
-        return coeff.at[..., 1].set(pt2_coeff)
+        return coeff.at[..., 1].set(jnp.square(inputs[..., 0]))
 
 
 class _DensityResponsivePT2ChannelModel(nn.Module):
