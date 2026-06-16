@@ -182,6 +182,48 @@ def test_restricted_reference_host_backend_keeps_hfx_nu_on_host(monkeypatch):
     assert molecule.hfx_nu_api is None
 
 
+def test_restricted_reference_df_backend_stores_df_without_packed_eri(monkeypatch):
+    fake_numint = types.SimpleNamespace(
+        eval_ao=lambda mol, coords, deriv=0: (
+            np.ones((2, 2), dtype=np.float64)
+            if deriv == 0
+            else np.ones((4, 2, 2), dtype=np.float64)
+        )
+    )
+    fake_dft = types.ModuleType("pyscf.dft")
+    fake_dft.numint = fake_numint
+    fake_pyscf = types.ModuleType("pyscf")
+    fake_pyscf.dft = fake_dft
+    monkeypatch.setitem(sys.modules, "pyscf", fake_pyscf)
+    monkeypatch.setitem(sys.modules, "pyscf.dft", fake_dft)
+
+    class _NoPackedEriMol(_FakeMol):
+        def intor(self, name, aosym=None):
+            if name == "int2e":
+                raise AssertionError("DF reference should not build packed int2e.")
+            return super().intor(name, aosym=aosym)
+
+    class _NoPackedEriMF(_FakeMF):
+        mol = _NoPackedEriMol()
+
+    monkeypatch.setattr(
+        reference_module,
+        "true_df_factors_from_libcint_mol",
+        lambda mol: np.ones((2, 2, 2), dtype=np.float64),
+    )
+
+    molecule = reference_module.restricted_reference_from_pyscf(
+        _NoPackedEriMF(),
+        jk_backend="df",
+        array_backend="host",
+    )
+
+    assert molecule.rep_tensor.shape == (0, 0, 0, 0)
+    assert molecule.eri_pair_matrix is None
+    assert isinstance(molecule.df_factors, np.ndarray)
+    assert molecule.df_factors.shape == (2, 2, 2)
+
+
 def test_restricted_reference_uses_chunked_hfx_nu_api_for_more_than_three_atoms(monkeypatch):
     fake_numint = types.SimpleNamespace(
         eval_ao=lambda mol, coords, deriv=0: (

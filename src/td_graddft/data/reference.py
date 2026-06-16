@@ -5,6 +5,7 @@ from typing import Any, Literal
 import numpy as np
 import jax.numpy as jnp
 
+from td_graddft.df import true_df_factors_from_libcint_mol
 from td_graddft.scf.features import (
     _charge_center,
 )
@@ -14,6 +15,7 @@ from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule, Unrestr
 
 ArrayBackend = Literal["jax", "host"]
 HFXNuStorage = Literal["auto", "dense", "chunked"]
+ReferenceJKBackend = Literal["full", "df"]
 
 
 def _backend_array(value: Any, *, array_backend: ArrayBackend) -> Any:
@@ -66,6 +68,7 @@ def restricted_reference_from_pyscf(
     hfx_chunk_size: int = 512,
     array_backend: ArrayBackend = "jax",
     hfx_nu_storage: HFXNuStorage = "auto",
+    jk_backend: ReferenceJKBackend = "full",
 ) -> RestrictedMolecule:
     """Convert a restricted PySCF SCF/DFT object to a TD-GradDFT-ready reference."""
 
@@ -91,7 +94,17 @@ def restricted_reference_from_pyscf(
     mo_occ_np = np.asarray(mf.mo_occ) / 2.0
     mo_energy_np = np.asarray(mf.mo_energy)
     nocc = int(np.count_nonzero(np.asarray(mf.mo_occ) > 1e-8))
-    eri_pair_matrix_np = np.asarray(mf.mol.intor("int2e", aosym="s4"))
+    jk_backend_norm = str(jk_backend).lower()
+    if jk_backend_norm == "df":
+        df_factors_np = np.asarray(true_df_factors_from_libcint_mol(mf.mol))
+        eri_pair_matrix_np = None
+        integral_dtype = df_factors_np.dtype
+    elif jk_backend_norm == "full":
+        eri_pair_matrix_np = np.asarray(mf.mol.intor("int2e", aosym="s4"))
+        df_factors_np = None
+        integral_dtype = eri_pair_matrix_np.dtype
+    else:
+        raise ValueError("jk_backend must be one of {'full', 'df'}.")
     with mf.mol.with_common_orig(_charge_center(mf.mol)):
         dipole_integrals_np = np.asarray(mf.mol.intor_symmetric("int1e_r", comp=3))
 
@@ -135,9 +148,12 @@ def restricted_reference_from_pyscf(
             jnp.asarray(mo_coeff_np),
             jnp.asarray(mo_occ_np),
             jnp.asarray(mo_energy_np),
-            rep_tensor=jnp.zeros((0, 0, 0, 0), dtype=jnp.asarray(eri_pair_matrix_np).dtype),
+            rep_tensor=jnp.zeros((0, 0, 0, 0), dtype=integral_dtype),
             eri_ovov=None,
-            eri_pair_matrix=jnp.asarray(eri_pair_matrix_np),
+            eri_pair_matrix=(
+                None if eri_pair_matrix_np is None else jnp.asarray(eri_pair_matrix_np)
+            ),
+            df_factors=None if df_factors_np is None else jnp.asarray(df_factors_np),
             nocc=nocc,
         )
         pt2_local = _backend_array(pt2_local_jax, array_backend=array_backend)
@@ -150,10 +166,19 @@ def restricted_reference_from_pyscf(
     mo_occ = _backend_array(mo_occ_np, array_backend=array_backend)
     mo_energy = _backend_array(mo_energy_np, array_backend=array_backend)
     rep_tensor = _backend_array(
-        np.zeros((0, 0, 0, 0), dtype=eri_pair_matrix_np.dtype),
+        np.zeros((0, 0, 0, 0), dtype=integral_dtype),
         array_backend=array_backend,
     )
-    eri_pair_matrix = _backend_array(eri_pair_matrix_np, array_backend=array_backend)
+    eri_pair_matrix = (
+        None
+        if eri_pair_matrix_np is None
+        else _backend_array(eri_pair_matrix_np, array_backend=array_backend)
+    )
+    df_factors = (
+        None
+        if df_factors_np is None
+        else _backend_array(df_factors_np, array_backend=array_backend)
+    )
 
     return RestrictedMolecule(
         ao=ao,
@@ -197,6 +222,7 @@ def restricted_reference_from_pyscf(
         hfx_nu=hfx_nu,
         hfx_nu_api=hfx_nu_api,
         pt2_local=pt2_local,
+        df_factors=df_factors,
         eri_pair_matrix=eri_pair_matrix,
         eri_ovov=None,
         eri_ovvo=None,

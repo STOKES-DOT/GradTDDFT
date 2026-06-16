@@ -66,19 +66,35 @@ def test_streaming_skip_final_evaluation_skips_final_step_eval():
     assert module._streaming_should_log_train_step(multi_step, step=1) is True
 
 
-def test_closed_shell_s1_training_accepts_low_memory_strict_hfx_response_mode():
+def test_closed_shell_s1_training_accepts_scf_hfx_grid_block_size():
     module = _load_training_tool()
 
     args = module.parse_args(
         [
             "--reference-csv",
             "refs.csv",
-            "--strict-hfx-response-mode",
-            "low_memory",
+            "--scf-hfx-grid-block-size",
+            "256",
         ]
     )
 
-    assert args.strict_hfx_response_mode == "low_memory"
+    assert args.scf_hfx_grid_block_size == 256
+
+
+def test_closed_shell_s1_training_accepts_functional_hfx_channel_toggle():
+    module = _load_training_tool()
+
+    default_args = module.parse_args(["--reference-csv", "refs.csv"])
+    hfx_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--include-hfx-channel",
+        ]
+    )
+
+    assert default_args.include_hfx_channel is False
+    assert hfx_args.include_hfx_channel is True
 
 
 def test_closed_shell_s1_training_accepts_scf_hfx_grid_block_size_alias():
@@ -223,6 +239,43 @@ def test_reference_cache_defaults_to_hdf5_path():
     )
 
 
+def test_reference_jk_backend_is_switchable_and_part_of_cache_key():
+    module = _load_training_tool()
+
+    full_args = module.parse_args(["--reference-csv", "refs.csv"])
+    df_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--reference-jk-backend",
+            "df",
+        ]
+    )
+    row = module.ReferenceRow(
+        system="water",
+        split="train",
+        atom="O 0 0 0; H 0 0 1; H 0 1 0",
+        unit="Angstrom",
+        charge=0,
+        spin=0,
+        basis="sto-3g",
+        ccsd_total_energy_h=-75.0,
+        s1_excitation_h=0.3,
+    )
+
+    assert full_args.reference_jk_backend == "full"
+    assert df_args.reference_jk_backend == "df"
+    assert module._reference_cache_key(
+        row,
+        args=full_args,
+        input_feature_mode="canonical",
+    ) != module._reference_cache_key(
+        row,
+        args=df_args,
+        input_feature_mode="canonical",
+    )
+
+
 def test_hdf5_cache_can_read_restricted_molecule_on_host(tmp_path):
     h5py = pytest.importorskip("h5py")
     from td_graddft.data.hdf5_cache import (
@@ -295,6 +348,35 @@ def test_hdf5_cache_can_read_restricted_hfx_nu_as_chunked_api(tmp_path):
     assert loaded.hfx_nu_api is not None
     assert loaded.hfx_nu_api.shape == hfx_nu.shape
     assert np.allclose(loaded.hfx_nu_api.grid_chunk(1, 3), hfx_nu[:, 1:3])
+
+
+def test_dense_chunked_hfx_nu_padded_reads_with_dynamic_scan_start_under_jit():
+    import jax
+    import jax.numpy as jnp
+
+    from td_graddft.neural_xc.inputs import ChunkedHFXNu, hfx_nu_grid_chunk_padded
+
+    hfx_nu = np.arange(2 * 5 * 2 * 2, dtype=np.float64).reshape(2, 5, 2, 2)
+    path = tmp_path / "refs.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("hfx_nu", data=hfx_nu)
+
+    api = ChunkedHFXNu.from_hdf5_dataset(str(path), "hfx_nu", chunk_size=2)
+
+    def chunk_sum(scale):
+        return jnp.sum(api.grid_chunk_padded(jnp.asarray(1, dtype=jnp.int32), 2) * scale)
+
+    @jax.jit
+    def scan_chunk_sums():
+        def body(carry, chunk_idx):
+            start = chunk_idx * 2
+            chunk = hfx_nu_grid_chunk_padded(api, start, 2, n_omega=1)
+            return carry + jnp.sum(chunk), None
+
+        total, _ = jax.lax.scan(body, jnp.asarray(0.0, dtype=jnp.float64), jnp.arange(3))
+        return total
+
+    assert float(scan_chunk_sums()) == pytest.approx(float(np.sum(hfx_nu[:1])))
 
 
 def test_dense_chunked_hfx_nu_padded_reads_with_dynamic_scan_start_under_jit():
@@ -431,20 +513,18 @@ def test_streaming_preserves_chunked_hfx_nu_api():
     assert np.allclose(streamed.target_density, np.ones((5,)))
 
 
-def test_training_cache_uses_chunked_hfx_nu_only_for_large_low_memory_refs(tmp_path):
+def test_training_cache_uses_chunked_hfx_nu_only_for_large_canonical_refs(tmp_path):
     h5py = pytest.importorskip("h5py")
     module = _load_training_tool()
 
     args = module.parse_args(
-        [
-            "--reference-csv",
-            "refs.csv",
-            "--input-feature-mode",
-            "canonical",
-            "--strict-hfx-response-mode",
-            "low_memory",
-        ]
-    )
+            [
+                "--reference-csv",
+                "refs.csv",
+                "--input-feature-mode",
+                "canonical",
+            ]
+        )
     path = tmp_path / "refs.h5"
     with h5py.File(path, "w") as handle:
         group = handle.create_group("molecule")

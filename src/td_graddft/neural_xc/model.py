@@ -1071,24 +1071,52 @@ class ResponseMixin:
                 hf_spin_energy_density=hf_spin_energy_density,
             )
         response_variables, active, hf_projected_a, hf_projected_b, pt2_feature = strict_payload
-        point_tensor = self._strict_point_response_tensor_fn(
-            params,
-            response_pt2_mode=response_pt2_mode,
+        tangent_arr = jnp.asarray(tangent, dtype=response_variables.dtype)
+        point_gradient_fn = jax.grad(
+            self._total_point_local_energy_from_variables,
+            argnums=1,
         )
-        tensor = jax.vmap(point_tensor)(
-            response_variables,
-            hf_projected,
-            hf_projected_a,
-            hf_projected_b,
-            pt2_feature,
+
+        def point_hvp(
+            variables: Array,
+            hf_point: Array,
+            hf_point_a: Array,
+            hf_point_b: Array,
+            pt2_point: Array,
+            tangent_point: Array,
+        ) -> Array:
+            def gradient_at(point_variables: Array) -> Array:
+                return point_gradient_fn(
+                    params,
+                    point_variables,
+                    hf_point,
+                    hf_point_a,
+                    hf_point_b,
+                    pt2_point=pt2_point,
+                    response_pt2_mode=response_pt2_mode,
+                )
+
+            _, hvp = jax.jvp(gradient_at, (variables,), (tangent_point,))
+            hvp = jnp.nan_to_num(hvp, nan=0.0, posinf=0.0, neginf=0.0)
+            return self._maybe_clip_response(hvp)
+
+        def vector_hvp(tangent_grid_major: Array) -> Array:
+            return jax.vmap(point_hvp)(
+                response_variables,
+                hf_projected,
+                hf_projected_a,
+                hf_projected_b,
+                pt2_feature,
+                tangent_grid_major,
+            )
+
+        response_grid_major = jax.vmap(vector_hvp)(
+            jnp.moveaxis(tangent_arr, -1, -2),
         )
-        tensor = tensor * active[:, None, None].astype(tensor.dtype)
-        return jnp.einsum(
-            "gxy,nyg->nxg",
-            tensor,
-            jnp.asarray(tangent, dtype=tensor.dtype),
-            precision=Precision.HIGHEST,
+        response_grid_major = response_grid_major * active[None, :, None].astype(
+            response_grid_major.dtype
         )
+        return jnp.moveaxis(response_grid_major, -2, -1)
 
     def _strict_point_response_tensor_fn(
         self,

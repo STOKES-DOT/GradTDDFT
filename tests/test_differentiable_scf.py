@@ -1052,10 +1052,14 @@ def test_ground_state_loss_reuses_value_and_grad_transform(monkeypatch):
     )
     params = {"strength": jnp.asarray(0.1, dtype=jnp.float32)}
 
-    loss_and_grad(params, datum)
+    _, metrics, _ = loss_and_grad(params, datum)
     loss_and_grad(params, datum)
 
     assert len(transform_calls) == 1
+    assert "grad_norm" in metrics
+    assert "nonfinite_grad_fraction" in metrics
+    assert "raw_grad_norm" not in metrics
+    assert "grad_abs_max" not in metrics
 
 
 def test_impl_self_consistent_loss_produces_finite_gradient():
@@ -1732,6 +1736,53 @@ def test_implicit_mode_gradient_is_finite():
     assert len(grad_leaves) > 0
     for g in grad_leaves:
         assert np.isfinite(np.asarray(g)).all(), "gradient contains non-finite values"
+
+
+def test_implicit_restricted_scf_uses_df_factors_without_packed_eri():
+    molecule = _replace_molecule(
+        _make_toy_restricted_reference(),
+        rep_tensor=jnp.zeros((0, 0, 0, 0), dtype=jnp.float32),
+        eri_pair_matrix=None,
+        df_factors=jnp.asarray(
+            [
+                [[0.7, 0.1], [0.1, 0.3]],
+                [[0.2, -0.05], [-0.05, 0.5]],
+            ],
+            dtype=jnp.float32,
+        ),
+    )
+
+    class _ToyRestrictedFunctional:
+        def scf_potential_components_and_alpha(self, params, molecule_in):
+            strength = jnp.asarray(params["strength"], dtype=jnp.float32)
+            v_rho = strength * jnp.asarray([1.0, -0.2, 0.4], dtype=jnp.float32)
+            v_grad = jnp.zeros((int(molecule_in.ao.shape[0]), 3), dtype=jnp.float32)
+            return v_rho, v_grad, "LDA", jnp.asarray(0.0, dtype=jnp.float32)
+
+    solver = DifferentiableSCF(
+        DifferentiableSCFConfig(
+            mode="self_consistent",
+            gradient_mode="impl",
+            max_cycle=4,
+            damping=0.2,
+            conv_tol_density=1e-8,
+            implicit_diff_max_iter=8,
+            implicit_diff_regularization=1e-3,
+        )
+    )
+
+    def loss_fn(raw_strength):
+        mol_sc, info = solver.run(
+            molecule,
+            _ToyRestrictedFunctional(),
+            {"strength": raw_strength},
+        )
+        return jnp.sum(mol_sc.rdm1) + 1e-3 * info.final_rms_density
+
+    value, grad = jax.value_and_grad(loss_fn)(jnp.asarray(0.1, dtype=jnp.float32))
+
+    assert np.isfinite(float(value))
+    assert np.isfinite(float(grad))
 
 
 def test_expl_and_implicit_gradients_are_consistent():

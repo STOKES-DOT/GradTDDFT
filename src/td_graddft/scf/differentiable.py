@@ -12,6 +12,7 @@ from jax.lax import Precision
 from jaxtyping import Array, PyTree
 
 from ..data.integrals import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix
+from ..df import build_j_from_df, build_jk_from_df
 from ..neural_xc.inputs import (
     hfx_nu_source,
 )
@@ -416,6 +417,16 @@ def _repulsion_integrals_from_molecule(molecule: Any) -> Array:
     return jnp.asarray(rep_tensor)
 
 
+def _df_factors_from_molecule(molecule: Any) -> Array | None:
+    df_factors = getattr(molecule, "df_factors", None)
+    if df_factors is None:
+        return None
+    factors = jnp.asarray(df_factors)
+    if int(factors.size) == 0:
+        return None
+    return factors
+
+
 def _scf_problem_arrays(molecule: Any) -> tuple[Array, Array, Array, Array, Array]:
     if getattr(molecule, "h1e", None) is None:
         raise AttributeError("Molecule-like object must define h1e for self-consistent mode.")
@@ -754,6 +765,7 @@ class _RestrictedSCFContext:
     xc_functional: Any
     h1e: Array
     rep_tensor: Array
+    df_factors: Array | None
     ao: Array
     weights: Array
     overlap: Array
@@ -959,6 +971,7 @@ class DifferentiableSCF:
             xc_functional=xc_functional,
             h1e=h1e,
             rep_tensor=rep_tensor,
+            df_factors=_df_factors_from_molecule(molecule),
             ao=ao,
             weights=weights,
             overlap=overlap,
@@ -976,6 +989,11 @@ class DifferentiableSCF:
         *,
         with_k: bool = True,
     ) -> tuple[Array, Array]:
+        if ctx.df_factors is not None:
+            if not bool(with_k):
+                j_mat = build_j_from_df(ctx.df_factors, density)
+                return j_mat, jnp.zeros_like(j_mat)
+            return build_jk_from_df(ctx.df_factors, density)
         if not bool(with_k):
             j_mat = _coulomb_matrix(ctx.rep_tensor, density)
             return j_mat, jnp.zeros_like(j_mat)
@@ -1705,6 +1723,7 @@ class DifferentiableSCF:
                 xc_functional=xc_functional,
                 h1e=h1e,
                 rep_tensor=rep_tensor,
+                df_factors=_df_factors_from_molecule(molecule_arg),
                 ao=ao,
                 weights=weights,
                 overlap=overlap,
