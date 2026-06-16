@@ -625,7 +625,8 @@ def _local_hfx_features_from_dm(
     omega_values: tuple[float, ...],
     chunk_size: int = 512,
     return_nu: bool = False,
-) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    return_fxx: bool = False,
+) -> np.ndarray | tuple[np.ndarray, ...]:
     """Compute molecule-local HF exchange channels used by neural functionals."""
 
     dm_a, dm_b = dm_spin
@@ -637,6 +638,9 @@ def _local_hfx_features_from_dm(
     hfx = np.zeros((2, ngrid, n_omega), dtype=np.float64)
     nu_cache = (
         np.zeros((n_omega, ngrid, nao, nao), dtype=np.float64) if return_nu else None
+    )
+    fxx_cache = (
+        np.zeros((n_omega, ngrid, nao), dtype=np.float64) if return_fxx else None
     )
     int1e_grids = _int1e_grids_name(mol)
     int1e_rinv = _int1e_rinv_name(mol)
@@ -662,15 +666,22 @@ def _local_hfx_features_from_dm(
             e_b_chunk = e_b[start:end]
             fxx_a = np.einsum("gbc,gc->gb", nu, e_a_chunk, optimize=True)
             fxx_b = np.einsum("gbc,gc->gb", nu, e_b_chunk, optimize=True)
+            if fxx_cache is not None:
+                fxx_cache[omega_idx, start:end] = 0.5 * (fxx_a + fxx_b)
             hfx[0, start:end, omega_idx] = -0.5 * np.einsum(
                 "gb,gb->g", e_a_chunk, fxx_a, optimize=True
             )
             hfx[1, start:end, omega_idx] = -0.5 * np.einsum(
                 "gb,gb->g", e_b_chunk, fxx_b, optimize=True
             )
-    if nu_cache is None:
+    outputs: list[np.ndarray] = [hfx]
+    if nu_cache is not None:
+        outputs.append(nu_cache)
+    if fxx_cache is not None:
+        outputs.append(fxx_cache)
+    if len(outputs) == 1:
         return hfx
-    return hfx, nu_cache
+    return tuple(outputs)
 
 
 def _local_hfx_features_from_nu_cache(

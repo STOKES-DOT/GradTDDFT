@@ -28,6 +28,7 @@ from td_graddft import neural_xc
 from td_graddft.data.hdf5_cache import read_restricted_molecule, write_restricted_molecule
 from td_graddft.neural_xc import (
     DEFAULT_INPUT_FEATURE_MODE,
+    DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     DEFAULT_NETWORK_ARCHITECTURE,
     DEFAULT_NETWORK_HIDDEN_DIMS,
 )
@@ -273,6 +274,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Add the projected restricted MP2 local channel to the Neural_xc basis.",
     )
     p.add_argument(
+        "--include-hfx-channel",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Add the projected local-HF exchange channel to the Neural_xc basis.",
+    )
+    p.add_argument(
+        "--response-hf-mode",
+        choices=("approx", "strict"),
+        default=DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
+        help=(
+            "Excited-state response mode for the local-HF channel. Strict HF "
+            "response is currently gated by the response implementation."
+        ),
+    )
+    p.add_argument(
         "--pt2-channel-mode",
         choices=("scaled_projected", "local_exact"),
         default="scaled_projected",
@@ -288,7 +304,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "and adds a post-hoc second-order correction."
         ),
     )
-    p.add_argument("--response-grid-chunk-size", type=int, default=1024)
     p.add_argument(
         "--semilocal-xc",
         nargs="+",
@@ -403,10 +418,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--scf-implicit-diff-solver",
         choices=("normal_cg", "gmres", "bicgstab"),
         default="normal_cg",
+        help="Deprecated compatibility option; the current implicit SCF path does not use a named linear solver.",
     )
+    p.add_argument("--scf-implicit-diff-max-iter", type=int, default=6)
+    p.add_argument("--scf-implicit-diff-clip", type=float, default=1e4)
     p.add_argument("--scf-implicit-diff-tolerance", type=float, default=1e-6)
     p.add_argument("--scf-implicit-diff-regularization", type=float, default=1e-3)
-    p.add_argument("--scf-implicit-diff-restart", type=int, default=12)
+    p.add_argument(
+        "--scf-implicit-diff-restart",
+        type=int,
+        default=12,
+        help="Deprecated compatibility option; retained so older launch scripts keep parsing.",
+    )
     p.add_argument(
         "--scf-require-convergence",
         action=argparse.BooleanOptionalAction,
@@ -552,11 +575,11 @@ def _make_s1_functional(args: argparse.Namespace) -> Any:
         semilocal_xc=tuple(str(name) for name in args.semilocal_xc),
         hidden_dims=tuple(int(value) for value in args.hidden_dims),
         input_feature_mode=str(args.input_feature_mode),
+        include_hfx_channel=bool(args.include_hfx_channel),
         include_pt2_channel=bool(args.include_pt2_channel),
         pt2_channel_mode=str(args.pt2_channel_mode),
-        response_hf_mode="approx",
+        response_hf_mode=str(args.response_hf_mode),
         response_pt2_mode=str(args.response_pt2_mode),
-        response_grid_chunk_size=int(args.response_grid_chunk_size),
         name=f"neural_xc_h2_s1_tda_{str(args.training_mode)}",
     )
 
@@ -599,7 +622,6 @@ def _write_reference_point(group: Any, point: Any) -> None:
     for name in (
         "fci_total_energies_h",
         "fci_excitation_energies_h",
-        "fci_dm_ao",
         "fci_density_grid",
     ):
         if name in group:
@@ -619,7 +641,6 @@ def _read_reference_point(group: Any) -> Any:
             group["fci_excitation_energies_h"][()],
             dtype=np.float64,
         ),
-        fci_dm_ao=np.asarray(group["fci_dm_ao"][()], dtype=np.float64),
         fci_density_grid=np.asarray(group["fci_density_grid"][()], dtype=np.float64),
         fci_electron_count=float(group.attrs["fci_electron_count"]),
     )
@@ -732,10 +753,10 @@ def _self_consistent_prediction_config(args: argparse.Namespace) -> GroundStateT
         scf_iterate_selection=str(args.scf_iterate_selection),
         scf_require_convergence=bool(args.scf_require_convergence),
         scf_gradient_mode=str(args.scf_gradient_mode),
-        scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
+        scf_implicit_diff_max_iter=int(args.scf_implicit_diff_max_iter),
+        scf_implicit_diff_clip=float(args.scf_implicit_diff_clip),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
-        scf_implicit_diff_restart=int(args.scf_implicit_diff_restart),
     )
 
 
@@ -1029,10 +1050,10 @@ def train_functional(
         scf_iterate_selection=str(args.scf_iterate_selection),
         scf_require_convergence=bool(args.scf_require_convergence),
         scf_gradient_mode=str(args.scf_gradient_mode),
-        scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
+        scf_implicit_diff_max_iter=int(args.scf_implicit_diff_max_iter),
+        scf_implicit_diff_clip=float(args.scf_implicit_diff_clip),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
-        scf_implicit_diff_restart=int(args.scf_implicit_diff_restart),
     )
     if int(args.lr_decay_every) > 0:
         lr_schedule = optax.exponential_decay(
@@ -2042,6 +2063,8 @@ def write_summary(
         "scf_warm_start": bool(args.scf_warm_start),
         "scf_warm_start_update_interval": int(args.scf_warm_start_update_interval),
         "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
+        "include_hfx_channel": bool(args.include_hfx_channel),
+        "response_hf_mode": str(args.response_hf_mode),
         "include_pt2_channel": bool(args.include_pt2_channel),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
         "response_pt2_mode": (
@@ -2094,6 +2117,8 @@ def main() -> None:
         f"dense_points={args.dense_points}, steps={args.steps}, "
         f"lr={args.learning_rate}, training_mode={args.training_mode}, "
         f"objective={_objective_name(args)}, include_pt2_channel={bool(args.include_pt2_channel)}, "
+        f"include_hfx_channel={bool(args.include_hfx_channel)}, "
+        f"response_hf_mode={str(args.response_hf_mode)}, "
         f"pt2_channel_mode={str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else 'none'}, "
         f"response_pt2_mode={str(args.response_pt2_mode) if bool(args.include_pt2_channel) else 'none'}, "
         f"reference_scf_backend={str(args.reference_scf_backend)}, "
@@ -2270,6 +2295,8 @@ def main() -> None:
             "reference_scf_backend": str(args.reference_scf_backend),
             "objective": _objective_name(args),
             "objective_kind": _resolved_objective_kind(args),
+            "include_hfx_channel": bool(args.include_hfx_channel),
+            "response_hf_mode": str(args.response_hf_mode),
             "include_pt2_channel": bool(args.include_pt2_channel),
             "pt2_channel_mode": (
                 str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None
@@ -2287,10 +2314,10 @@ def main() -> None:
             "scf_warm_start_update_interval": int(args.scf_warm_start_update_interval),
             "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
             "scf_gradient_mode": str(args.scf_gradient_mode),
-            "scf_implicit_diff_solver": str(args.scf_implicit_diff_solver),
+            "scf_implicit_diff_max_iter": int(args.scf_implicit_diff_max_iter),
+            "scf_implicit_diff_clip": float(args.scf_implicit_diff_clip),
             "scf_implicit_diff_tolerance": float(args.scf_implicit_diff_tolerance),
             "scf_implicit_diff_regularization": float(args.scf_implicit_diff_regularization),
-            "scf_implicit_diff_restart": int(args.scf_implicit_diff_restart),
             "steps": int(args.steps),
             "learning_rate": float(args.learning_rate),
             "hidden_dims": [int(value) for value in args.hidden_dims],

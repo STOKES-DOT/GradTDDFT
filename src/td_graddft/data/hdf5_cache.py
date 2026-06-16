@@ -24,6 +24,7 @@ _ARRAY_FIELDS = (
     "ao_laplacian",
     "hfx_omega_values",
     "hfx_local",
+    "hfx_fxx",
     "hfx_nu",
     "pt2_local",
     "scf_initial_density",

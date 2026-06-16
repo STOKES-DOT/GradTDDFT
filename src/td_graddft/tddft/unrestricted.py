@@ -13,6 +13,7 @@ from jaxtyping import Array
 
 from .cisd import unrestricted_cisd_second_order_correction
 from .eigensolvers import (
+    _davidson_search_nroots,
     _solver_dtype,
     implicit_differential_davidson_lowest_symmetric,
     implicit_differential_davidson_lowest_tdhf,
@@ -21,7 +22,7 @@ from ._utils import (
     _resolve_xc_functional,
     _transition_densities_on_grid,
 )
-from .response import _needs_exchange_terms
+from .response import _needs_exchange_terms, _raise_if_strict_local_hf_response
 
 
 def _pytree_dataclass(cls):
@@ -72,6 +73,7 @@ class _UnrestrictedResponseOperatorData:
     orbo_beta: Array
     orbv_beta: Array
     ao_response_action_fn: Callable[[Array, Array], tuple[Array, Array]]
+    ao_mo_response_action_fn: Callable[..., tuple[Array, Array]] | None = None
     xc_response_action_fn: Callable[[Array, Array], tuple[Array, Array]] | None = None
 
 
@@ -273,6 +275,90 @@ def _unrestricted_ao_response_action(
     return action
 
 
+def _unrestricted_df_mo_response_action(
+    df_factors: Array,
+    orbo_alpha: Array,
+    orbv_alpha: Array,
+    orbo_beta: Array,
+    orbv_beta: Array,
+    hybrid_fraction: Any,
+    *,
+    include_exchange: bool,
+    dtype: Any,
+) -> Callable[..., tuple[Array, Array]]:
+    alpha = jnp.asarray(hybrid_fraction, dtype=dtype)
+    factors = jnp.asarray(df_factors, dtype=dtype)
+
+    def spin_factors(orbo: Array, orbv: Array):
+        orbo = jnp.asarray(orbo, dtype=dtype)
+        orbv = jnp.asarray(orbv, dtype=dtype)
+        b_ov = jnp.einsum("Qpq,pi,qa->Qia", factors, orbo, orbv, precision=Precision.HIGHEST)
+        b_vo = jnp.einsum("Qpq,pa,qi->Qai", factors, orbv, orbo, precision=Precision.HIGHEST)
+        if include_exchange:
+            b_oo = jnp.einsum("Qpq,pi,qj->Qij", factors, orbo, orbo, precision=Precision.HIGHEST)
+            b_vv = jnp.einsum("Qpq,pa,qb->Qab", factors, orbv, orbv, precision=Precision.HIGHEST)
+        else:
+            b_oo = None
+            b_vv = None
+        return b_ov, b_vo, b_oo, b_vv, int(orbo.shape[1]), int(orbv.shape[1])
+
+    fac_a = spin_factors(orbo_alpha, orbv_alpha)
+    fac_b = spin_factors(orbo_beta, orbv_beta)
+
+    def aux_projection(fac, values: Array, *, bottom_density: bool) -> Array:
+        b_ov, b_vo, _, _, nocc, nvir = fac
+        x = jnp.asarray(values, dtype=dtype).reshape(-1, nocc, nvir)
+        if bottom_density:
+            return jnp.einsum("Qia,nia->nQ", b_ov, x, precision=Precision.HIGHEST)
+        return jnp.einsum("Qai,nia->nQ", b_vo, x, precision=Precision.HIGHEST)
+
+    def project_j(fac, rho_aux: Array, original_shape: tuple[int, ...], *, bottom_projection: bool) -> Array:
+        b_ov, b_vo, _, _, nocc, nvir = fac
+        if bottom_projection:
+            out = jnp.einsum("Qia,nQ->nia", b_ov, rho_aux, precision=Precision.HIGHEST)
+        else:
+            out = jnp.einsum("Qai,nQ->nia", b_vo, rho_aux, precision=Precision.HIGHEST)
+        return out.reshape(original_shape[:-2] + (nocc, nvir))
+
+    def exchange_projection(fac, values: Array, *, bottom_density: bool, bottom_projection: bool) -> Array:
+        b_ov, b_vo, b_oo, b_vv, nocc, nvir = fac
+        x = jnp.asarray(values, dtype=dtype).reshape(-1, nocc, nvir)
+        if bottom_density == bottom_projection:
+            assert b_oo is not None and b_vv is not None
+            return jnp.einsum("Qij,Qab,njb->nia", b_oo, b_vv, x, precision=Precision.HIGHEST)
+        return jnp.einsum("Qaj,Qib,njb->nia", b_vo, b_ov, x, precision=Precision.HIGHEST)
+
+    def action(
+        alpha_values: Array,
+        beta_values: Array,
+        *,
+        bottom_density: bool,
+        bottom_projection: bool,
+    ) -> tuple[Array, Array]:
+        alpha_shape = jnp.asarray(alpha_values).shape
+        beta_shape = jnp.asarray(beta_values).shape
+        rho_aux = aux_projection(fac_a, alpha_values, bottom_density=bottom_density)
+        rho_aux = rho_aux + aux_projection(fac_b, beta_values, bottom_density=bottom_density)
+        out_alpha = project_j(fac_a, rho_aux, alpha_shape, bottom_projection=bottom_projection)
+        out_beta = project_j(fac_b, rho_aux, beta_shape, bottom_projection=bottom_projection)
+        if include_exchange:
+            out_alpha = out_alpha - alpha * exchange_projection(
+                fac_a,
+                alpha_values,
+                bottom_density=bottom_density,
+                bottom_projection=bottom_projection,
+            ).reshape(alpha_shape)
+            out_beta = out_beta - alpha * exchange_projection(
+                fac_b,
+                beta_values,
+                bottom_density=bottom_density,
+                bottom_projection=bottom_projection,
+            ).reshape(beta_shape)
+        return out_alpha, out_beta
+
+    return action
+
+
 def _unrestricted_grid_xc_response_action(
     molecule: Any,
     resolved_xc: Any | None,
@@ -321,6 +407,7 @@ def _build_unrestricted_response_operator_data(
     occupation_tolerance: float = 1e-8,
 ) -> _UnrestrictedResponseOperatorData:
     resolved_xc = _resolve_xc_functional(molecule, xc_functional, xc_params)
+    _raise_if_strict_local_hf_response(resolved_xc)
     orbo_a, orbv_a, orbo_b, orbv_b, de_a, de_b = _unrestricted_orbital_data(
         molecule,
         occupation_tolerance,
@@ -344,6 +431,19 @@ def _build_unrestricted_response_operator_data(
         include_exchange=_needs_exchange_terms(hybrid_fraction),
         dtype=jnp.result_type(de_a, de_b),
     )
+    df_factors = getattr(molecule, "df_factors", None)
+    ao_mo_response_action_fn = None
+    if df_factors is not None and int(jnp.asarray(df_factors).size) > 0:
+        ao_mo_response_action_fn = _unrestricted_df_mo_response_action(
+            df_factors,
+            orbo_a,
+            orbv_a,
+            orbo_b,
+            orbv_b,
+            hybrid_fraction,
+            include_exchange=_needs_exchange_terms(hybrid_fraction),
+            dtype=jnp.result_type(de_a, de_b),
+        )
     xc_response_action_fn = _unrestricted_grid_xc_response_action(
         molecule,
         resolved_xc,
@@ -361,6 +461,7 @@ def _build_unrestricted_response_operator_data(
         orbo_beta=orbo_b,
         orbv_beta=orbv_b,
         ao_response_action_fn=ao_response_action_fn,
+        ao_mo_response_action_fn=ao_mo_response_action_fn,
         xc_response_action_fn=xc_response_action_fn,
     )
 
@@ -417,6 +518,13 @@ def _unrestricted_ao_mo_action(
     bottom_density: bool,
     bottom_projection: bool,
 ) -> tuple[Array, Array]:
+    if data.ao_mo_response_action_fn is not None:
+        return data.ao_mo_response_action_fn(
+            alpha,
+            beta,
+            bottom_density=bottom_density,
+            bottom_projection=bottom_projection,
+        )
     density_alpha = _unrestricted_transition_density(
         data.orbo_alpha,
         data.orbv_alpha,
@@ -498,6 +606,65 @@ def _unrestricted_tdhf_action(
 ) -> tuple[Array, Array]:
     x_alpha, x_beta = _split_unrestricted_rows(data, x_rows)
     y_alpha, y_beta = _split_unrestricted_rows(data, y_rows)
+    if data.ao_mo_response_action_fn is not None:
+        upper_x_alpha, upper_x_beta = data.ao_mo_response_action_fn(
+            x_alpha,
+            x_beta,
+            bottom_density=False,
+            bottom_projection=False,
+        )
+        upper_y_alpha, upper_y_beta = data.ao_mo_response_action_fn(
+            y_alpha,
+            y_beta,
+            bottom_density=True,
+            bottom_projection=False,
+        )
+        lower_x_alpha, lower_x_beta = data.ao_mo_response_action_fn(
+            x_alpha,
+            x_beta,
+            bottom_density=False,
+            bottom_projection=True,
+        )
+        lower_y_alpha, lower_y_beta = data.ao_mo_response_action_fn(
+            y_alpha,
+            y_beta,
+            bottom_density=True,
+            bottom_projection=True,
+        )
+        xc_alpha, xc_beta = _unrestricted_xc_action(
+            data,
+            x_alpha + y_alpha,
+            x_beta + y_beta,
+        )
+        upper_alpha = (
+            upper_x_alpha
+            + upper_y_alpha
+            + xc_alpha
+            + x_alpha * data.orbital_energy_differences_alpha[None, :, :]
+        )
+        upper_beta = (
+            upper_x_beta
+            + upper_y_beta
+            + xc_beta
+            + x_beta * data.orbital_energy_differences_beta[None, :, :]
+        )
+        lower_alpha = (
+            lower_x_alpha
+            + lower_y_alpha
+            + xc_alpha
+            + y_alpha * data.orbital_energy_differences_alpha[None, :, :]
+        )
+        lower_beta = (
+            lower_x_beta
+            + lower_y_beta
+            + xc_beta
+            + y_beta * data.orbital_energy_differences_beta[None, :, :]
+        )
+        return _join_unrestricted_rows(upper_alpha, upper_beta), _join_unrestricted_rows(
+            lower_alpha,
+            lower_beta,
+        )
+
     density_alpha = _unrestricted_transition_density(
         data.orbo_alpha,
         data.orbv_alpha,
@@ -660,9 +827,10 @@ def solve_unrestricted_tda_from_operator(
 ) -> UnrestrictedTDAResult:
     dim = int(jnp.asarray(diagonal).size)
     nroots = dim if nstates is None else min(int(nstates), dim)
+    search_nroots = _davidson_search_nroots(nroots, dim)
     eigvals, eigvecs, converged = implicit_differential_davidson_lowest_symmetric(
         lambda vectors: vind_rows(jnp.asarray(vectors).T).T,
-        nroots=nroots,
+        nroots=search_nroots,
         size=dim,
         diag=jnp.asarray(diagonal).reshape(dim),
         tol=davidson_tol,
@@ -737,6 +905,7 @@ def solve_unrestricted_casida_from_tdhf_operator(
 ) -> UnrestrictedTDDFTResult:
     dim = int(jnp.asarray(de_a).size + jnp.asarray(de_b).size)
     nroots = dim if nstates is None else min(int(nstates), dim)
+    search_nroots = _davidson_search_nroots(nroots, dim)
     dtype = _solver_dtype(jnp.result_type(de_a, de_b))
 
     def tdhf_vind(values: Array) -> Array:
@@ -746,7 +915,7 @@ def solve_unrestricted_casida_from_tdhf_operator(
     diagonal = jnp.concatenate([jnp.ravel(de_a), jnp.ravel(de_b)]).astype(dtype)
     w, x_vecs, y_vecs, converged = implicit_differential_davidson_lowest_tdhf(
         tdhf_vind,
-        nroots=nroots,
+        nroots=search_nroots,
         size=dim,
         diag=diagonal,
         tol=davidson_tol,
@@ -754,7 +923,8 @@ def solve_unrestricted_casida_from_tdhf_operator(
         max_subspace=davidson_max_subspace,
         matrix_eps=matrix_eps,
     )
-    del converged
+    if not _is_traced_convergence_flag(converged) and not bool(converged):
+        raise RuntimeError("Davidson unrestricted TDDFT solver did not converge.")
     return _finalize_unrestricted_casida_result(
         w,
         x_vecs,

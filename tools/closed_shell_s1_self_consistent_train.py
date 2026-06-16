@@ -36,6 +36,7 @@ from td_graddft.neural_xc import (
     DEFAULT_INPUT_FEATURE_MODE,
     DEFAULT_NETWORK_ARCHITECTURE,
     DEFAULT_NETWORK_HIDDEN_DIMS,
+    DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
 )
 from td_graddft.data.reference import restricted_reference_from_pyscf
 from td_graddft.neural_xc.inputs import ChunkedHFXNu
@@ -122,6 +123,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--include-pt2-channel", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--include-hfx-channel", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument(
+        "--response-hf-mode",
+        choices=("approx", "strict"),
+        default=DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
+        help=(
+            "Excited-state handling of the neural local-HF channel. 'approx' averages "
+            "the grid HF coefficient into a scalar hybrid fraction; 'strict' is gated "
+            "until chi/fxx second-response contractions are implemented."
+        ),
+    )
     p.add_argument(
         "--pt2-channel-mode",
         choices=("scaled_projected", "local_exact"),
@@ -495,6 +506,8 @@ def _cache_hfx_nu_storage(
     args: argparse.Namespace,
     input_feature_mode: str,
 ) -> str:
+    if not bool(args.include_hfx_channel):
+        return "array"
     if str(input_feature_mode) != "canonical":
         return "array"
     if "hfx_nu" not in molecule_group:
@@ -1213,6 +1226,7 @@ def _train(
         hidden_dims=tuple(int(value) for value in args.hidden_dims),
         input_feature_mode=_normalize_input_feature_mode(str(args.input_feature_mode)),
         include_hfx_channel=bool(args.include_hfx_channel),
+        response_hf_mode=str(args.response_hf_mode),
         include_pt2_channel=bool(args.include_pt2_channel),
         pt2_channel_mode=str(args.pt2_channel_mode),
         name=f"neural_xc_closed_shell_{str(args.training_mode)}",
@@ -1558,6 +1572,7 @@ def main() -> None:
         "Config: "
         f"reference_csv={args.reference_csv}, basis={args.basis}, xc={args.xc}, "
         f"steps={args.steps}, mode={args.training_mode}, include_hfx_channel={bool(args.include_hfx_channel)}, "
+        f"response_hf_mode={args.response_hf_mode}, "
         f"include_pt2_channel={bool(args.include_pt2_channel)}, "
         f"pt2_channel_mode={args.pt2_channel_mode if bool(args.include_pt2_channel) else 'none'}, "
         f"stream_train={bool(args.stream_train)}, stream_update_mode={args.stream_update_mode}, "
@@ -1614,6 +1629,7 @@ def main() -> None:
                 "training_mode": str(args.training_mode),
                 "skip_final_evaluation": True,
                 "include_hfx_channel": bool(args.include_hfx_channel),
+                "response_hf_mode": str(args.response_hf_mode),
                 "include_pt2_channel": bool(args.include_pt2_channel),
                 "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
                 "scf_hfx_grid_block_size": _scf_hfx_grid_block_size(args),
@@ -1640,6 +1656,7 @@ def main() -> None:
             "evaluation_solver": None,
             "skip_final_evaluation": True,
             "include_hfx_channel": bool(args.include_hfx_channel),
+            "response_hf_mode": str(args.response_hf_mode),
             "include_pt2_channel": bool(args.include_pt2_channel),
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
             "scf_hfx_grid_block_size": _scf_hfx_grid_block_size(args),
@@ -1725,6 +1742,7 @@ def main() -> None:
             "scf_implicit_diff_regularization": float(args.scf_implicit_diff_regularization),
             "scf_implicit_diff_restart": int(args.scf_implicit_diff_restart),
             "include_hfx_channel": bool(args.include_hfx_channel),
+            "response_hf_mode": str(args.response_hf_mode),
             "include_pt2_channel": bool(args.include_pt2_channel),
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
             "scf_hfx_grid_block_size": _scf_hfx_grid_block_size(args),
@@ -1761,6 +1779,7 @@ def main() -> None:
         "scf_implicit_diff_regularization": float(args.scf_implicit_diff_regularization),
         "scf_implicit_diff_restart": int(args.scf_implicit_diff_restart),
         "include_hfx_channel": bool(args.include_hfx_channel),
+        "response_hf_mode": str(args.response_hf_mode),
         "include_pt2_channel": bool(args.include_pt2_channel),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
         "scf_hfx_grid_block_size": _scf_hfx_grid_block_size(args),

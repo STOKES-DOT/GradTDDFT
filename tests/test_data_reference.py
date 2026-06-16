@@ -157,9 +157,11 @@ def test_restricted_reference_host_backend_keeps_hfx_nu_on_host(monkeypatch):
 
     def fake_local_hfx(*args, **kwargs):
         assert kwargs["return_nu"] is True
+        assert kwargs["return_fxx"] is True
         return (
             np.zeros((2, 2, 2), dtype=np.float64),
             np.zeros((2, 2, 2, 2), dtype=np.float64),
+            np.zeros((2, 2, 2), dtype=np.float64),
         )
 
     monkeypatch.setattr(reference_module, "_local_hfx_features_from_dm", fake_local_hfx)
@@ -179,6 +181,7 @@ def test_restricted_reference_host_backend_keeps_hfx_nu_on_host(monkeypatch):
     assert molecule.eri_ovov is None
     assert isinstance(molecule.hfx_local, np.ndarray)
     assert isinstance(molecule.hfx_nu, np.ndarray)
+    assert isinstance(molecule.hfx_fxx, np.ndarray)
     assert molecule.hfx_nu_api is None
 
 
@@ -251,7 +254,11 @@ def test_restricted_reference_uses_chunked_hfx_nu_api_for_more_than_three_atoms(
 
     def fake_local_hfx(*args, **kwargs):
         assert kwargs["return_nu"] is False
-        return np.zeros((2, 2, 2), dtype=np.float64)
+        assert kwargs["return_fxx"] is True
+        return (
+            np.zeros((2, 2, 2), dtype=np.float64),
+            np.zeros((2, 2, 2), dtype=np.float64),
+        )
 
     monkeypatch.setattr(reference_module, "_local_hfx_features_from_dm", fake_local_hfx)
 
@@ -266,6 +273,7 @@ def test_restricted_reference_uses_chunked_hfx_nu_api_for_more_than_three_atoms(
     assert molecule.hfx_nu_api is not None
     assert molecule.hfx_nu_api.shape == (2, 2, 2, 2)
     assert isinstance(molecule.hfx_local, np.ndarray)
+    assert isinstance(molecule.hfx_fxx, np.ndarray)
 
 
 def test_unrestricted_reference_host_backend_keeps_hfx_cache_on_host(monkeypatch):

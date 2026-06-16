@@ -17,6 +17,8 @@ __all__ = [
     "implicit_differential_davidson_lowest_tdhf",
 ]
 
+_DAVIDSON_ROOT_PADDING = 3
+
 
 def _solver_dtype(dtype: jnp.dtype) -> jnp.dtype:
     dtype = jnp.dtype(dtype)
@@ -26,6 +28,20 @@ def _solver_dtype(dtype: jnp.dtype) -> jnp.dtype:
         if dtype == jnp.dtype(jnp.complex64):
             return jnp.dtype(jnp.complex128)
     return dtype
+
+
+def _davidson_search_nroots(nroots: int, dim: int) -> int:
+    """Track a few extra Davidson roots before truncating to requested states.
+
+    Residual convergence only proves that the current Ritz vectors are
+    eigenpairs; with a diagonal guess it does not prove that no lower root was
+    skipped in another symmetry/near-degenerate block.  Following the same
+    Davidson-only strategy, we compute a small buffer of roots and then keep the
+    lowest requested states.
+    """
+
+    nroots = max(1, min(int(nroots), int(dim)))
+    return min(int(dim), nroots + _DAVIDSON_ROOT_PADDING)
 
 
 def _matmul(lhs: Array, rhs: Array) -> Array:

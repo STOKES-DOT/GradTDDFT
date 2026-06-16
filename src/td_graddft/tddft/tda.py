@@ -5,6 +5,7 @@ from collections.abc import Callable
 import jax.numpy as jnp
 from jax import core as jax_core
 
+from .eigensolvers import _davidson_search_nroots
 from .eigensolvers import implicit_differential_davidson_lowest_symmetric
 from .types import TDAResult
 
@@ -49,9 +50,10 @@ def solve_tda_from_operator(
     nocc, nvir = delta_eps.shape
     dim = int(nocc * nvir)
     nroots = dim if nstates is None else min(int(nstates), dim)
+    search_nroots = _davidson_search_nroots(nroots, dim)
     eigvals, eigvecs, converged = implicit_differential_davidson_lowest_symmetric(
         lambda vectors: vind_rows(jnp.asarray(vectors).T).T,
-        nroots=nroots,
+        nroots=search_nroots,
         size=dim,
         diag=jnp.asarray(diagonal).reshape(dim),
         tol=davidson_tol,

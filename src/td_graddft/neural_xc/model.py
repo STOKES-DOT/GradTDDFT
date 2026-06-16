@@ -22,6 +22,7 @@ from .components import (
 )
 from .defaults import (
     DEFAULT_INPUT_FEATURE_MODE,
+    DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
     resolve_coefficient_prior_values,
 )
@@ -118,6 +119,15 @@ class AssemblyMixin:
     def _uses_hfx_channel(self) -> bool:
         return bool(getattr(self, "include_hfx_channel", False))
 
+    def _response_hf_mode(self) -> Literal["approx", "strict"]:
+        mode = str(getattr(self, "response_hf_mode", DEFAULT_NEURAL_XC_RESPONSE_HF_MODE)).lower()
+        if mode not in {"approx", "strict"}:
+            raise ValueError(
+                "response_hf_mode must be 'approx' or 'strict'; "
+                f"got {mode!r}."
+            )
+        return mode  # type: ignore[return-value]
+
     def _semilocal_local_contribution_channels(
         self,
         features: RestrictedFeatureBundle,
@@ -166,12 +176,14 @@ class AssemblyMixin:
     def init_from_molecule(self, rng: PRNGKeyArray, molecule: Any) -> PyTree:
         features = grid_features_for_molecule(molecule)
         semilocal = self.semilocal_energy_density(features)
-        cached_hfx = getattr(molecule, "hfx_local", None)
         if not self._uses_hfx_channel():
             hf_projected = jnp.zeros_like(features.rho)
             hf_projected_a = hf_projected
             hf_projected_b = hf_projected
-        elif self.input_feature_mode == "canonical" and cached_hfx is not None:
+        elif (
+            self.input_feature_mode == "canonical"
+            and getattr(molecule, "hfx_local", None) is not None
+        ):
             hfx_a, hfx_b = resolve_canonical_hfx_feature_channels(
                 molecule,
                 features,
@@ -193,7 +205,8 @@ class AssemblyMixin:
         )
         hf_spin_inputs: tuple[Array, Array] | None = (hf_projected_a, hf_projected_b)
         if (
-            self.input_feature_mode == "canonical"
+            self._uses_hfx_channel()
+            and self.input_feature_mode == "canonical"
             and self.strict_feature_alignment
             and getattr(molecule, "hfx_local", None) is None
         ):
@@ -1169,6 +1182,7 @@ class NeuralXCModel(
     include_hfx_channel: bool = False
     include_pt2_channel: bool = False
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected"
+    response_hf_mode: Literal["approx", "strict"] = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE
     response_pt2_mode: Literal["approx", "strict"] = "approx"
     strict_feature_alignment: bool = True
     allow_experimental_jax_xc: bool = False
