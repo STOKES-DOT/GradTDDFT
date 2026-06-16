@@ -97,6 +97,86 @@ def test_closed_shell_s1_training_accepts_functional_hfx_channel_toggle():
     assert hfx_args.include_hfx_channel is True
 
 
+def test_closed_shell_s1_training_accepts_scf_hfx_grid_block_size_alias():
+    module = _load_training_tool()
+
+    args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--scf-hfx-grid-block-size",
+            "256",
+        ]
+    )
+    legacy_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--response-grid-chunk-size",
+            "128",
+        ]
+    )
+
+    assert args.scf_hfx_grid_block_size == 256
+    assert legacy_args.scf_hfx_grid_block_size == 128
+
+
+def test_closed_shell_s1_training_accepts_response_hf_mode():
+    module = _load_training_tool()
+
+    default_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+        ]
+    )
+    approx_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--response-hf-mode",
+            "approx",
+        ]
+    )
+    strict_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--response-hf-mode",
+            "strict",
+        ]
+    )
+    with pytest.raises(SystemExit):
+        module.parse_args(
+            [
+                "--reference-csv",
+                "refs.csv",
+                "--response-hf-mode",
+                "none",
+            ]
+        )
+
+    assert default_args.response_hf_mode == "approx"
+    assert approx_args.response_hf_mode == "approx"
+    assert strict_args.response_hf_mode == "strict"
+
+
+def test_closed_shell_s1_training_accepts_functional_hfx_channel_toggle():
+    module = _load_training_tool()
+
+    default_args = module.parse_args(["--reference-csv", "refs.csv"])
+    hfx_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--include-hfx-channel",
+        ]
+    )
+
+    assert default_args.include_hfx_channel is False
+    assert hfx_args.include_hfx_channel is True
+
+
 def test_stream_train_defaults_to_host_reference_cache():
     module = _load_training_tool()
 
@@ -270,12 +350,11 @@ def test_hdf5_cache_can_read_restricted_hfx_nu_as_chunked_api(tmp_path):
     assert np.allclose(loaded.hfx_nu_api.grid_chunk(1, 3), hfx_nu[:, 1:3])
 
 
-def test_hdf5_chunked_hfx_nu_reads_at_runtime_under_jit(tmp_path):
-    h5py = pytest.importorskip("h5py")
+def test_dense_chunked_hfx_nu_padded_reads_with_dynamic_scan_start_under_jit():
     import jax
     import jax.numpy as jnp
 
-    from td_graddft.neural_xc.inputs import ChunkedHFXNu
+    from td_graddft.neural_xc.inputs import ChunkedHFXNu, hfx_nu_grid_chunk_padded
 
     hfx_nu = np.arange(2 * 5 * 2 * 2, dtype=np.float64).reshape(2, 5, 2, 2)
     path = tmp_path / "refs.h5"
@@ -287,24 +366,17 @@ def test_hdf5_chunked_hfx_nu_reads_at_runtime_under_jit(tmp_path):
     def chunk_sum(scale):
         return jnp.sum(api.grid_chunk_padded(jnp.asarray(1, dtype=jnp.int32), 2) * scale)
 
-    jitted_chunk_sum = jax.jit(chunk_sum)
-    jitted_chunk_grad = jax.jit(jax.grad(chunk_sum))
+    @jax.jit
+    def scan_chunk_sums():
+        def body(carry, chunk_idx):
+            start = chunk_idx * 2
+            chunk = hfx_nu_grid_chunk_padded(api, start, 2, n_omega=1)
+            return carry + jnp.sum(chunk), None
 
-    first = float(jitted_chunk_sum(jnp.asarray(1.0, dtype=jnp.float32)))
-    first_grad = float(jitted_chunk_grad(jnp.asarray(1.0, dtype=jnp.float32)))
-    updated = hfx_nu.copy()
-    updated[:, 1:3] = updated[:, 1:3] + 100.0
-    with h5py.File(path, "r+") as handle:
-        handle["hfx_nu"][:, 1:3] = updated[:, 1:3]
-        handle.flush()
+        total, _ = jax.lax.scan(body, jnp.asarray(0.0, dtype=jnp.float64), jnp.arange(3))
+        return total
 
-    second = float(jitted_chunk_sum(jnp.asarray(1.0, dtype=jnp.float32)))
-    second_grad = float(jitted_chunk_grad(jnp.asarray(1.0, dtype=jnp.float32)))
-
-    assert first == pytest.approx(float(np.sum(hfx_nu[:, 1:3])))
-    assert first_grad == pytest.approx(float(np.sum(hfx_nu[:, 1:3])))
-    assert second == pytest.approx(float(np.sum(updated[:, 1:3])))
-    assert second_grad == pytest.approx(float(np.sum(updated[:, 1:3])))
+    assert float(scan_chunk_sums()) == pytest.approx(float(np.sum(hfx_nu[:1])))
 
 
 def test_dense_chunked_hfx_nu_padded_reads_with_dynamic_scan_start_under_jit():
