@@ -6,14 +6,13 @@ from dataclasses import replace
 from typing import Any
 from typing import Literal
 
-import jax
 import jax.numpy as jnp
 from jax import core as jax_core
 from jaxtyping import Array
 
 from .eigensolvers import (
-    davidson_lowest_tdhf,
     _solver_dtype,
+    implicit_differential_davidson_lowest_tdhf,
 )
 from ._utils import (
     _resolve_xc_functional,
@@ -91,8 +90,8 @@ def solve_casida_from_tdhf_operator(
         values = jnp.asarray(values, dtype=work_dtype).reshape(-1, 2 * dim)
         return tdhf_vind_rows(values)
 
-    w, x_vecs, y_vecs, converged = davidson_lowest_tdhf(
-        lambda values: jax.lax.stop_gradient(tdhf_vind(values)),
+    w, x_vecs, y_vecs, converged = implicit_differential_davidson_lowest_tdhf(
+        tdhf_vind,
         nroots=nroots,
         size=dim,
         diag=jnp.asarray(delta_eps, dtype=work_dtype).reshape(dim),
@@ -102,23 +101,8 @@ def solve_casida_from_tdhf_operator(
         matrix_eps=matrix_eps,
     )
     del converged
-    x_vecs = jax.lax.stop_gradient(x_vecs)
-    y_vecs = jax.lax.stop_gradient(y_vecs)
-    applied = tdhf_vind(jnp.concatenate([x_vecs.T, y_vecs.T], axis=-1))
-    top = applied[:, :dim].T
-    bottom = -applied[:, dim:].T
-    numerator = jnp.sum(x_vecs * top, axis=0) + jnp.sum(
-        y_vecs * bottom,
-        axis=0,
-    )
-    denominator = jnp.sum(x_vecs * x_vecs, axis=0) - jnp.sum(y_vecs * y_vecs, axis=0)
-    denominator = jnp.where(
-        jnp.abs(denominator) > jnp.asarray(1e-30, dtype=work_dtype),
-        denominator,
-        jnp.asarray(1e-30, dtype=work_dtype),
-    )
     return _finalize_casida_result(
-        numerator / denominator,
+        w,
         x_vecs,
         y_vecs,
         nroots=nroots,

@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-import jax
 import jax.numpy as jnp
 from jax import core as jax_core
 
-from .eigensolvers import davidson_lowest_symmetric
+from .eigensolvers import implicit_differential_davidson_lowest_symmetric
 from .types import TDAResult
 
 
@@ -50,7 +49,7 @@ def solve_tda_from_operator(
     nocc, nvir = delta_eps.shape
     dim = int(nocc * nvir)
     nroots = dim if nstates is None else min(int(nstates), dim)
-    eigvals, eigvecs, converged = davidson_lowest_symmetric(
+    eigvals, eigvecs, converged = implicit_differential_davidson_lowest_symmetric(
         lambda vectors: vind_rows(jnp.asarray(vectors).T).T,
         nroots=nroots,
         size=dim,
@@ -61,12 +60,6 @@ def solve_tda_from_operator(
     )
     if not _is_traced_convergence_flag(converged) and not bool(converged):
         raise RuntimeError("Davidson TDA solver did not converge.")
-    eigvecs = jax.lax.stop_gradient(eigvecs)
-    av = vind_rows(eigvecs.T).T
-    eigvals = jnp.sum(eigvecs * av, axis=0) / jnp.maximum(
-        jnp.sum(eigvecs * eigvecs, axis=0),
-        jnp.asarray(1e-30, dtype=eigvecs.dtype),
-    )
     return _finalize_tda_result(
         eigvals,
         eigvecs,

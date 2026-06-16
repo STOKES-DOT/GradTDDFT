@@ -13,9 +13,9 @@ from jaxtyping import Array
 
 from .cisd import unrestricted_cisd_second_order_correction
 from .eigensolvers import (
-    davidson_lowest_tdhf,
-    davidson_lowest_symmetric,
     _solver_dtype,
+    implicit_differential_davidson_lowest_symmetric,
+    implicit_differential_davidson_lowest_tdhf,
 )
 from ._utils import (
     _resolve_xc_functional,
@@ -660,7 +660,7 @@ def solve_unrestricted_tda_from_operator(
 ) -> UnrestrictedTDAResult:
     dim = int(jnp.asarray(diagonal).size)
     nroots = dim if nstates is None else min(int(nstates), dim)
-    eigvals, eigvecs, converged = davidson_lowest_symmetric(
+    eigvals, eigvecs, converged = implicit_differential_davidson_lowest_symmetric(
         lambda vectors: vind_rows(jnp.asarray(vectors).T).T,
         nroots=nroots,
         size=dim,
@@ -671,12 +671,6 @@ def solve_unrestricted_tda_from_operator(
     )
     if not _is_traced_convergence_flag(converged) and not bool(converged):
         raise RuntimeError("Davidson unrestricted TDA solver did not converge.")
-    eigvecs = jax.lax.stop_gradient(eigvecs)
-    av = vind_rows(eigvecs.T).T
-    eigvals = jnp.sum(eigvecs * av, axis=0) / jnp.maximum(
-        jnp.sum(eigvecs * eigvecs, axis=0),
-        jnp.asarray(1e-30, dtype=eigvecs.dtype),
-    )
     return _finalize_unrestricted_tda_result(
         eigvals,
         eigvecs,
@@ -750,8 +744,8 @@ def solve_unrestricted_casida_from_tdhf_operator(
         return tdhf_vind_rows(values)
 
     diagonal = jnp.concatenate([jnp.ravel(de_a), jnp.ravel(de_b)]).astype(dtype)
-    w, x_vecs, y_vecs, converged = davidson_lowest_tdhf(
-        lambda values: jax.lax.stop_gradient(tdhf_vind(values)),
+    w, x_vecs, y_vecs, converged = implicit_differential_davidson_lowest_tdhf(
+        tdhf_vind,
         nroots=nroots,
         size=dim,
         diag=diagonal,
@@ -761,23 +755,8 @@ def solve_unrestricted_casida_from_tdhf_operator(
         matrix_eps=matrix_eps,
     )
     del converged
-    x_vecs = jax.lax.stop_gradient(x_vecs)
-    y_vecs = jax.lax.stop_gradient(y_vecs)
-    applied = tdhf_vind(jnp.concatenate([x_vecs.T, y_vecs.T], axis=-1))
-    top = applied[:, :dim].T
-    bottom = -applied[:, dim:].T
-    numerator = jnp.sum(x_vecs * top, axis=0) + jnp.sum(
-        y_vecs * bottom,
-        axis=0,
-    )
-    denominator = jnp.sum(x_vecs * x_vecs, axis=0) - jnp.sum(y_vecs * y_vecs, axis=0)
-    denominator = jnp.where(
-        jnp.abs(denominator) > jnp.asarray(1e-30, dtype=dtype),
-        denominator,
-        jnp.asarray(1e-30, dtype=dtype),
-    )
     return _finalize_unrestricted_casida_result(
-        numerator / denominator,
+        w,
         x_vecs,
         y_vecs,
         nroots=nroots,

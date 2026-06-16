@@ -198,6 +198,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--grids-level", type=int, default=2)
     p.add_argument("--response-grid-chunk-size", type=int, default=1024)
     p.add_argument("--strict-hfx-response-mode", choices=("low_memory",), default="low_memory")
+    p.add_argument("--include-hfx-channel", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--reference-jk-backend", choices=("full", "df"), default="full")
     p.add_argument("--learning-rate", type=float, default=3e-4)
     p.add_argument("--hidden-dims", type=int, nargs="+", default=(64, 64))
     p.add_argument("--training-mode", choices=("fixed_density", "self_consistent"), default="self_consistent")
@@ -228,10 +230,8 @@ def _make_train_args(args: argparse.Namespace) -> argparse.Namespace:
         str(args.input_feature_mode),
         "--grids-level",
         str(args.grids_level),
-        "--response-grid-chunk-size",
-        str(args.response_grid_chunk_size),
-        "--strict-hfx-response-mode",
-        str(args.strict_hfx_response_mode),
+        "--reference-jk-backend",
+        str(args.reference_jk_backend),
         "--learning-rate",
         str(args.learning_rate),
         "--training-mode",
@@ -240,11 +240,15 @@ def _make_train_args(args: argparse.Namespace) -> argparse.Namespace:
         str(args.scf_gradient_mode),
         "--hidden-dims",
         *[str(dim) for dim in args.hidden_dims],
+        "--include-hfx-channel" if bool(args.include_hfx_channel) else "--no-include-hfx-channel",
         "--stream-train",
         "--skip-initial-eval",
         "--skip-final-evaluation",
     ]
-    return _TRAIN.parse_args(argv)
+    train_args = _TRAIN.parse_args(argv)
+    train_args.response_grid_chunk_size = int(args.response_grid_chunk_size)
+    train_args.strict_hfx_response_mode = str(args.strict_hfx_response_mode)
+    return train_args
 
 
 def _append_rows(path: Path | None, rows: list[dict[str, Any]]) -> None:
@@ -348,8 +352,7 @@ def main() -> None:
         input_feature_mode=_TRAIN._normalize_input_feature_mode(str(train_args.input_feature_mode)),
         include_pt2_channel=bool(train_args.include_pt2_channel),
         pt2_channel_mode=str(train_args.pt2_channel_mode),
-        response_grid_chunk_size=int(train_args.response_grid_chunk_size),
-        strict_hfx_response_mode=str(train_args.strict_hfx_response_mode),
+        include_hfx_channel=bool(train_args.include_hfx_channel),
         name=f"profile_qh9_{str(train_args.training_mode)}",
     )
     training_config = _TRAIN._ground_state_training_config(
