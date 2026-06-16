@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -11,6 +12,18 @@ import pytest
 def _load_training_tool():
     path = Path("tools/closed_shell_s1_self_consistent_train.py")
     spec = importlib.util.spec_from_file_location("closed_shell_s1_self_consistent_train", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_evaluation_tool():
+    _load_training_tool()
+    path = Path("tools/evaluate_closed_shell_checkpoint.py")
+    spec = importlib.util.spec_from_file_location("evaluate_closed_shell_checkpoint", path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -97,7 +110,7 @@ def test_closed_shell_s1_training_accepts_functional_hfx_channel_toggle():
     assert hfx_args.include_hfx_channel is True
 
 
-def test_closed_shell_s1_training_accepts_scf_hfx_grid_block_size_alias():
+def test_closed_shell_s1_training_rejects_obsolete_response_grid_chunk_size_alias():
     module = _load_training_tool()
 
     args = module.parse_args(
@@ -108,43 +121,28 @@ def test_closed_shell_s1_training_accepts_scf_hfx_grid_block_size_alias():
             "256",
         ]
     )
-    legacy_args = module.parse_args(
-        [
-            "--reference-csv",
-            "refs.csv",
-            "--response-grid-chunk-size",
-            "128",
-        ]
-    )
+    with pytest.raises(SystemExit):
+        module.parse_args(
+            [
+                "--reference-csv",
+                "refs.csv",
+                "--response-grid-chunk-size",
+                "128",
+            ]
+        )
 
     assert args.scf_hfx_grid_block_size == 256
-    assert legacy_args.scf_hfx_grid_block_size == 128
 
 
-def test_closed_shell_s1_training_accepts_response_hf_mode():
+def test_closed_shell_s1_training_accepts_response_hf_mode_without_none():
     module = _load_training_tool()
 
-    default_args = module.parse_args(
-        [
-            "--reference-csv",
-            "refs.csv",
-        ]
-    )
+    default_args = module.parse_args(["--reference-csv", "refs.csv"])
     approx_args = module.parse_args(
-        [
-            "--reference-csv",
-            "refs.csv",
-            "--response-hf-mode",
-            "approx",
-        ]
+        ["--reference-csv", "refs.csv", "--response-hf-mode", "approx"]
     )
     strict_args = module.parse_args(
-        [
-            "--reference-csv",
-            "refs.csv",
-            "--response-hf-mode",
-            "strict",
-        ]
+        ["--reference-csv", "refs.csv", "--response-hf-mode", "strict"]
     )
     with pytest.raises(SystemExit):
         module.parse_args(
@@ -159,6 +157,71 @@ def test_closed_shell_s1_training_accepts_response_hf_mode():
     assert default_args.response_hf_mode == "approx"
     assert approx_args.response_hf_mode == "approx"
     assert strict_args.response_hf_mode == "strict"
+
+
+def test_closed_shell_checkpoint_eval_restores_hfx_response_metadata_and_rejects_old_chunk_args(tmp_path):
+    module = _load_evaluation_tool()
+    checkpoint = tmp_path / "params.msgpack"
+    checkpoint.write_bytes(b"")
+    Path(str(checkpoint) + ".meta.json").write_text(
+        json.dumps(
+            {
+                "include_hfx_channel": True,
+                "response_hf_mode": "strict",
+                "include_pt2_channel": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    args = module.parse_args(
+        [
+            "--checkpoint",
+            str(checkpoint),
+            "--reference-csv",
+            "refs.csv",
+            "--systems",
+            "water",
+            "--outdir",
+            str(tmp_path / "out"),
+        ]
+    )
+    with pytest.raises(SystemExit):
+        module.parse_args(
+            [
+                "--checkpoint",
+                str(checkpoint),
+                "--reference-csv",
+                "refs.csv",
+                "--systems",
+                "water",
+                "--outdir",
+                str(tmp_path / "out"),
+                "--response-grid-chunk-size",
+                "128",
+            ]
+        )
+    with pytest.raises(SystemExit):
+        module.parse_args(
+            [
+                "--checkpoint",
+                str(checkpoint),
+                "--reference-csv",
+                "refs.csv",
+                "--systems",
+                "water",
+                "--outdir",
+                str(tmp_path / "out"),
+                "--strict-hfx-response-mode",
+                "low_memory",
+            ]
+        )
+
+    applied = module._apply_checkpoint_metadata(args)
+
+    assert applied.include_hfx_channel is True
+    assert applied.response_hf_mode == "strict"
+    assert applied.include_pt2_channel is True
 
 
 def test_closed_shell_s1_training_accepts_functional_hfx_channel_toggle():
@@ -518,13 +581,22 @@ def test_training_cache_uses_chunked_hfx_nu_only_for_large_canonical_refs(tmp_pa
     module = _load_training_tool()
 
     args = module.parse_args(
-            [
-                "--reference-csv",
-                "refs.csv",
-                "--input-feature-mode",
-                "canonical",
-            ]
-        )
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--input-feature-mode",
+            "canonical",
+        ]
+    )
+    hfx_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--input-feature-mode",
+            "canonical",
+            "--include-hfx-channel",
+        ]
+    )
     path = tmp_path / "refs.h5"
     with h5py.File(path, "w") as handle:
         group = handle.create_group("molecule")
@@ -536,6 +608,14 @@ def test_training_cache_uses_chunked_hfx_nu_only_for_large_canonical_refs(tmp_pa
                 args=args,
                 input_feature_mode="canonical",
             )
+            == "array"
+        )
+        assert (
+            module._cache_hfx_nu_storage(
+                group,
+                args=hfx_args,
+                input_feature_mode="canonical",
+            )
             == "chunked"
         )
 
@@ -544,7 +624,7 @@ def test_training_cache_uses_chunked_hfx_nu_only_for_large_canonical_refs(tmp_pa
         assert (
             module._cache_hfx_nu_storage(
                 group,
-                args=args,
+                args=hfx_args,
                 input_feature_mode="canonical",
             )
             == "array"

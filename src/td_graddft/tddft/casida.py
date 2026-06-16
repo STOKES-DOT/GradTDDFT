@@ -11,6 +11,7 @@ from jax import core as jax_core
 from jaxtyping import Array
 
 from .eigensolvers import (
+    _davidson_search_nroots,
     _solver_dtype,
     implicit_differential_davidson_lowest_tdhf,
 )
@@ -25,6 +26,10 @@ from .response import (
 )
 from .tda import solve_tda_from_operator
 from .types import TDDFTResult, TDAResult
+
+
+def _is_traced_convergence_flag(value) -> bool:
+    return isinstance(value, jax_core.Tracer)
 
 
 def _restricted_delta_eps(molecule: Any, occupation_tolerance: float) -> Array:
@@ -84,6 +89,7 @@ def solve_casida_from_tdhf_operator(
     nocc, nvir = delta_eps.shape
     dim = int(nocc * nvir)
     nroots = dim if nstates is None else min(int(nstates), dim)
+    search_nroots = _davidson_search_nroots(nroots, dim)
     work_dtype = _solver_dtype(jnp.asarray(delta_eps).dtype)
 
     def tdhf_vind(values):
@@ -92,7 +98,7 @@ def solve_casida_from_tdhf_operator(
 
     w, x_vecs, y_vecs, converged = implicit_differential_davidson_lowest_tdhf(
         tdhf_vind,
-        nroots=nroots,
+        nroots=search_nroots,
         size=dim,
         diag=jnp.asarray(delta_eps, dtype=work_dtype).reshape(dim),
         tol=davidson_tol,
@@ -100,7 +106,8 @@ def solve_casida_from_tdhf_operator(
         max_subspace=davidson_max_subspace,
         matrix_eps=matrix_eps,
     )
-    del converged
+    if not _is_traced_convergence_flag(converged) and not bool(converged):
+        raise RuntimeError("Davidson TDDFT solver did not converge.")
     return _finalize_casida_result(
         w,
         x_vecs,

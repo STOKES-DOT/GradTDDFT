@@ -27,6 +27,7 @@ def _functional_kwargs_from_config(config: Config) -> dict[str, Any]:
         "include_hfx_channel": bool(config.channels.include_hfx),
         "include_pt2_channel": include_pt2_channel,
         "pt2_channel_mode": "scaled_projected" if not include_pt2_channel else pt2_mode,
+        "response_hf_mode": config.channels.response_hf,
         "response_pt2_mode": config.channels.response_pt2,
         "strict_feature_alignment": config.strict_feature_alignment,
         "allow_experimental_jax_xc": allow_experimental_jax_xc,

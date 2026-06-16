@@ -345,6 +345,64 @@ def test_packed_eri_pair_matrix_response_matches_full_tensor_path():
     assert jnp.allclose(packed_b, full_b, atol=1e-10)
 
 
+def test_df_hybrid_response_uses_factorized_mo_action(monkeypatch):
+    nmo = 4
+    naux = 3
+    raw = jnp.arange(naux * nmo * nmo, dtype=jnp.float64).reshape(naux, nmo, nmo) / 37.0
+    factors = 0.5 * (raw + jnp.swapaxes(raw, -1, -2))
+    rep_tensor = jnp.einsum("Qpq,Qrs->pqrs", factors, factors)
+    mo_coeff = jnp.stack([jnp.eye(nmo), jnp.eye(nmo)], axis=0)
+    mo_occ_single = jnp.array([1.0, 1.0, 0.0, 0.0])
+    mo_occ = jnp.stack([mo_occ_single, mo_occ_single], axis=0)
+    mo_energy_single = jnp.array([-0.8, -0.2, 0.5, 1.1])
+    mo_energy = jnp.stack([mo_energy_single, mo_energy_single], axis=0)
+    rdm1_single = jnp.diag(mo_occ_single)
+    base_molecule = _ToyMolecule(
+        ao=jnp.eye(nmo),
+        ao_deriv1=jnp.stack(
+            [
+                jnp.eye(nmo),
+                jnp.zeros((nmo, nmo)),
+                jnp.zeros((nmo, nmo)),
+                jnp.zeros((nmo, nmo)),
+            ]
+        ),
+        grid=_Grid(weights=jnp.ones((nmo,))),
+        rep_tensor=rep_tensor,
+        mo_coeff=mo_coeff,
+        mo_occ=mo_occ,
+        mo_energy=mo_energy,
+        rdm1=jnp.stack([rdm1_single, rdm1_single], axis=0),
+    )
+    df_molecule = replace(base_molecule, rep_tensor=jnp.zeros((0, 0, 0, 0)))
+    base_molecule.nocc = 2
+    df_molecule.nocc = 2
+    df_molecule.df_factors = factors
+    xc = _ToyAdiabaticFunctional(
+        name="hybrid_only",
+        energy_density_fn=lambda rho: jnp.zeros_like(rho),
+        exact_exchange_fraction=0.25,
+    )
+
+    full_tda_vind, _, _ = build_restricted_tda_operator(base_molecule, xc)
+    full_tdhf_vind = response_module.build_restricted_tdhf_operator(base_molecule, xc)
+    full_a, full_b = _tdhf_operator_matrices(full_tdhf_vind, 4)
+
+    def fail_ao_density_df(*args, **kwargs):
+        raise AssertionError("DF hybrid response should not build AO-density J/K")
+
+    monkeypatch.setattr(response_module, "_jk_from_df_factors", fail_ao_density_df)
+    monkeypatch.setattr(response_module, "_j_from_df_factors", fail_ao_density_df)
+
+    df_tda_vind, _, _ = build_restricted_tda_operator(df_molecule, xc)
+    df_tdhf_vind = response_module.build_restricted_tdhf_operator(df_molecule, xc)
+    df_a, df_b = _tdhf_operator_matrices(df_tdhf_vind, 4)
+
+    assert jnp.allclose(_operator_matrix(df_tda_vind, 4), _operator_matrix(full_tda_vind, 4), atol=1e-10)
+    assert jnp.allclose(df_a, full_a, atol=1e-10)
+    assert jnp.allclose(df_b, full_b, atol=1e-10)
+
+
 def test_restricted_operator_ignores_stale_response_eri_cache():
     nmo = 4
     rep_tensor = jnp.arange(nmo**4, dtype=jnp.float64).reshape(nmo, nmo, nmo, nmo) / 100.0

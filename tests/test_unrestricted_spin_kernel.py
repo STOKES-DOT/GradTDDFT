@@ -53,6 +53,18 @@ def _tdhf_vind(flat_a, flat_b):
     return vind
 
 
+def _operator_matrix(vind, dim):
+    return vind(jnp.eye(dim)).T
+
+
+def _tdhf_operator_matrices(vind, dim):
+    eye = jnp.eye(dim)
+    zeros = jnp.zeros_like(eye)
+    a_cols = vind(jnp.concatenate([eye, zeros], axis=-1))[:, :dim]
+    b_cols = vind(jnp.concatenate([zeros, eye], axis=-1))[:, :dim]
+    return a_cols.T, b_cols.T
+
+
 def test_unrestricted_response_uses_spin_resolved_kernel_actions():
     reference = _toy_unrestricted_reference()
 
@@ -182,6 +194,53 @@ def test_unrestricted_hfx_nu_hybrid_response_uses_standard_ao_exchange(monkeypat
 
     assert np.all(np.isfinite(np.asarray(vind(rows))))
     assert calls["jk"] > 0
+
+
+def test_unrestricted_df_hybrid_response_uses_factorized_mo_action(monkeypatch):
+    nmo = 4
+    naux = 3
+    raw = jnp.arange(naux * nmo * nmo, dtype=jnp.float64).reshape(naux, nmo, nmo) / 29.0
+    factors = 0.5 * (raw + jnp.swapaxes(raw, -1, -2))
+    rep_tensor = jnp.einsum("Qpq,Qrs->pqrs", factors, factors)
+    mo_coeff = jnp.stack([jnp.eye(nmo), jnp.eye(nmo)], axis=0)
+    mo_occ = jnp.asarray([[1.0, 1.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]])
+    mo_energy = jnp.asarray([[-0.8, -0.3, 0.4, 0.9], [-0.7, 0.2, 0.6, 1.0]])
+    rdm1 = jnp.stack([jnp.diag(mo_occ[0]), jnp.diag(mo_occ[1])], axis=0)
+    full = SimpleNamespace(
+        ao=jnp.eye(nmo),
+        grid=SimpleNamespace(weights=jnp.ones((nmo,))),
+        rep_tensor=rep_tensor,
+        mo_coeff=mo_coeff,
+        mo_occ=mo_occ,
+        mo_energy=mo_energy,
+        rdm1=rdm1,
+        exact_exchange_fraction=0.25,
+        nocc_alpha=2,
+        nocc_beta=1,
+    )
+    df = SimpleNamespace(**{**full.__dict__, "rep_tensor": jnp.zeros((0, 0, 0, 0)), "df_factors": factors})
+
+    full_tda_vind, full_diag, _, _ = build_unrestricted_tda_operator(full)
+    full_tdhf_vind, _, _ = build_unrestricted_tdhf_operator(full)
+    full_tda_matrix = _operator_matrix(full_tda_vind, int(full_diag.size))
+    full_a, full_b = _tdhf_operator_matrices(full_tdhf_vind, int(full_diag.size))
+
+    def fail_transition_density(*args, **kwargs):
+        raise AssertionError("DF unrestricted response should not build AO transition density")
+
+    monkeypatch.setattr(unrestricted_module, "_unrestricted_transition_density", fail_transition_density)
+
+    df_tda_vind, df_diag, _, _ = build_unrestricted_tda_operator(df)
+    df_tdhf_vind, _, _ = build_unrestricted_tdhf_operator(df)
+    df_a, df_b = _tdhf_operator_matrices(df_tdhf_vind, int(df_diag.size))
+
+    assert np.allclose(
+        np.asarray(_operator_matrix(df_tda_vind, int(df_diag.size))),
+        np.asarray(full_tda_matrix),
+        atol=1e-10,
+    )
+    assert np.allclose(np.asarray(df_a), np.asarray(full_a), atol=1e-10)
+    assert np.allclose(np.asarray(df_b), np.asarray(full_b), atol=1e-10)
 
 
 def test_unrestricted_tda_solver_is_jittable_with_static_nstates():

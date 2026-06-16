@@ -24,6 +24,7 @@ from td_graddft.neural_xc import (
     DEFAULT_INPUT_FEATURE_MODE,
     DEFAULT_NETWORK_ARCHITECTURE,
     DEFAULT_NETWORK_HIDDEN_DIMS,
+    DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
 )
 from td_graddft.training import GroundStateTrainingConfig, load_params_checkpoint
 
@@ -52,7 +53,7 @@ class RunLogger:
             handle.write(line + "\n")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Evaluate a trained closed-shell neural XC checkpoint on selected molecules."
     )
@@ -75,16 +76,21 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_INPUT_FEATURE_MODE,
     )
     p.add_argument("--include-pt2-channel", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--include-hfx-channel", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument(
+        "--response-hf-mode",
+        choices=("approx", "strict"),
+        default=DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
+        help=(
+            "Excited-state handling of the neural local-HF channel. 'approx' uses a "
+            "scalar averaged hybrid fraction; 'strict' is gated until chi/fxx "
+            "second-response contractions are implemented."
+        ),
+    )
     p.add_argument(
         "--pt2-channel-mode",
         choices=("scaled_projected", "local_exact"),
         default="scaled_projected",
-    )
-    p.add_argument("--response-grid-chunk-size", type=int, default=1024)
-    p.add_argument(
-        "--strict-hfx-response-mode",
-        choices=("low_memory",),
-        default="low_memory",
     )
     p.add_argument("--semilocal-xc", nargs="+", default=list(b3lyp_component_basis()))
     p.add_argument("--eval-use-tda", action=argparse.BooleanOptionalAction, default=True)
@@ -132,7 +138,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--scf-warm-start", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--scf-warm-start-update-interval", type=int, default=1)
     p.add_argument("--outdir", required=True)
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def _apply_checkpoint_metadata(args: argparse.Namespace) -> argparse.Namespace:
@@ -142,10 +148,10 @@ def _apply_checkpoint_metadata(args: argparse.Namespace) -> argparse.Namespace:
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     defaults = {
         "training_mode": "self_consistent",
+        "include_hfx_channel": False,
+        "response_hf_mode": DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
         "include_pt2_channel": False,
         "pt2_channel_mode": "scaled_projected",
-        "response_grid_chunk_size": 1024,
-        "strict_hfx_response_mode": "low_memory",
         "scf_gradient_mode": "unrolled",
         "scf_implicit_diff_solver": "normal_cg",
         "scf_implicit_diff_tolerance": 1e-6,
@@ -156,10 +162,10 @@ def _apply_checkpoint_metadata(args: argparse.Namespace) -> argparse.Namespace:
     }
     for key in (
         "training_mode",
+        "include_hfx_channel",
+        "response_hf_mode",
         "include_pt2_channel",
         "pt2_channel_mode",
-        "response_grid_chunk_size",
-        "strict_hfx_response_mode",
         "scf_gradient_mode",
         "scf_implicit_diff_solver",
         "scf_implicit_diff_tolerance",
@@ -186,9 +192,10 @@ def main() -> None:
         f"checkpoint={args.checkpoint}, reference_csv={args.reference_csv}, basis={args.basis}, "
         f"systems={list(args.systems)}, mode={args.training_mode}, "
         f"grid={args.grids_level}, scf_grad_mode={args.scf_gradient_mode}, "
+        f"include_hfx_channel={bool(args.include_hfx_channel)}, "
+        f"response_hf_mode={args.response_hf_mode}, "
         f"include_pt2_channel={bool(args.include_pt2_channel)}, "
-        f"pt2_channel_mode={args.pt2_channel_mode if bool(args.include_pt2_channel) else 'none'}, "
-        f"strict_hfx_response_mode={args.strict_hfx_response_mode}"
+        f"pt2_channel_mode={args.pt2_channel_mode if bool(args.include_pt2_channel) else 'none'}"
     )
 
     rows = _load_reference_rows(Path(args.reference_csv), basis=str(args.basis))
@@ -207,10 +214,10 @@ def main() -> None:
         semilocal_xc=tuple(str(name) for name in args.semilocal_xc),
         hidden_dims=tuple(int(value) for value in args.hidden_dims),
         input_feature_mode=str(args.input_feature_mode),
+        include_hfx_channel=bool(args.include_hfx_channel),
+        response_hf_mode=str(args.response_hf_mode),
         include_pt2_channel=bool(args.include_pt2_channel),
         pt2_channel_mode=str(args.pt2_channel_mode),
-        response_grid_chunk_size=int(args.response_grid_chunk_size),
-        strict_hfx_response_mode=str(args.strict_hfx_response_mode),
         name="neural_xc_closed_shell_eval",
     )
     template = functional.init_from_molecule(jax.random.PRNGKey(int(args.seed)), prepared[0].molecule)

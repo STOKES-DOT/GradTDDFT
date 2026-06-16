@@ -35,6 +35,7 @@ class _RestrictedResponseOperatorData:
     orbo: Array
     orbv: Array
     ao_response_action_fn: Callable[[Array], Array]
+    ao_mo_response_action_fn: Callable[..., Array] | None = None
     xc_response_action_fn: Callable[[Array], Array] | None = None
     hybrid_fraction: Array | float = 0.0
     nonlocal_xc_a_action_fn: Callable[[Array], Array] | None = None
@@ -157,6 +158,17 @@ def _needs_exchange_terms(value: Any) -> bool:
     if any(isinstance(leaf, jax.core.Tracer) for leaf in jax.tree_util.tree_leaves(arr)):
         return True
     return bool(abs(float(np.asarray(arr).reshape(()))) > 1e-14)
+
+
+def _raise_if_strict_local_hf_response(resolved_xc: Any | None) -> None:
+    if resolved_xc is None:
+        return
+    mode = str(getattr(resolved_xc, "response_hf_mode", "approx")).lower()
+    if mode == "strict":
+        raise NotImplementedError(
+            "strict local-HF TDDFT response requires chi/fxx-based second-response "
+            "contractions and is not implemented. Use response_hf_mode='approx'."
+        )
 
 
 def _restricted_response_features(
@@ -668,6 +680,67 @@ def _j_from_eri_pair_matrix(eri_pair_matrix: Array, density: Array) -> Array:
     return j_mat.at[:, cols, rows].set(j_pair)
 
 
+def _restricted_df_mo_response_action(
+    df_factors: Array,
+    orbo: Array,
+    orbv: Array,
+    hybrid_fraction: Any,
+    *,
+    include_exchange: bool,
+    dtype: Any,
+) -> Callable[..., Array]:
+    alpha = jnp.asarray(hybrid_fraction, dtype=dtype)
+    factors = jnp.asarray(df_factors, dtype=dtype)
+    orbo = jnp.asarray(orbo, dtype=dtype)
+    orbv = jnp.asarray(orbv, dtype=dtype)
+    b_ov = jnp.einsum("Qpq,pi,qa->Qia", factors, orbo, orbv, precision=Precision.HIGHEST)
+    b_vo = jnp.einsum("Qpq,pa,qi->Qai", factors, orbv, orbo, precision=Precision.HIGHEST)
+    if include_exchange:
+        b_oo = jnp.einsum("Qpq,pi,qj->Qij", factors, orbo, orbo, precision=Precision.HIGHEST)
+        b_vv = jnp.einsum("Qpq,pa,qb->Qab", factors, orbv, orbv, precision=Precision.HIGHEST)
+    else:
+        b_oo = None
+        b_vv = None
+    nocc = int(orbo.shape[1])
+    nvir = int(orbv.shape[1])
+
+    def action(values: Array, *, bottom_density: bool, bottom_projection: bool) -> Array:
+        original_shape = jnp.asarray(values).shape
+        x = jnp.asarray(values, dtype=dtype).reshape(-1, nocc, nvir)
+        density_factor = b_ov if bottom_density else b_vo
+        if bottom_density:
+            rho_aux = 2.0 * jnp.einsum("Qia,nia->nQ", density_factor, x, precision=Precision.HIGHEST)
+        else:
+            rho_aux = 2.0 * jnp.einsum("Qai,nia->nQ", density_factor, x, precision=Precision.HIGHEST)
+        if bottom_projection:
+            out = jnp.einsum("Qia,nQ->nia", b_ov, rho_aux, precision=Precision.HIGHEST)
+        else:
+            out = jnp.einsum("Qai,nQ->nia", b_vo, rho_aux, precision=Precision.HIGHEST)
+
+        if include_exchange:
+            if bottom_density == bottom_projection:
+                assert b_oo is not None and b_vv is not None
+                k_out = 2.0 * jnp.einsum(
+                    "Qij,Qab,njb->nia",
+                    b_oo,
+                    b_vv,
+                    x,
+                    precision=Precision.HIGHEST,
+                )
+            else:
+                k_out = 2.0 * jnp.einsum(
+                    "Qaj,Qib,njb->nia",
+                    b_vo,
+                    b_ov,
+                    x,
+                    precision=Precision.HIGHEST,
+                )
+            out = out - 0.5 * alpha * k_out
+        return out.reshape(original_shape)
+
+    return action
+
+
 def _restricted_ao_response_action(
     molecule: Any,
     hybrid_fraction: Any,
@@ -718,6 +791,7 @@ def _build_restricted_response_operator_data(
     need_b_terms: bool = True,
 ) -> _RestrictedResponseOperatorData:
     resolved_xc = _resolve_xc_functional(molecule, xc_functional, xc_params)
+    _raise_if_strict_local_hf_response(resolved_xc)
     weights = jnp.asarray(molecule.grid.weights)
     orbo, orbv, delta_eps, _ = _restricted_orbital_data(
         molecule,
@@ -829,12 +903,24 @@ def _build_restricted_response_operator_data(
         include_exchange=_needs_exchange_terms(hybrid_fraction),
         dtype=response_dtype,
     )
+    df_factors = getattr(molecule, "df_factors", None)
+    ao_mo_response_action_fn = None
+    if df_factors is not None and int(jnp.asarray(df_factors).size) > 0:
+        ao_mo_response_action_fn = _restricted_df_mo_response_action(
+            df_factors,
+            orbo,
+            orbv,
+            hybrid_fraction,
+            include_exchange=_needs_exchange_terms(hybrid_fraction),
+            dtype=response_dtype,
+        )
 
     return _RestrictedResponseOperatorData(
         delta_eps=delta_eps,
         orbo=orbo,
         orbv=orbv,
         ao_response_action_fn=ao_response_action_fn,
+        ao_mo_response_action_fn=ao_mo_response_action_fn,
         xc_response_action_fn=xc_response_action_fn,
         hybrid_fraction=hybrid_fraction,
         nonlocal_xc_a_action_fn=nonlocal_xc_a_action_fn,
@@ -856,6 +942,12 @@ def _restricted_ao_mo_action(
     bottom_density: bool,
     bottom_projection: bool,
 ) -> Array:
+    if data.ao_mo_response_action_fn is not None:
+        return data.ao_mo_response_action_fn(
+            x,
+            bottom_density=bottom_density,
+            bottom_projection=bottom_projection,
+        )
     density = _restricted_transition_density(
         data.orbo,
         data.orbv,

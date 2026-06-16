@@ -1,6 +1,7 @@
 import numpy as np
 import jax
 import jax.numpy as jnp
+import pytest
 
 from td_graddft.tddft.casida import solve_casida_from_tdhf_operator
 from td_graddft.tddft.eigensolvers import implicit_differential_davidson_lowest_symmetric
@@ -50,6 +51,63 @@ def _tdhf_vind(flat_a, flat_b):
         return jnp.concatenate([upper, lower], axis=-1)
 
     return vind
+
+
+def test_operator_solvers_track_extra_davidson_roots_before_truncation():
+    flat_a = np.asarray(
+        [
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 10.0, -9.5, 0.0],
+            [0.0, -9.5, 10.0, 0.0],
+            [0.0, 0.0, 0.0, 3.0],
+        ],
+        dtype=np.float64,
+    )
+    flat_b = np.zeros_like(flat_a)
+    delta_eps = jnp.asarray([[2.0, 10.0, 10.0, 3.0]], dtype=jnp.float64)
+
+    tda = solve_tda_from_operator(
+        delta_eps,
+        _tda_vind(flat_a),
+        jnp.diag(jnp.asarray(flat_a)),
+        nstates=1,
+        davidson_tol=1e-8,
+        davidson_max_iter=20,
+    )
+    casida = solve_casida_from_tdhf_operator(
+        delta_eps,
+        _tdhf_vind(flat_a, flat_b),
+        nstates=1,
+        davidson_tol=1e-8,
+        davidson_max_iter=20,
+    )
+
+    np.testing.assert_allclose(
+        np.asarray(tda.excitation_energies),
+        np.asarray([0.5]),
+        atol=1e-8,
+        rtol=1e-8,
+    )
+    np.testing.assert_allclose(
+        np.asarray(casida.excitation_energies),
+        np.asarray([0.5]),
+        atol=1e-8,
+        rtol=1e-8,
+    )
+
+
+def test_restricted_casida_raises_when_davidson_does_not_converge():
+    flat_a = np.diag(np.asarray([0.8, 1.2, 1.6, 2.0], dtype=np.float64))
+    flat_b = np.zeros_like(flat_a)
+    delta_eps = jnp.asarray([[0.8, 1.2], [1.6, 2.0]], dtype=jnp.float64)
+
+    with pytest.raises(RuntimeError, match="Davidson TDDFT solver did not converge"):
+        solve_casida_from_tdhf_operator(
+            delta_eps,
+            _tdhf_vind(flat_a, flat_b),
+            nstates=1,
+            davidson_max_iter=0,
+        )
 
 
 def test_davidson_restart_matches_numpy_on_random_symmetric_matrix():

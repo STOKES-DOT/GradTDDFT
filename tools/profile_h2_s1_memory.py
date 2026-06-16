@@ -159,7 +159,6 @@ def _make_h2_args(args: argparse.Namespace) -> argparse.Namespace:
     h2_args.include_pt2_channel = bool(args.include_pt2_channel)
     h2_args.pt2_channel_mode = str(args.pt2_channel_mode)
     h2_args.response_pt2_mode = str(args.response_pt2_mode)
-    h2_args.response_grid_chunk_size = int(args.response_grid_chunk_size)
     h2_args.training_mode = str(args.training_mode)
     h2_args.s1_use_tda = bool(args.s1_use_tda)
     h2_args.energy_mse_weight = 0.0
@@ -224,7 +223,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--include-pt2-channel", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--pt2-channel-mode", choices=("scaled_projected", "local_exact"), default="scaled_projected")
     p.add_argument("--response-pt2-mode", choices=("approx", "strict"), default="approx")
-    p.add_argument("--response-grid-chunk-size", type=int, default=1024)
     p.add_argument("--training-mode", choices=("fixed_density", "self_consistent"), default="self_consistent")
     p.add_argument("--s1-use-tda", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--train-scf-max-cycle", type=int, default=0)

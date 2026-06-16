@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import sys
 
+import h5py
 import numpy as np
 
 
@@ -138,6 +139,84 @@ def test_h2_s1_tool_defaults_to_legacy_s1_only_tda_objective():
     assert args.objective == "auto"
     assert module._resolved_objective_kind(args) == "s1_only"
     assert module._objective_name(args) == "s1_only_tda"
+
+
+def test_h2_s1_tool_exposes_hfx_channel_controls():
+    module = _load_tool_module(
+        "tools/h2_s1_tda_train5_dense100_vs_fci.py",
+        "h2_s1_tda_train5_dense100_vs_fci_test_hfx_controls",
+    )
+
+    default_args = module.parse_args([])
+    hfx_args = module.parse_args(
+        [
+            "--include-hfx-channel",
+            "--response-hf-mode",
+            "approx",
+        ]
+    )
+
+    assert default_args.include_hfx_channel is False
+    assert default_args.response_hf_mode == "approx"
+    assert hfx_args.include_hfx_channel is True
+    assert hfx_args.response_hf_mode == "approx"
+
+
+def test_h2_s1_self_consistent_config_uses_current_implicit_diff_fields():
+    module = _load_tool_module(
+        "tools/h2_s1_tda_train5_dense100_vs_fci.py",
+        "h2_s1_tda_train5_dense100_vs_fci_test_implicit_diff_config",
+    )
+
+    args = module.parse_args(
+        [
+            "--scf-implicit-diff-max-iter",
+            "9",
+            "--scf-implicit-diff-clip",
+            "123.0",
+            "--scf-implicit-diff-tolerance",
+            "1e-5",
+            "--scf-implicit-diff-regularization",
+            "2e-3",
+            "--scf-implicit-diff-solver",
+            "gmres",
+            "--scf-implicit-diff-restart",
+            "4",
+        ]
+    )
+
+    config = module._self_consistent_prediction_config(args)
+
+    assert config.scf_implicit_diff_max_iter == 9
+    assert config.scf_implicit_diff_clip == 123.0
+    assert config.scf_implicit_diff_tolerance == 1e-5
+    assert config.scf_implicit_diff_regularization == 2e-3
+    assert not hasattr(config, "scf_implicit_diff_solver")
+    assert not hasattr(config, "scf_implicit_diff_restart")
+
+
+def test_h2_s1_reference_cache_writer_matches_current_reference_point(tmp_path, monkeypatch):
+    module = _load_tool_module(
+        "tools/h2_s1_tda_train5_dense100_vs_fci.py",
+        "h2_s1_tda_train5_dense100_vs_fci_test_reference_cache_writer",
+    )
+    point = SimpleNamespace(
+        r_angstrom=0.74,
+        atom="H 0 0 -0.37; H 0 0 0.37",
+        molecule=SimpleNamespace(),
+        fci_energy_h=-1.0,
+        fci_total_energies_h=np.asarray([-1.0, -0.5], dtype=np.float64),
+        fci_excitation_energies_h=np.asarray([0.5], dtype=np.float64),
+        fci_density_grid=np.asarray([0.2, 0.3], dtype=np.float64),
+        fci_electron_count=2.0,
+    )
+    monkeypatch.setattr(module, "write_restricted_molecule", lambda group, molecule: None)
+
+    with h5py.File(tmp_path / "refs.h5", "w") as handle:
+        group = handle.create_group("point")
+        module._write_reference_point(group, point)
+        assert "fci_density_grid" in group
+        assert "fci_dm_ao" not in group
 
 
 def test_h2_s1_training_data_uses_total_density_grid_target_only():

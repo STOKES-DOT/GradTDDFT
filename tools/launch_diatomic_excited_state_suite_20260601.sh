@@ -23,6 +23,8 @@ INTEGRAL_BACKEND="${TDGRADDFT_INTEGRAL_BACKEND:-gpu}"
 GPU_BINDING="${TDGRADDFT_GPU_BINDING:-}"
 SKIP_INITIAL_EVAL="${TDGRADDFT_SKIP_INITIAL_EVAL:-0}"
 SKIP_FINAL_EVALUATION="${TDGRADDFT_SKIP_FINAL_EVALUATION:-0}"
+H2_INCLUDE_HFX_CHANNEL="${TDGRADDFT_H2_INCLUDE_HFX_CHANNEL:-1}"
+H2_RESPONSE_HF_MODE="${TDGRADDFT_H2_RESPONSE_HF_MODE:-approx}"
 H2_INCLUDE_PT2_CHANNEL="${TDGRADDFT_H2_INCLUDE_PT2_CHANNEL:-1}"
 H2_PT2_CHANNEL_MODE="${TDGRADDFT_H2_PT2_CHANNEL_MODE:-scaled_projected}"
 H2_RESPONSE_PT2_MODE="${TDGRADDFT_H2_RESPONSE_PT2_MODE:-strict}"
@@ -83,11 +85,17 @@ run_h2() {
     --reference-scf-backend jax_rks
     --train-scf-convergence-metric energy
     --scf-gradient-mode impl
+    --response-hf-mode "$H2_RESPONSE_HF_MODE"
     --jit-train
     --jit-eval
     --reference-cache "$SUITE_ROOT/reference_cache/h2_s1_references.h5"
     --outdir "$outdir"
   )
+  if bool_is_true "$H2_INCLUDE_HFX_CHANNEL"; then
+    cmd+=(--include-hfx-channel)
+  else
+    cmd+=(--no-include-hfx-channel)
+  fi
   if bool_is_true "$H2_INCLUDE_PT2_CHANNEL"; then
     cmd+=(
       --include-pt2-channel
@@ -98,7 +106,13 @@ run_h2() {
     cmd+=(--no-include-pt2-channel)
   fi
   echo "[$(date -Is)] launching H2 objective=$OBJECTIVE outdir=$outdir"
-  echo "[$(date -Is)] H2 response modes: HF=approx PT2=$(
+  echo "[$(date -Is)] H2 response modes: HF=$(
+    if bool_is_true "$H2_INCLUDE_HFX_CHANNEL"; then
+      printf '%s' "$H2_RESPONSE_HF_MODE"
+    else
+      printf 'disabled'
+    fi
+  ) PT2=$(
     if bool_is_true "$H2_INCLUDE_PT2_CHANNEL"; then
       printf '%s (%s channel)' "$H2_RESPONSE_PT2_MODE" "$H2_PT2_CHANNEL_MODE"
     else
@@ -161,7 +175,7 @@ run_h2plus() {
 }
 
 echo "[$(date -Is)] suite_root=$SUITE_ROOT system=$SYSTEM objective=$OBJECTIVE"
-echo "[$(date -Is)] launcher defaults: H2 HF=approx, H2 PT2=${H2_RESPONSE_PT2_MODE}, H2plus HF=approx, H2plus PT2=${H2PLUS_RESPONSE_PT2_MODE}"
+echo "[$(date -Is)] launcher defaults: H2 HF=${H2_RESPONSE_HF_MODE}, H2 PT2=${H2_RESPONSE_PT2_MODE}, H2plus HF=approx, H2plus PT2=${H2PLUS_RESPONSE_PT2_MODE}"
 show_runtime
 
 case "$SYSTEM" in

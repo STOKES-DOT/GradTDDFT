@@ -50,6 +50,7 @@ class RestrictedMolecule:
     nocc: int | None = None
     hfx_omega_values: jnp.ndarray | None = None
     hfx_local: jnp.ndarray | None = None
+    hfx_fxx: jnp.ndarray | None = None
     hfx_nu: jnp.ndarray | None = None
     hfx_nu_api: Any | None = None
     pt2_local: jnp.ndarray | None = None
@@ -102,6 +103,7 @@ class UnrestrictedMolecule:
     nocc_beta: int | None = None
     hfx_omega_values: jnp.ndarray | None = None
     hfx_local: jnp.ndarray | None = None
+    hfx_fxx: jnp.ndarray | None = None
     hfx_nu: jnp.ndarray | None = None
     hfx_nu_api: Any | None = None
     pt2_local: jnp.ndarray | None = None

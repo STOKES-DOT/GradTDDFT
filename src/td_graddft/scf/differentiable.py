@@ -42,6 +42,7 @@ _GRID_PAYLOAD_DEPENDENCY_FIELDS = frozenset(
         "mo_occ",
         "mo_energy",
         "hfx_local",
+        "hfx_fxx",
         "hfx_nu",
         "hfx_nu_api",
         "pt2_local",
@@ -597,14 +598,21 @@ def _restricted_iteration_molecule(
         mo_occ=mo_occ_stacked,
         mo_energy=jnp.stack([mo_energy, mo_energy], axis=0),
     )
+    nu_source = hfx_nu if hfx_nu is not None else hfx_nu_source(molecule)
     if hasattr(molecule, "hfx_local"):
-        nu_source = hfx_nu if hfx_nu is not None else hfx_nu_source(molecule)
         if nu_source is not None:
             updates["hfx_local"] = None
         else:
             local_ref = getattr(molecule, "hfx_local", None)
             if local_ref is not None:
                 updates["hfx_local"] = jax.lax.stop_gradient(jnp.asarray(local_ref))
+    if hasattr(molecule, "hfx_fxx"):
+        if nu_source is not None:
+            updates["hfx_fxx"] = None
+        else:
+            fxx_ref = getattr(molecule, "hfx_fxx", None)
+            if fxx_ref is not None:
+                updates["hfx_fxx"] = jax.lax.stop_gradient(jnp.asarray(fxx_ref))
     return _replace_molecule(molecule, **updates)
 
 

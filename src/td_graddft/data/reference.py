@@ -109,6 +109,7 @@ def restricted_reference_from_pyscf(
         dipole_integrals_np = np.asarray(mf.mol.intor_symmetric("int1e_r", comp=3))
 
     hfx_local = None
+    hfx_fxx = None
     hfx_nu = None
     hfx_nu_api = None
     pt2_local = None
@@ -125,12 +126,13 @@ def restricted_reference_from_pyscf(
             omega_values=tuple(float(omega) for omega in hfx_omega_values),
             chunk_size=hfx_chunk_size,
             return_nu=bool(compute_local_hfx_aux) and not use_chunked_hfx_nu,
+            return_fxx=True,
         )
         if compute_local_hfx_aux and not use_chunked_hfx_nu:
-            hfx_local_np, hfx_nu_np = hfx_result
+            hfx_local_np, hfx_nu_np, hfx_fxx_np = hfx_result
             hfx_nu = _backend_array(hfx_nu_np, array_backend=array_backend)
         else:
-            hfx_local_np = hfx_result
+            hfx_local_np, hfx_fxx_np = hfx_result
             if use_chunked_hfx_nu:
                 hfx_nu_api = ChunkedHFXNu.from_pyscf_mol(
                     mf.mol,
@@ -140,6 +142,7 @@ def restricted_reference_from_pyscf(
                     chunk_size=int(hfx_chunk_size),
                 )
         hfx_local = _backend_array(hfx_local_np, array_backend=array_backend)
+        hfx_fxx = _backend_array(hfx_fxx_np, array_backend=array_backend)
     if compute_local_pt2_features:
         from td_graddft.neural_xc.inputs import _local_pt2_feature_from_restricted_orbitals
 
@@ -219,6 +222,7 @@ def restricted_reference_from_pyscf(
             else None
         ),
         hfx_local=hfx_local,
+        hfx_fxx=hfx_fxx,
         hfx_nu=hfx_nu,
         hfx_nu_api=hfx_nu_api,
         pt2_local=pt2_local,
