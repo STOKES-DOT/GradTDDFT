@@ -917,13 +917,19 @@ class NeuralXCBindingMixin:
             features, grad_a, grad_b = grid_features_with_spin_gradients_for_molecule(molecule)
             semilocal_channels = self.semilocal_energy_density_channels(features)
             semilocal = jnp.sum(semilocal_channels, axis=-1)
-            hf_projected, hf_projected_a, hf_projected_b = (
-                self._response_hf_grid_contribution_components(
-                    molecule,
-                    features=features,
+            needs_response_alpha = self._uses_hfx_channel()
+            if needs_response_alpha:
+                hf_projected, hf_projected_a, hf_projected_b = (
+                    self._response_hf_grid_contribution_components(
+                        molecule,
+                        features=features,
+                    )
                 )
-            )
-            if self.input_feature_mode == "canonical":
+            else:
+                hf_projected = jnp.zeros_like(features.rho)
+                hf_projected_a = hf_projected
+                hf_projected_b = hf_projected
+            if needs_response_alpha and self.input_feature_mode == "canonical":
                 hfx_feature_a, hfx_feature_b = self._canonical_hfx_feature_channels(
                     molecule,
                     features,
@@ -937,7 +943,6 @@ class NeuralXCBindingMixin:
                 if self.include_pt2_channel
                 else None
             )
-            needs_response_alpha = self._uses_hfx_channel()
             needs_pt2_posthoc = (
                 self.include_pt2_channel
                 and self.response_pt2_mode == "strict"
@@ -1018,11 +1023,17 @@ class NeuralXCBindingMixin:
         features, total_gradient, semilocal_channels, semilocal = (
             self._restricted_grid_payload(molecule)
         )
-        hf_projected, hf_projected_a, hf_projected_b = self._response_hf_grid_contribution_components(
-            molecule,
-            features=features,
-        )
-        if self.input_feature_mode == "canonical":
+        needs_response_alpha = self._uses_hfx_channel()
+        if needs_response_alpha:
+            hf_projected, hf_projected_a, hf_projected_b = self._response_hf_grid_contribution_components(
+                molecule,
+                features=features,
+            )
+        else:
+            hf_projected = jnp.zeros_like(features.rho)
+            hf_projected_a = hf_projected
+            hf_projected_b = hf_projected
+        if needs_response_alpha and self.input_feature_mode == "canonical":
             hfx_feature_a, hfx_feature_b = self._canonical_hfx_feature_channels(
                 molecule,
                 features,
@@ -1041,7 +1052,6 @@ class NeuralXCBindingMixin:
             and self.response_pt2_mode == "strict"
             and pt2_projected is not None
         )
-        needs_response_alpha = self._uses_hfx_channel()
         coefficients = None
         alpha = jnp.asarray(0.0, dtype=semilocal.dtype)
         if needs_response_alpha or needs_pt2_posthoc:

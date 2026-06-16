@@ -125,9 +125,7 @@ def make_ground_state_loss_and_grad(
         cleaned_grads, nonfinite_grad_fraction = _sanitize_gradients(grads)
         metrics = dict(metrics)
         metrics["loss"] = loss
-        metrics["raw_grad_norm"] = jnp.asarray([_tree_l2_norm(grads, sanitize=False)], dtype=loss.dtype)
         metrics["grad_norm"] = jnp.asarray([_tree_l2_norm(cleaned_grads, sanitize=True)], dtype=loss.dtype)
-        metrics["grad_abs_max"] = jnp.asarray([_tree_abs_max(cleaned_grads, sanitize=True)], dtype=loss.dtype)
         metrics["nonfinite_grad_fraction"] = jnp.asarray([nonfinite_grad_fraction], dtype=loss.dtype)
         return loss, metrics, cleaned_grads
 

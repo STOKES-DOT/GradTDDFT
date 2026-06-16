@@ -259,6 +259,73 @@ def test_semilocal_only_functional_omits_hfx_channels_and_fraction():
     assert jnp.allclose(hf_fraction, 0.0, atol=1e-12)
 
 
+def test_response_binding_omits_hfx_projection_when_hfx_channel_is_disabled(monkeypatch):
+    molecule = _make_toy_molecule()
+    non_hf_module = make_custom_semilocal_module(
+        channel_names=("rho",),
+        energy_density_channels_fn=lambda local_features: jnp.expand_dims(
+            local_features.rho,
+            axis=-1,
+        ),
+        name="response_no_hfx_semilocal",
+    )
+    functional = make_neural_xc_functional(
+        non_hf_module=non_hf_module,
+        input_feature_mode="canonical",
+        hidden_dims=(8,),
+        name="response_no_hfx_projection",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(228), molecule)
+
+    def fail_hfx_projection(*args, **kwargs):
+        raise AssertionError("response binding should not compute hfx features")
+
+    monkeypatch.setattr(
+        type(functional),
+        "_response_hf_grid_contribution_components",
+        fail_hfx_projection,
+    )
+
+    bound = functional.bind_to_molecule_for_response(params, molecule)
+
+    assert float(bound.exact_exchange_fraction) == 0.0
+
+
+def test_response_hvp_does_not_materialize_grid_response_tensor(monkeypatch):
+    molecule = _make_toy_molecule()
+    non_hf_module = make_custom_semilocal_module(
+        channel_names=("rho",),
+        energy_density_channels_fn=lambda local_features: jnp.expand_dims(
+            local_features.rho,
+            axis=-1,
+        ),
+        name="response_hvp_semilocal",
+    )
+    functional = make_neural_xc_functional(
+        non_hf_module=non_hf_module,
+        input_feature_mode="canonical",
+        hidden_dims=(8,),
+        name="response_hvp_matrix_free",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(229), molecule)
+
+    def fail_tensor_path(*args, **kwargs):
+        raise AssertionError("response HVP should not materialize the grid Hessian tensor")
+
+    monkeypatch.setattr(
+        type(functional),
+        "_strict_point_response_tensor_fn",
+        fail_tensor_path,
+    )
+
+    bound = functional.bind_to_molecule_for_response(params, molecule)
+    tangent = jnp.ones((1, 5, molecule.ao.shape[0]))
+    response = bound.grid_response_hvp(molecule, tangent)
+
+    assert response.shape == tangent.shape
+    assert jnp.all(jnp.isfinite(response))
+
+
 def test_projected_hf_uses_current_hfx_nu_when_cached_hfx_local_is_present():
     dense_nu = _toy_hfx_nu_cache()
     reference = _make_toy_molecule()

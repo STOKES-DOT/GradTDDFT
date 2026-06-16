@@ -144,6 +144,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--grids-level", type=int, default=0)
     p.add_argument("--reference-scf-max-cycle", type=int, default=100)
     p.add_argument("--reference-scf-conv-tol", type=float, default=1e-10)
+    p.add_argument("--reference-jk-backend", choices=("full", "df"), default="full")
     p.add_argument(
         "--reference-cache",
         default="outputs/reference_cache/closed_shell_s1_references.h5",
@@ -432,6 +433,7 @@ def _reference_cache_key(
         "cart": True,
         "xc": str(args.xc),
         "grids_level": int(args.grids_level),
+        "reference_jk_backend": str(args.reference_jk_backend),
         "input_feature_mode": str(input_feature_mode),
         "include_hfx_channel": bool(args.include_hfx_channel),
         "include_pt2_channel": bool(args.include_pt2_channel),
@@ -578,6 +580,7 @@ def _save_reference_to_cache(
             group.attrs["basis"] = row.basis
             group.attrs["xc"] = str(args.xc)
             group.attrs["grids_level"] = int(args.grids_level)
+            group.attrs["reference_jk_backend"] = str(args.reference_jk_backend)
             group.attrs["input_feature_mode"] = str(input_feature_mode)
             group.attrs["include_hfx_channel"] = bool(args.include_hfx_channel)
             group.attrs["include_pt2_channel"] = bool(args.include_pt2_channel)
@@ -710,6 +713,7 @@ def _prepare_references(
             ),
             compute_local_pt2_features=bool(args.include_pt2_channel),
             array_backend="host" if host_reference_cache else "jax",
+            jk_backend=str(args.reference_jk_backend),
         )
         if host_reference_cache:
             reference = _host_cache_pytree(reference)
@@ -1744,6 +1748,7 @@ def main() -> None:
         "reference_csv": str(args.reference_csv),
         "basis": str(args.basis),
         "xc": str(args.xc),
+        "reference_jk_backend": str(args.reference_jk_backend),
         "training_mode": str(args.training_mode),
         "objective": f"s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'}",
         "evaluation_solver": "tda" if bool(args.eval_use_tda) else "casida",

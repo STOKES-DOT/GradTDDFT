@@ -66,22 +66,7 @@ def test_streaming_skip_final_evaluation_skips_final_step_eval():
     assert module._streaming_should_log_train_step(multi_step, step=1) is True
 
 
-def test_closed_shell_s1_training_accepts_low_memory_strict_hfx_response_mode():
-    module = _load_training_tool()
-
-    args = module.parse_args(
-        [
-            "--reference-csv",
-            "refs.csv",
-            "--strict-hfx-response-mode",
-            "low_memory",
-        ]
-    )
-
-    assert args.strict_hfx_response_mode == "low_memory"
-
-
-def test_closed_shell_s1_training_accepts_scf_hfx_grid_block_size_alias():
+def test_closed_shell_s1_training_accepts_scf_hfx_grid_block_size():
     module = _load_training_tool()
 
     args = module.parse_args(
@@ -92,57 +77,8 @@ def test_closed_shell_s1_training_accepts_scf_hfx_grid_block_size_alias():
             "256",
         ]
     )
-    legacy_args = module.parse_args(
-        [
-            "--reference-csv",
-            "refs.csv",
-            "--response-grid-chunk-size",
-            "128",
-        ]
-    )
 
     assert args.scf_hfx_grid_block_size == 256
-    assert legacy_args.scf_hfx_grid_block_size == 128
-
-
-def test_closed_shell_s1_training_accepts_response_hf_mode():
-    module = _load_training_tool()
-
-    default_args = module.parse_args(
-        [
-            "--reference-csv",
-            "refs.csv",
-        ]
-    )
-    approx_args = module.parse_args(
-        [
-            "--reference-csv",
-            "refs.csv",
-            "--response-hf-mode",
-            "approx",
-        ]
-    )
-    strict_args = module.parse_args(
-        [
-            "--reference-csv",
-            "refs.csv",
-            "--response-hf-mode",
-            "strict",
-        ]
-    )
-    with pytest.raises(SystemExit):
-        module.parse_args(
-            [
-                "--reference-csv",
-                "refs.csv",
-                "--response-hf-mode",
-                "none",
-            ]
-        )
-
-    assert default_args.response_hf_mode == "approx"
-    assert approx_args.response_hf_mode == "approx"
-    assert strict_args.response_hf_mode == "strict"
 
 
 def test_closed_shell_s1_training_accepts_functional_hfx_channel_toggle():
@@ -220,6 +156,43 @@ def test_reference_cache_defaults_to_hdf5_path():
 
     assert module._reference_cache_path(args) == Path(
         "outputs/reference_cache/closed_shell_s1_references.h5"
+    )
+
+
+def test_reference_jk_backend_is_switchable_and_part_of_cache_key():
+    module = _load_training_tool()
+
+    full_args = module.parse_args(["--reference-csv", "refs.csv"])
+    df_args = module.parse_args(
+        [
+            "--reference-csv",
+            "refs.csv",
+            "--reference-jk-backend",
+            "df",
+        ]
+    )
+    row = module.ReferenceRow(
+        system="water",
+        split="train",
+        atom="O 0 0 0; H 0 0 1; H 0 1 0",
+        unit="Angstrom",
+        charge=0,
+        spin=0,
+        basis="sto-3g",
+        ccsd_total_energy_h=-75.0,
+        s1_excitation_h=0.3,
+    )
+
+    assert full_args.reference_jk_backend == "full"
+    assert df_args.reference_jk_backend == "df"
+    assert module._reference_cache_key(
+        row,
+        args=full_args,
+        input_feature_mode="canonical",
+    ) != module._reference_cache_key(
+        row,
+        args=df_args,
+        input_feature_mode="canonical",
     )
 
 
@@ -468,20 +441,18 @@ def test_streaming_preserves_chunked_hfx_nu_api():
     assert np.allclose(streamed.target_density, np.ones((5,)))
 
 
-def test_training_cache_uses_chunked_hfx_nu_only_for_large_low_memory_refs(tmp_path):
+def test_training_cache_uses_chunked_hfx_nu_only_for_large_canonical_refs(tmp_path):
     h5py = pytest.importorskip("h5py")
     module = _load_training_tool()
 
     args = module.parse_args(
-        [
-            "--reference-csv",
-            "refs.csv",
-            "--input-feature-mode",
-            "canonical",
-            "--strict-hfx-response-mode",
-            "low_memory",
-        ]
-    )
+            [
+                "--reference-csv",
+                "refs.csv",
+                "--input-feature-mode",
+                "canonical",
+            ]
+        )
     path = tmp_path / "refs.h5"
     with h5py.File(path, "w") as handle:
         group = handle.create_group("molecule")
