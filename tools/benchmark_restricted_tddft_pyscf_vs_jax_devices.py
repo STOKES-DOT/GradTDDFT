@@ -177,7 +177,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--xc", default="pbe0")
     p.add_argument("--nstates", type=int, default=5)
     p.add_argument("--runs", type=int, default=2)
-    p.add_argument("--mode", choices=("dense", "davidson", "auto"), default="davidson")
+    p.add_argument("--mode", choices=("davidson", "auto"), default="davidson")
     p.add_argument("--grids-level", type=int, default=0)
     p.add_argument("--grid-ao-backend", choices=("pyscf", "jax"), default="pyscf")
     p.add_argument(

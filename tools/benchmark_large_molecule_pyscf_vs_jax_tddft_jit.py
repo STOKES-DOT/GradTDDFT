@@ -19,7 +19,7 @@ from pyscf import dft, gto
 from td_graddft import tdscf
 from td_graddft.features import restricted_grid_features_with_gradients
 from td_graddft.xc_backend.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
 from td_graddft.spectra import HARTREE_TO_EV
 
 
@@ -178,8 +178,6 @@ def _plot(path: Path, rows: list[TimingRow]) -> None:
         ("pyscf", "casida", "PySCF\nCasida"),
         ("jax_auto_jit_warm", "tda", "JAX auto jit\nTDA"),
         ("jax_auto_jit_warm", "casida", "JAX auto jit\nCasida"),
-        ("jax_dense_jit_warm", "tda", "JAX dense jit\nTDA"),
-        ("jax_dense_jit_warm", "casida", "JAX dense jit\nCasida"),
     ]
     means = []
     stds = []
@@ -229,17 +227,6 @@ def main() -> None:
         xc_functional=xc_func,
         eigensolver="auto",
     )
-    tda_dense = tdscf.TDA(
-        reference,
-        xc_functional=xc_func,
-        eigensolver="dense",
-    )
-    solver_dense = tdscf.TDDFT(
-        reference,
-        xc_functional=xc_func,
-        eigensolver="dense",
-    )
-
     def run_pyscf_tda():
         td = mf.TDA()
         td.nstates = nstates
@@ -258,16 +245,8 @@ def main() -> None:
     def run_jax_auto_casida():
         return solver_auto.kernel(nstates=nstates).excitation_energies
 
-    def run_jax_dense_tda():
-        return tda_dense.kernel(nstates=nstates).excitation_energies
-
-    def run_jax_dense_casida():
-        return solver_dense.kernel(nstates=nstates).excitation_energies
-
     jit_jax_auto_tda = jax.jit(run_jax_auto_tda)
     jit_jax_auto_casida = jax.jit(run_jax_auto_casida)
-    jit_jax_dense_tda = jax.jit(run_jax_dense_tda)
-    jit_jax_dense_casida = jax.jit(run_jax_dense_casida)
 
     rows: list[TimingRow] = []
 
@@ -295,8 +274,6 @@ def main() -> None:
 
     _block_and_time(jit_jax_auto_tda)
     _block_and_time(jit_jax_auto_casida)
-    _block_and_time(jit_jax_dense_tda)
-    _block_and_time(jit_jax_dense_casida)
 
     for repeat in range(1, int(args.repeats) + 1):
         elapsed, out = _block_and_time(jit_jax_auto_tda)
@@ -319,27 +296,6 @@ def main() -> None:
                 first_excitation_ha=float(np.asarray(out).reshape(-1)[0]),
             )
         )
-        elapsed, out = _block_and_time(jit_jax_dense_tda)
-        rows.append(
-            TimingRow(
-                backend="jax_dense_jit_warm",
-                task="tda",
-                repeat=repeat,
-                elapsed_s=elapsed,
-                first_excitation_ha=float(np.asarray(out).reshape(-1)[0]),
-            )
-        )
-        elapsed, out = _block_and_time(jit_jax_dense_casida)
-        rows.append(
-            TimingRow(
-                backend="jax_dense_jit_warm",
-                task="casida",
-                repeat=repeat,
-                elapsed_s=elapsed,
-                first_excitation_ha=float(np.asarray(out).reshape(-1)[0]),
-            )
-        )
-
     stem = f"{args.molecule}_{str(args.xc).lower()}_{str(args.basis).lower()}".replace("*", "star")
     csv_path = outdir / f"{stem}_pyscf_vs_jax_tddft_jit.csv"
     summary_path = outdir / f"{stem}_pyscf_vs_jax_tddft_jit_summary.txt"
@@ -363,8 +319,6 @@ def main() -> None:
     pyscf_casida_mean, pyscf_casida_std = _summarize(rows, "pyscf", "casida")
     jax_auto_tda_mean, jax_auto_tda_std = _summarize(rows, "jax_auto_jit_warm", "tda")
     jax_auto_casida_mean, jax_auto_casida_std = _summarize(rows, "jax_auto_jit_warm", "casida")
-    jax_dense_tda_mean, jax_dense_tda_std = _summarize(rows, "jax_dense_jit_warm", "tda")
-    jax_dense_casida_mean, jax_dense_casida_std = _summarize(rows, "jax_dense_jit_warm", "casida")
 
     first = lambda backend, task: [r.first_excitation_ha for r in rows if r.backend == backend and r.task == task][-1]
 
@@ -384,18 +338,10 @@ def main() -> None:
         f.write(f"jax_auto_jit_warm_tda_std_s = {jax_auto_tda_std:.10f}\n")
         f.write(f"jax_auto_jit_warm_casida_mean_s = {jax_auto_casida_mean:.10f}\n")
         f.write(f"jax_auto_jit_warm_casida_std_s = {jax_auto_casida_std:.10f}\n")
-        f.write(f"jax_dense_jit_warm_tda_mean_s = {jax_dense_tda_mean:.10f}\n")
-        f.write(f"jax_dense_jit_warm_tda_std_s = {jax_dense_tda_std:.10f}\n")
-        f.write(f"jax_dense_jit_warm_casida_mean_s = {jax_dense_casida_mean:.10f}\n")
-        f.write(f"jax_dense_jit_warm_casida_std_s = {jax_dense_casida_std:.10f}\n\n")
         f.write(f"tda_auto_speedup_vs_pyscf = {pyscf_tda_mean / jax_auto_tda_mean:.6f}\n")
-        f.write(f"casida_auto_speedup_vs_pyscf = {pyscf_casida_mean / jax_auto_casida_mean:.6f}\n")
-        f.write(f"tda_dense_speedup_vs_pyscf = {pyscf_tda_mean / jax_dense_tda_mean:.6f}\n")
-        f.write(f"casida_dense_speedup_vs_pyscf = {pyscf_casida_mean / jax_dense_casida_mean:.6f}\n\n")
+        f.write(f"casida_auto_speedup_vs_pyscf = {pyscf_casida_mean / jax_auto_casida_mean:.6f}\n\n")
         f.write(f"tda_auto_first_excitation_abs_diff_ev = {abs(first('jax_auto_jit_warm', 'tda') - first('pyscf', 'tda')) * HARTREE_TO_EV:.10f}\n")
         f.write(f"casida_auto_first_excitation_abs_diff_ev = {abs(first('jax_auto_jit_warm', 'casida') - first('pyscf', 'casida')) * HARTREE_TO_EV:.10f}\n")
-        f.write(f"tda_dense_first_excitation_abs_diff_ev = {abs(first('jax_dense_jit_warm', 'tda') - first('pyscf', 'tda')) * HARTREE_TO_EV:.10f}\n")
-        f.write(f"casida_dense_first_excitation_abs_diff_ev = {abs(first('jax_dense_jit_warm', 'casida') - first('pyscf', 'casida')) * HARTREE_TO_EV:.10f}\n")
 
     _plot(plot_path, rows)
 
@@ -405,8 +351,6 @@ def main() -> None:
     print(f"pyscf_casida_mean_s={pyscf_casida_mean:.6f}")
     print(f"jax_auto_jit_warm_tda_mean_s={jax_auto_tda_mean:.6f}")
     print(f"jax_auto_jit_warm_casida_mean_s={jax_auto_casida_mean:.6f}")
-    print(f"jax_dense_jit_warm_tda_mean_s={jax_dense_tda_mean:.6f}")
-    print(f"jax_dense_jit_warm_casida_mean_s={jax_dense_casida_mean:.6f}")
     print(f"summary={summary_path}")
     print(f"plot={plot_path}")
     print(f"csv={csv_path}")

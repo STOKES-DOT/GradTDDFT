@@ -239,6 +239,46 @@ def test_restricted_molecule_tree_flatten_keeps_dynamic_field_slots_stable():
     assert len(aux_none) == len(aux_array)
 
 
+def test_molecule_hfx_nu_api_is_static_pytree_metadata():
+    nao = 2
+    ngrids = 3
+    hfx_api = object()
+    restricted = molecules.RestrictedMolecule(
+        ao=jnp.ones((ngrids, nao)),
+        grid=molecules.QuadratureGrid(weights=jnp.ones((ngrids,)), coords=None),
+        dipole_integrals=jnp.zeros((3, nao, nao)),
+        rep_tensor=jnp.zeros((nao, nao, nao, nao)),
+        mo_coeff=jnp.eye(nao),
+        mo_occ=jnp.asarray([2.0, 0.0]),
+        mo_energy=jnp.asarray([-0.5, 0.2]),
+        rdm1=jnp.eye(nao),
+        h1e=jnp.eye(nao),
+        nuclear_repulsion=0.7,
+        hfx_nu_api=hfx_api,
+    )
+    unrestricted = molecules.UnrestrictedMolecule(
+        ao=jnp.ones((ngrids, nao)),
+        grid=molecules.QuadratureGrid(weights=jnp.ones((ngrids,)), coords=None),
+        dipole_integrals=jnp.zeros((3, nao, nao)),
+        rep_tensor=jnp.zeros((nao, nao, nao, nao)),
+        mo_coeff=jnp.stack([jnp.eye(nao), jnp.eye(nao)], axis=0),
+        mo_occ=jnp.stack([jnp.asarray([1.0, 0.0]), jnp.asarray([1.0, 0.0])], axis=0),
+        mo_energy=jnp.stack([jnp.asarray([-0.5, 0.2]), jnp.asarray([-0.5, 0.2])], axis=0),
+        rdm1=jnp.stack([jnp.eye(nao), jnp.eye(nao)], axis=0),
+        h1e=jnp.eye(nao),
+        nuclear_repulsion=0.7,
+        hfx_nu_api=hfx_api,
+    )
+
+    restricted_children, restricted_aux = restricted.tree_flatten()
+    unrestricted_children, unrestricted_aux = unrestricted.tree_flatten()
+
+    assert all(child is not hfx_api for child in restricted_children)
+    assert all(child is not hfx_api for child in unrestricted_children)
+    assert any(item is hfx_api for item in restricted_aux)
+    assert any(item is hfx_api for item in unrestricted_aux)
+
+
 def test_molecule_like_state_tree_flatten_keeps_dynamic_field_slots_stable():
     nao = 2
     ngrids = 3

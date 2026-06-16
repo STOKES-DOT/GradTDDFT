@@ -30,9 +30,9 @@ def _make_neural_xc_hybrid_functional(
     n_semilocal_channels: int | None = None,
     input_feature_mode: Literal["enhanced", "canonical"] = DEFAULT_INPUT_FEATURE_MODE,
     hf_input_mode: Literal["total_only", "spin_resolved"] = "spin_resolved",
+    include_hfx_channel: bool = False,
     include_pt2_channel: bool = False,
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected",
-    response_hf_mode: Literal["approx", "strict"] = "strict",
     response_pt2_mode: Literal["approx", "strict"] = "approx",
     strict_feature_alignment: bool = True,
     allow_experimental_jax_xc: bool = False,
@@ -44,8 +44,6 @@ def _make_neural_xc_hybrid_functional(
     sigmoid_scale_factor: float = 2.0,
     density_floor: float = 1e-12,
     response_density_floor: float | None = 1e-5,
-    response_grid_chunk_size: int | None = 1024,
-    strict_hfx_response_mode: Literal["dense", "low_memory"] = "dense",
     kernel_clip: float = 5.0,
     response_kernel_clip: float | None = 5.0,
     hfx_channels: int = 2,
@@ -85,7 +83,11 @@ def _make_neural_xc_hybrid_functional(
         raise ValueError("n_semilocal_channels must be a positive integer.")
 
     dims = normalize_hidden_dims(hidden_dims)
-    output_dim = n_semilocal + 1 + int(bool(include_pt2_channel))
+    output_dim = (
+        n_semilocal
+        + int(bool(include_pt2_channel))
+        + int(bool(include_hfx_channel))
+    )
     block_activation = nn.elu if activation is nn.tanh else activation
     model = ResidualMixingMLP(
         hidden_dims=dims,
@@ -102,16 +104,14 @@ def _make_neural_xc_hybrid_functional(
         semilocal_energy_density_fn=semilocal_energy_density_fn,
         input_feature_mode=input_feature_mode,
         hf_input_mode=hf_input_mode,
+        include_hfx_channel=bool(include_hfx_channel),
         include_pt2_channel=bool(include_pt2_channel),
         pt2_channel_mode=pt2_channel_mode,
-        response_hf_mode=response_hf_mode,
         response_pt2_mode=response_pt2_mode,
         strict_feature_alignment=bool(strict_feature_alignment),
         allow_experimental_jax_xc=bool(allow_experimental_jax_xc),
         density_floor=density_floor,
         response_density_floor=response_density_floor,
-        response_grid_chunk_size=response_grid_chunk_size,
-        strict_hfx_response_mode=strict_hfx_response_mode,
         kernel_clip=kernel_clip,
         response_kernel_clip=response_kernel_clip,
         hfx_channels=max(int(hfx_channels), 1),
@@ -130,9 +130,9 @@ def make_neural_xc_functional(
     n_semilocal_channels: int | None = None,
     input_feature_mode: Literal["enhanced", "canonical"] = DEFAULT_INPUT_FEATURE_MODE,
     hf_input_mode: Literal["total_only", "spin_resolved"] = "spin_resolved",
+    include_hfx_channel: bool = False,
     include_pt2_channel: bool = False,
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected",
-    response_hf_mode: Literal["approx", "strict"] = "strict",
     response_pt2_mode: Literal["approx", "strict"] = "approx",
     strict_feature_alignment: bool = True,
     allow_experimental_jax_xc: bool = False,
@@ -144,8 +144,6 @@ def make_neural_xc_functional(
     sigmoid_scale_factor: float = 2.0,
     density_floor: float = 1e-12,
     response_density_floor: float | None = 1e-5,
-    response_grid_chunk_size: int | None = 1024,
-    strict_hfx_response_mode: Literal["dense", "low_memory"] = "dense",
     kernel_clip: float = 5.0,
     response_kernel_clip: float | None = 5.0,
     hfx_channels: int = 2,
@@ -158,9 +156,9 @@ def make_neural_xc_functional(
         n_semilocal_channels=n_semilocal_channels,
         input_feature_mode=input_feature_mode,
         hf_input_mode=hf_input_mode,
+        include_hfx_channel=include_hfx_channel,
         include_pt2_channel=include_pt2_channel,
         pt2_channel_mode=pt2_channel_mode,
-        response_hf_mode=response_hf_mode,
         response_pt2_mode=response_pt2_mode,
         strict_feature_alignment=strict_feature_alignment,
         allow_experimental_jax_xc=allow_experimental_jax_xc,
@@ -172,8 +170,6 @@ def make_neural_xc_functional(
         sigmoid_scale_factor=sigmoid_scale_factor,
         density_floor=density_floor,
         response_density_floor=response_density_floor,
-        response_grid_chunk_size=response_grid_chunk_size,
-        strict_hfx_response_mode=strict_hfx_response_mode,
         kernel_clip=kernel_clip,
         response_kernel_clip=response_kernel_clip,
         hfx_channels=hfx_channels,

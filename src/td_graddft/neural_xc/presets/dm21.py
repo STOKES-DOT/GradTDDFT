@@ -5,7 +5,6 @@ from dataclasses import replace
 from ..config import ChannelSpec, ComponentSpec, Config, NetworkSpec
 from ..defaults import (
     DEFAULT_NEURAL_XC_HF_INPUT_MODE,
-    DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
     DEFAULT_INPUT_FEATURE_MODE,
@@ -30,7 +29,6 @@ def dm21(
         or ChannelSpec(
             hf=DEFAULT_NEURAL_XC_HF_INPUT_MODE,
             pt2="off",
-            response_hf=DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
             response_pt2=DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE,
         ),
         network=network

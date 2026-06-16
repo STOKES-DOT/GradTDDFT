@@ -121,21 +121,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_INPUT_FEATURE_MODE,
     )
     p.add_argument("--include-pt2-channel", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--include-hfx-channel", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument(
         "--pt2-channel-mode",
         choices=("scaled_projected", "local_exact"),
         default="scaled_projected",
     )
-    p.add_argument("--response-grid-chunk-size", type=int, default=1024)
     p.add_argument(
-        "--strict-hfx-response-mode",
-        choices=("dense", "low_memory"),
-        default="dense",
-        help=(
-            "Implementation mode for strict HFX response. 'low_memory' keeps "
-            "response_hf_mode=strict but accumulates the HFX response matrix "
-            "in grid chunks."
-        ),
+        "--scf-hfx-grid-block-size",
+        dest="scf_hfx_grid_block_size",
+        type=int,
+        default=1024,
+        help="Grid block size for SCF local-HF HFX nu cache reads and Fock contractions.",
     )
     p.add_argument("--semilocal-xc", nargs="+", default=list(b3lyp_component_basis()))
     p.add_argument("--s1-weight", type=float, default=1.0)
@@ -367,6 +364,10 @@ def _use_host_reference_cache(args: argparse.Namespace) -> bool:
     return bool(args.stream_train)
 
 
+def _scf_hfx_grid_block_size(args: argparse.Namespace, *, default: int = 1024) -> int:
+    return int(getattr(args, "scf_hfx_grid_block_size", default))
+
+
 def _lr_transition_steps(args: argparse.Namespace, *, train_size: int) -> int:
     transition_steps = int(args.lr_decay_every)
     if (
@@ -386,6 +387,21 @@ def _stream_lr_schedule_index(
     if str(getattr(args, "stream_update_mode", "accumulate")) == "per_molecule":
         return max(0, int(step) - 1) * max(1, int(train_size))
     return max(0, int(step) - 1)
+
+
+def _streaming_should_eval_step(args: argparse.Namespace, *, step: int) -> bool:
+    final_step = int(step) == int(args.steps)
+    if final_step and bool(args.skip_final_evaluation):
+        return False
+    return final_step or int(step) % max(1, int(args.eval_interval)) == 0
+
+
+def _streaming_should_log_train_step(args: argparse.Namespace, *, step: int) -> bool:
+    return (
+        int(step) == 1
+        or int(step) == int(args.steps)
+        or int(step) % max(1, int(args.eval_interval)) == 0
+    )
 
 
 def _host_cache_pytree(tree: Any) -> Any:
@@ -417,6 +433,7 @@ def _reference_cache_key(
         "xc": str(args.xc),
         "grids_level": int(args.grids_level),
         "input_feature_mode": str(input_feature_mode),
+        "include_hfx_channel": bool(args.include_hfx_channel),
         "include_pt2_channel": bool(args.include_pt2_channel),
     }
     digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
@@ -478,8 +495,6 @@ def _cache_hfx_nu_storage(
 ) -> str:
     if str(input_feature_mode) != "canonical":
         return "array"
-    if str(getattr(args, "strict_hfx_response_mode", "dense")) != "low_memory":
-        return "array"
     if "hfx_nu" not in molecule_group:
         return "array"
     if "atom_coords" not in molecule_group:
@@ -522,7 +537,7 @@ def _load_reference_from_cache(
                 molecule_group,
                 array_backend="host" if host_reference_cache else "jax",
                 hfx_nu_storage=hfx_nu_storage,
-                hfx_nu_chunk_size=int(getattr(args, "response_grid_chunk_size", 512)),
+                hfx_nu_chunk_size=_scf_hfx_grid_block_size(args, default=512),
             )
             molecule = _maybe_reattach_chunked_hfx_nu_api(
                 row,
@@ -564,6 +579,7 @@ def _save_reference_to_cache(
             group.attrs["xc"] = str(args.xc)
             group.attrs["grids_level"] = int(args.grids_level)
             group.attrs["input_feature_mode"] = str(input_feature_mode)
+            group.attrs["include_hfx_channel"] = bool(args.include_hfx_channel)
             group.attrs["include_pt2_channel"] = bool(args.include_pt2_channel)
             write_restricted_molecule(group.require_group("molecule"), molecule)
     except Exception as exc:
@@ -591,7 +607,6 @@ def _streaming_average_eval(
         "s1_mae": float(np.mean(s1_maes)),
         "s1_mse": float(np.mean(s1_mses)),
     }
-
 
 def _load_reference_rows(path: Path, *, basis: str) -> list[ReferenceRow]:
     rows: list[ReferenceRow] = []
@@ -687,8 +702,12 @@ def _prepare_references(
         )
         reference = restricted_reference_from_pyscf(
             mf,
-            compute_local_hfx_features=(input_feature_mode == "canonical"),
-            compute_local_hfx_aux=(input_feature_mode == "canonical"),
+            compute_local_hfx_features=(
+                bool(args.include_hfx_channel) and input_feature_mode == "canonical"
+            ),
+            compute_local_hfx_aux=(
+                bool(args.include_hfx_channel) and input_feature_mode == "canonical"
+            ),
             compute_local_pt2_features=bool(args.include_pt2_channel),
             array_backend="host" if host_reference_cache else "jax",
         )
@@ -1058,12 +1077,20 @@ def _train_streaming(
         param_update_norm_history.append(update_norm_val)
         nonfinite_grad_fraction_history.append(nonfinite_grad_fraction_val)
 
-        should_eval = (
-            step == 1
-            or step == int(args.steps)
-            or step % max(1, int(args.eval_interval)) == 0
+        current_lr = (
+            float(
+                lr_schedule(
+                    _stream_lr_schedule_index(
+                        args,
+                        step=step,
+                        train_size=len(train_dataset),
+                    )
+                )
+            )
+            if lr_schedule is not None
+            else float(args.learning_rate)
         )
-        if should_eval:
+        if _streaming_should_eval_step(args, step=step):
             eval_train_loss, eval_train_metrics = _streaming_average_eval(
                 state.params,
                 train_dataset,
@@ -1084,19 +1111,6 @@ def _train_streaming(
                 best_score = score
                 best_params = state.params
                 best_step = step
-            current_lr = (
-                float(
-                    lr_schedule(
-                        _stream_lr_schedule_index(
-                            args,
-                            step=step,
-                            train_size=len(train_dataset),
-                        )
-                    )
-                )
-                if lr_schedule is not None
-                else float(args.learning_rate)
-            )
             logger.log(
                 "[train] "
                 f"step={step:4d}/{int(args.steps):4d} "
@@ -1109,18 +1123,44 @@ def _train_streaming(
                 f"update_norm={update_norm_val:.8e} "
                 f"lr={current_lr:.8e}"
             )
+        elif _streaming_should_log_train_step(args, step=step):
+            logger.log(
+                "[train] "
+                f"step={step:4d}/{int(args.steps):4d} "
+                f"train_loss={train_loss_val:.8e} "
+                f"train_s1_mae={train_s1_mae_val:.8e} "
+                "val_loss=nan val_s1_mae=nan "
+                f"grad_norm={grad_norm_val:.8e} "
+                f"grad_abs_max={grad_abs_max_val:.8e} "
+                f"update_norm={update_norm_val:.8e} "
+                f"lr={current_lr:.8e} "
+                "eval=skipped"
+            )
 
     elapsed_s = time.perf_counter() - t0
-    final_train_loss, final_train_metrics = _streaming_average_eval(
-        state.params,
-        train_dataset,
-        eval_kernel,
-    )
-    final_val_loss, final_val_metrics = _streaming_average_eval(
-        state.params,
-        val_dataset,
-        eval_kernel,
-    )
+    if bool(args.skip_final_evaluation):
+        final_train_loss = float(loss_history[-1])
+        final_train_metrics = {
+            "s1_mae": float(s1_mae_history[-1]),
+            "s1_mse": float("nan"),
+        }
+        final_val_loss = float("nan")
+        final_val_metrics = {"s1_mae": float("nan"), "s1_mse": float("nan")}
+        if not np.isfinite(best_score):
+            best_params = state.params
+            best_step = int(args.steps)
+            best_score = float(final_train_metrics["s1_mae"])
+    else:
+        final_train_loss, final_train_metrics = _streaming_average_eval(
+            state.params,
+            train_dataset,
+            eval_kernel,
+        )
+        final_val_loss, final_val_metrics = _streaming_average_eval(
+            state.params,
+            val_dataset,
+            eval_kernel,
+        )
     logger.log(
         "[train] done "
         f"final_train_loss={final_train_loss:.8e} "
@@ -1168,10 +1208,9 @@ def _train(
         semilocal_xc=tuple(str(name) for name in args.semilocal_xc),
         hidden_dims=tuple(int(value) for value in args.hidden_dims),
         input_feature_mode=_normalize_input_feature_mode(str(args.input_feature_mode)),
+        include_hfx_channel=bool(args.include_hfx_channel),
         include_pt2_channel=bool(args.include_pt2_channel),
         pt2_channel_mode=str(args.pt2_channel_mode),
-        response_grid_chunk_size=int(args.response_grid_chunk_size),
-        strict_hfx_response_mode=str(args.strict_hfx_response_mode),
         name=f"neural_xc_closed_shell_{str(args.training_mode)}",
     )
     training_config = _ground_state_training_config(
@@ -1514,9 +1553,9 @@ def main() -> None:
     logger.log(
         "Config: "
         f"reference_csv={args.reference_csv}, basis={args.basis}, xc={args.xc}, "
-        f"steps={args.steps}, mode={args.training_mode}, include_pt2_channel={bool(args.include_pt2_channel)}, "
+        f"steps={args.steps}, mode={args.training_mode}, include_hfx_channel={bool(args.include_hfx_channel)}, "
+        f"include_pt2_channel={bool(args.include_pt2_channel)}, "
         f"pt2_channel_mode={args.pt2_channel_mode if bool(args.include_pt2_channel) else 'none'}, "
-        f"strict_hfx_response_mode={args.strict_hfx_response_mode}, "
         f"stream_train={bool(args.stream_train)}, stream_update_mode={args.stream_update_mode}, "
         f"train={len(train_rows)}, validation={len(val_rows)}, test={len(test_rows)}"
     )
@@ -1570,10 +1609,10 @@ def main() -> None:
                 "xc": str(args.xc),
                 "training_mode": str(args.training_mode),
                 "skip_final_evaluation": True,
+                "include_hfx_channel": bool(args.include_hfx_channel),
                 "include_pt2_channel": bool(args.include_pt2_channel),
                 "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
-                "response_grid_chunk_size": int(args.response_grid_chunk_size),
-                "strict_hfx_response_mode": str(args.strict_hfx_response_mode),
+                "scf_hfx_grid_block_size": _scf_hfx_grid_block_size(args),
                 "stream_train": bool(args.stream_train),
                 "stream_update_mode": str(args.stream_update_mode),
                 "lr_decay_every": int(args.lr_decay_every),
@@ -1596,10 +1635,10 @@ def main() -> None:
             "objective": f"s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'}",
             "evaluation_solver": None,
             "skip_final_evaluation": True,
+            "include_hfx_channel": bool(args.include_hfx_channel),
             "include_pt2_channel": bool(args.include_pt2_channel),
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
-            "response_grid_chunk_size": int(args.response_grid_chunk_size),
-            "strict_hfx_response_mode": str(args.strict_hfx_response_mode),
+            "scf_hfx_grid_block_size": _scf_hfx_grid_block_size(args),
             "stream_train": bool(args.stream_train),
             "stream_update_mode": str(args.stream_update_mode),
             "lr_decay_every": int(args.lr_decay_every),
@@ -1681,10 +1720,10 @@ def main() -> None:
             "scf_implicit_diff_tolerance": float(args.scf_implicit_diff_tolerance),
             "scf_implicit_diff_regularization": float(args.scf_implicit_diff_regularization),
             "scf_implicit_diff_restart": int(args.scf_implicit_diff_restart),
+            "include_hfx_channel": bool(args.include_hfx_channel),
             "include_pt2_channel": bool(args.include_pt2_channel),
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
-            "response_grid_chunk_size": int(args.response_grid_chunk_size),
-            "strict_hfx_response_mode": str(args.strict_hfx_response_mode),
+            "scf_hfx_grid_block_size": _scf_hfx_grid_block_size(args),
             "stream_train": bool(args.stream_train),
             "stream_update_mode": str(args.stream_update_mode),
             "lr_decay_every": int(args.lr_decay_every),
@@ -1716,10 +1755,10 @@ def main() -> None:
         "scf_implicit_diff_tolerance": float(args.scf_implicit_diff_tolerance),
         "scf_implicit_diff_regularization": float(args.scf_implicit_diff_regularization),
         "scf_implicit_diff_restart": int(args.scf_implicit_diff_restart),
+        "include_hfx_channel": bool(args.include_hfx_channel),
         "include_pt2_channel": bool(args.include_pt2_channel),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
-        "response_grid_chunk_size": int(args.response_grid_chunk_size),
-        "strict_hfx_response_mode": str(args.strict_hfx_response_mode),
+        "scf_hfx_grid_block_size": _scf_hfx_grid_block_size(args),
         "stream_train": bool(args.stream_train),
         "stream_update_mode": str(args.stream_update_mode),
         "lr_decay_every": int(args.lr_decay_every),

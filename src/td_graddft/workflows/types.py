@@ -14,7 +14,6 @@ from td_graddft.neural_xc import (
     DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_MODE,
     DEFAULT_NEURAL_XC_DENSITY_SUPERVISION,
     DEFAULT_NEURAL_XC_HF_INPUT_MODE,
-    DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
     DEFAULT_INPUT_FEATURE_MODE,
@@ -38,7 +37,6 @@ class NeuralXCTrainingConfig:
     dm21_scf_regularization_weight: float = 0.0
     orbital_energy_constraint_weight: float = 0.0
     orbital_energy_constraint_window: int = 10
-    janak_frontier_constraint_weight: float = 0.0
     density_supervision: Literal["spin_summed", "spin_resolved"] = DEFAULT_NEURAL_XC_DENSITY_SUPERVISION
     coefficient_prior_weight: float = 0.0
     coefficient_prior_values: tuple[float, ...] | None = None
@@ -75,7 +73,6 @@ class NeuralXCTrainingConfig:
     hf_input_mode: Literal["total_only", "spin_resolved"] = DEFAULT_NEURAL_XC_HF_INPUT_MODE
     include_pt2_channel: bool = False
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected"
-    response_hf_mode: Literal["approx", "strict"] = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE
     response_pt2_mode: Literal["approx", "strict"] = (
         DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE
     )
@@ -91,14 +88,6 @@ class NeuralXCTrainingConfig:
     strict_graddft_ground_state: bool = False
     fractional_linearity_weight: float = 0.0
     fractional_linearity_delta: float = 0.1
-    janak_frontier_mode: Literal[
-        "finite_difference",
-        "autodiff",
-        "full_scf_ad",
-        "fixed_orbital_ad",
-        "half_charge_ad",
-    ] = "finite_difference"
-    janak_frontier_delta: float = 0.1
     dm21_scf_gap_floor: float = 1e-3
     scf_max_cycle: int = 12
     scf_damping: float = 0.25

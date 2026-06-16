@@ -228,6 +228,8 @@ def read_unrestricted_molecule(
     group: Any,
     *,
     array_backend: str = "jax",
+    hfx_nu_storage: str = "array",
+    hfx_nu_chunk_size: int = 512,
 ) -> UnrestrictedMolecule:
     """Read an unrestricted molecule saved by :func:`write_unrestricted_molecule`."""
 
@@ -236,10 +238,23 @@ def read_unrestricted_molecule(
         weights=_read_array(grid_group, "weights", array_backend=array_backend),
         coords=_read_array(grid_group, "coords", array_backend=array_backend),
     )
-    kwargs = {
-        field: _read_array(group, field, array_backend=array_backend)
-        for field in _ARRAY_FIELDS
-    }
+    kwargs = {}
+    for field in _ARRAY_FIELDS:
+        if field == "hfx_nu" and hfx_nu_storage == "chunked":
+            kwargs[field] = None
+        else:
+            kwargs[field] = _read_array(group, field, array_backend=array_backend)
+    hfx_nu_api = None
+    if hfx_nu_storage == "chunked" and "hfx_nu" in group:
+        from td_graddft.neural_xc.inputs import ChunkedHFXNu
+
+        hfx_nu_api = ChunkedHFXNu.from_hdf5_dataset(
+            str(group.file.filename),
+            str(group["hfx_nu"].name),
+            chunk_size=int(hfx_nu_chunk_size),
+        )
+    elif hfx_nu_storage != "array":
+        raise ValueError(f"Unsupported hfx_nu_storage={hfx_nu_storage!r}.")
     return UnrestrictedMolecule(
         ao=kwargs.pop("ao"),
         grid=grid,
@@ -272,6 +287,7 @@ def read_unrestricted_molecule(
         hfx_omega_values=kwargs.pop("hfx_omega_values"),
         hfx_local=kwargs.pop("hfx_local"),
         hfx_nu=kwargs.pop("hfx_nu"),
+        hfx_nu_api=hfx_nu_api,
         pt2_local=kwargs.pop("pt2_local"),
         scf_initial_density=kwargs.pop("scf_initial_density"),
     )

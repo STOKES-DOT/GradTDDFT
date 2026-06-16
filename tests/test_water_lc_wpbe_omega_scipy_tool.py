@@ -10,10 +10,10 @@ import numpy as np
 _TOOL_PATH = (
     Path(__file__).resolve().parents[1]
     / "tools"
-    / "search_water_lc_wpbe_omega_scipy.py"
+    / "search_water_lc_wpbe_omega_td_graddft.py"
 )
 _SPEC = importlib.util.spec_from_file_location(
-    "search_water_lc_wpbe_omega_scipy",
+    "search_water_lc_wpbe_omega_td_graddft",
     _TOOL_PATH,
 )
 assert _SPEC is not None

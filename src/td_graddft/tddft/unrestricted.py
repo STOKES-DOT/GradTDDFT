@@ -12,11 +12,16 @@ from jax.lax import Precision
 from jaxtyping import Array
 
 from .cisd import unrestricted_cisd_second_order_correction
-from .eigensolvers import davidson_lowest_tdhf, davidson_lowest_symmetric, _solver_dtype
+from .eigensolvers import (
+    davidson_lowest_tdhf,
+    davidson_lowest_symmetric,
+    _solver_dtype,
+)
 from ._utils import (
     _resolve_xc_functional,
     _transition_densities_on_grid,
 )
+from .response import _needs_exchange_terms
 
 
 def _pytree_dataclass(cls):
@@ -62,14 +67,12 @@ class UnrestrictedTDDFTResult:
 class _UnrestrictedResponseOperatorData:
     orbital_energy_differences_alpha: Array
     orbital_energy_differences_beta: Array
-    a_aa: Array
-    a_ab: Array
-    a_ba: Array
-    a_bb: Array
-    b_aa: Array
-    b_ab: Array
-    b_ba: Array
-    b_bb: Array
+    orbo_alpha: Array
+    orbv_alpha: Array
+    orbo_beta: Array
+    orbv_beta: Array
+    ao_response_action_fn: Callable[[Array, Array], tuple[Array, Array]]
+    xc_response_action_fn: Callable[[Array, Array], tuple[Array, Array]] | None = None
 
 
 def _unrestricted_orbital_data(
@@ -188,191 +191,126 @@ def _spin_resolved_kernel_on_grid(
     return _normalize_spin_kernel_values(raw_kernel, dtype=dtype)
 
 
-def _build_unrestricted_response_blocks(
-    molecule: Any,
-    resolved_xc: Any | None,
+def _unrestricted_transition_density(orbo: Array, orbv: Array, values: Array, *, bottom: bool) -> Array:
+    values = jnp.asarray(values)
+    if bottom:
+        return jnp.einsum(
+            "nia,pi,qa->npq",
+            values,
+            orbo,
+            orbv,
+            precision=Precision.HIGHEST,
+        )
+    return jnp.einsum(
+        "nia,pa,qi->npq",
+        values,
+        orbv,
+        orbo,
+        precision=Precision.HIGHEST,
+    )
+
+
+def _unrestricted_project_response(
+    response_ao: Array,
+    orbo: Array,
+    orbv: Array,
     *,
-    occupation_tolerance: float,
-) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array, Array]:
+    bottom: bool,
+) -> Array:
+    if bottom:
+        return jnp.einsum(
+            "npq,pi,qa->nia",
+            response_ao,
+            orbo,
+            orbv,
+            precision=Precision.HIGHEST,
+        )
+    return jnp.einsum(
+        "npq,qi,pa->nia",
+        response_ao,
+        orbo,
+        orbv,
+        precision=Precision.HIGHEST,
+    )
+
+
+def _jk_from_full_eri(eri: Array, density: Array) -> tuple[Array, Array]:
+    j_mat = jnp.einsum("pqrs,nrs->npq", eri, density, precision=Precision.HIGHEST)
+    k_mat = jnp.einsum("prqs,nrs->npq", eri, density, precision=Precision.HIGHEST)
+    return j_mat, k_mat
+
+
+def _j_from_full_eri(eri: Array, density: Array) -> Array:
+    return jnp.einsum("pqrs,nrs->npq", eri, density, precision=Precision.HIGHEST)
+
+
+def _unrestricted_ao_response_action(
+    molecule: Any,
+    hybrid_fraction: Array,
+    *,
+    include_exchange: bool,
+    dtype: Any,
+) -> Callable[[Array, Array], tuple[Array, Array]]:
     if getattr(molecule, "rep_tensor", None) is None:
         raise ValueError("The molecule must provide rep_tensor for Hartree/exchange response.")
+    eri = jnp.asarray(molecule.rep_tensor, dtype=dtype)
+    alpha = jnp.asarray(hybrid_fraction, dtype=dtype)
 
+    def action(density_alpha: Array, density_beta: Array) -> tuple[Array, Array]:
+        density_alpha = jnp.asarray(density_alpha, dtype=dtype)
+        density_beta = jnp.asarray(density_beta, dtype=dtype)
+        if not include_exchange:
+            j_total = _j_from_full_eri(eri, density_alpha) + _j_from_full_eri(
+                eri,
+                density_beta,
+            )
+            return j_total, j_total
+        j_alpha, k_alpha = _jk_from_full_eri(eri, density_alpha)
+        j_beta, k_beta = _jk_from_full_eri(eri, density_beta)
+        j_total = j_alpha + j_beta
+        return j_total - alpha * k_alpha, j_total - alpha * k_beta
+
+    return action
+
+
+def _unrestricted_grid_xc_response_action(
+    molecule: Any,
+    resolved_xc: Any | None,
+    orbo_a: Array,
+    orbv_a: Array,
+    orbo_b: Array,
+    orbv_b: Array,
+    *,
+    dtype: Any,
+) -> Callable[[Array, Array], tuple[Array, Array]] | None:
+    if resolved_xc is None:
+        return None
     ao = jnp.asarray(molecule.ao)
-    weights = jnp.asarray(molecule.grid.weights)
-    eri = jnp.asarray(molecule.rep_tensor)
-    orbo_a, orbv_a, orbo_b, orbv_b, de_a, de_b = _unrestricted_orbital_data(
+    weights = jnp.asarray(molecule.grid.weights, dtype=dtype)
+    rho_a, rho_b = _spin_densities_on_grid(molecule)
+    f_aa, f_ab, f_bb = _spin_resolved_kernel_on_grid(
         molecule,
-        occupation_tolerance,
+        resolved_xc,
+        rho_a,
+        rho_b,
+        dtype,
     )
+    weighted_f_aa = weights * f_aa
+    weighted_f_ab = weights * f_ab
+    weighted_f_bb = weights * f_bb
+    rho_ov_a = _transition_densities_on_grid(ao, orbo_a, orbv_a)
+    rho_ov_b = _transition_densities_on_grid(ao, orbo_b, orbv_b)
 
-    nocca, nvira = de_a.shape
-    noccb, nvirb = de_b.shape
-    diag_aa = jnp.einsum(
-        "ia,ij,ab->iajb",
-        de_a,
-        jnp.eye(nocca, dtype=de_a.dtype),
-        jnp.eye(nvira, dtype=de_a.dtype),
-        precision=Precision.HIGHEST,
-    )
-    diag_bb = jnp.einsum(
-        "ia,ij,ab->iajb",
-        de_b,
-        jnp.eye(noccb, dtype=de_b.dtype),
-        jnp.eye(nvirb, dtype=de_b.dtype),
-        precision=Precision.HIGHEST,
-    )
+    def action(alpha: Array, beta: Array) -> tuple[Array, Array]:
+        proj_a = jnp.einsum("ria,nia->nr", rho_ov_a, alpha, precision=Precision.HIGHEST)
+        proj_b = jnp.einsum("ria,nia->nr", rho_ov_b, beta, precision=Precision.HIGHEST)
+        pot_a = weighted_f_aa[None, :] * proj_a + weighted_f_ab[None, :] * proj_b
+        pot_b = weighted_f_ab[None, :] * proj_a + weighted_f_bb[None, :] * proj_b
+        out_a = jnp.einsum("ria,nr->nia", rho_ov_a, pot_a, precision=Precision.HIGHEST)
+        out_b = jnp.einsum("ria,nr->nia", rho_ov_b, pot_b, precision=Precision.HIGHEST)
+        return out_a, out_b
 
-    # A_ia,jb Coulomb term uses (ia|jb); B_ia,jb uses (ia|bj).
-    a_coul_aa = jnp.einsum(
-        "pqrs,pi,qa,rj,sb->iajb",
-        eri,
-        orbo_a,
-        orbv_a,
-        orbo_a,
-        orbv_a,
-        precision=Precision.HIGHEST,
-    )
-    a_coul_bb = jnp.einsum(
-        "pqrs,pi,qa,rj,sb->iajb",
-        eri,
-        orbo_b,
-        orbv_b,
-        orbo_b,
-        orbv_b,
-        precision=Precision.HIGHEST,
-    )
-    a_coul_ab = jnp.einsum(
-        "pqrs,pi,qa,rj,sb->iajb",
-        eri,
-        orbo_a,
-        orbv_a,
-        orbo_b,
-        orbv_b,
-        precision=Precision.HIGHEST,
-    )
-    b_coul_aa = jnp.einsum(
-        "pqrs,pi,qa,rb,sj->iajb",
-        eri,
-        orbo_a,
-        orbv_a,
-        orbv_a,
-        orbo_a,
-        precision=Precision.HIGHEST,
-    )
-    b_coul_bb = jnp.einsum(
-        "pqrs,pi,qa,rb,sj->iajb",
-        eri,
-        orbo_b,
-        orbv_b,
-        orbv_b,
-        orbo_b,
-        precision=Precision.HIGHEST,
-    )
-    b_coul_ab = jnp.einsum(
-        "pqrs,pi,qa,rb,sj->iajb",
-        eri,
-        orbo_a,
-        orbv_a,
-        orbv_b,
-        orbo_b,
-        precision=Precision.HIGHEST,
-    )
-
-    hybrid_fraction = jnp.asarray(
-        getattr(molecule, "exact_exchange_fraction", 0.0),
-        dtype=de_a.dtype,
-    )
-    if resolved_xc is not None:
-        hybrid_fraction = jnp.asarray(
-            getattr(resolved_xc, "exact_exchange_fraction", hybrid_fraction),
-            dtype=de_a.dtype,
-        )
-
-    a_exch_aa = jnp.einsum(
-        "pqrs,pi,qj,ra,sb->iajb",
-        eri,
-        orbo_a,
-        orbo_a,
-        orbv_a,
-        orbv_a,
-        precision=Precision.HIGHEST,
-    )
-    a_exch_bb = jnp.einsum(
-        "pqrs,pi,qj,ra,sb->iajb",
-        eri,
-        orbo_b,
-        orbo_b,
-        orbv_b,
-        orbv_b,
-        precision=Precision.HIGHEST,
-    )
-    b_exch_aa = jnp.einsum(
-        "pqrs,pi,qb,ra,sj->iajb",
-        eri,
-        orbo_a,
-        orbv_a,
-        orbv_a,
-        orbo_a,
-        precision=Precision.HIGHEST,
-    )
-    b_exch_bb = jnp.einsum(
-        "pqrs,pi,qb,ra,sj->iajb",
-        eri,
-        orbo_b,
-        orbv_b,
-        orbv_b,
-        orbo_b,
-        precision=Precision.HIGHEST,
-    )
-
-    xc_aa = jnp.zeros_like(a_coul_aa)
-    xc_bb = jnp.zeros_like(a_coul_bb)
-    xc_ab = jnp.zeros_like(a_coul_ab)
-    if resolved_xc is not None:
-        rho_a, rho_b = _spin_densities_on_grid(molecule)
-        f_aa, f_ab, f_bb = _spin_resolved_kernel_on_grid(
-            molecule,
-            resolved_xc,
-            rho_a,
-            rho_b,
-            de_a.dtype,
-        )
-        weighted_f_aa = weights * f_aa
-        weighted_f_ab = weights * f_ab
-        weighted_f_bb = weights * f_bb
-        rho_ov_a = _transition_densities_on_grid(ao, orbo_a, orbv_a)
-        rho_ov_b = _transition_densities_on_grid(ao, orbo_b, orbv_b)
-        xc_aa = jnp.einsum(
-            "ria,rjb,r->iajb",
-            rho_ov_a,
-            rho_ov_a,
-            weighted_f_aa,
-            precision=Precision.HIGHEST,
-        )
-        xc_bb = jnp.einsum(
-            "ria,rjb,r->iajb",
-            rho_ov_b,
-            rho_ov_b,
-            weighted_f_bb,
-            precision=Precision.HIGHEST,
-        )
-        xc_ab = jnp.einsum(
-            "ria,rjb,r->iajb",
-            rho_ov_a,
-            rho_ov_b,
-            weighted_f_ab,
-            precision=Precision.HIGHEST,
-        )
-
-    a_aa = diag_aa + a_coul_aa - hybrid_fraction * a_exch_aa + xc_aa
-    a_bb = diag_bb + a_coul_bb - hybrid_fraction * a_exch_bb + xc_bb
-    b_aa = b_coul_aa - hybrid_fraction * b_exch_aa + xc_aa
-    b_bb = b_coul_bb - hybrid_fraction * b_exch_bb + xc_bb
-    a_ab = a_coul_ab + xc_ab
-    b_ab = b_coul_ab + xc_ab
-    a_ba = jnp.transpose(a_ab, (2, 3, 0, 1))
-    b_ba = jnp.transpose(b_ab, (2, 3, 0, 1))
-    return de_a, de_b, a_aa, a_ab, a_ba, a_bb, b_aa, b_ab, b_ba, b_bb
+    return action
 
 
 def _build_unrestricted_response_operator_data(
@@ -383,33 +321,47 @@ def _build_unrestricted_response_operator_data(
     occupation_tolerance: float = 1e-8,
 ) -> _UnrestrictedResponseOperatorData:
     resolved_xc = _resolve_xc_functional(molecule, xc_functional, xc_params)
-    (
-        de_a,
-        de_b,
-        a_aa,
-        a_ab,
-        a_ba,
-        a_bb,
-        b_aa,
-        b_ab,
-        b_ba,
-        b_bb,
-    ) = _build_unrestricted_response_blocks(
+    orbo_a, orbv_a, orbo_b, orbv_b, de_a, de_b = _unrestricted_orbital_data(
+        molecule,
+        occupation_tolerance,
+    )
+    hybrid_fraction_raw = getattr(molecule, "exact_exchange_fraction", 0.0)
+    hybrid_fraction: Any = (
+        float(hybrid_fraction_raw)
+        if isinstance(hybrid_fraction_raw, (int, float, np.number))
+        else jnp.asarray(hybrid_fraction_raw, dtype=jnp.result_type(de_a, de_b))
+    )
+    if resolved_xc is not None:
+        hybrid_fraction_raw = getattr(resolved_xc, "exact_exchange_fraction", hybrid_fraction)
+        hybrid_fraction = (
+            float(hybrid_fraction_raw)
+            if isinstance(hybrid_fraction_raw, (int, float, np.number))
+            else jnp.asarray(hybrid_fraction_raw, dtype=jnp.result_type(de_a, de_b))
+        )
+    ao_response_action_fn = _unrestricted_ao_response_action(
+        molecule,
+        hybrid_fraction,
+        include_exchange=_needs_exchange_terms(hybrid_fraction),
+        dtype=jnp.result_type(de_a, de_b),
+    )
+    xc_response_action_fn = _unrestricted_grid_xc_response_action(
         molecule,
         resolved_xc,
-        occupation_tolerance=occupation_tolerance,
+        orbo_a,
+        orbv_a,
+        orbo_b,
+        orbv_b,
+        dtype=jnp.result_type(de_a, de_b),
     )
     return _UnrestrictedResponseOperatorData(
         orbital_energy_differences_alpha=de_a,
         orbital_energy_differences_beta=de_b,
-        a_aa=a_aa,
-        a_ab=a_ab,
-        a_ba=a_ba,
-        a_bb=a_bb,
-        b_aa=b_aa,
-        b_ab=b_ab,
-        b_ba=b_ba,
-        b_bb=b_bb,
+        orbo_alpha=orbo_a,
+        orbv_alpha=orbv_a,
+        orbo_beta=orbo_b,
+        orbv_beta=orbv_b,
+        ao_response_action_fn=ao_response_action_fn,
+        xc_response_action_fn=xc_response_action_fn,
     )
 
 
@@ -447,9 +399,50 @@ def _join_unrestricted_rows(alpha: Array, beta: Array) -> Array:
     )
 
 
-def _block_diagonal(block: Array) -> Array:
-    dim = int(block.shape[0] * block.shape[1])
-    return jnp.diag(block.reshape(dim, dim))
+def _unrestricted_xc_action(
+    data: _UnrestrictedResponseOperatorData,
+    alpha: Array,
+    beta: Array,
+) -> tuple[Array, Array]:
+    if data.xc_response_action_fn is None:
+        return jnp.zeros_like(alpha), jnp.zeros_like(beta)
+    return data.xc_response_action_fn(alpha, beta)
+
+
+def _unrestricted_ao_mo_action(
+    data: _UnrestrictedResponseOperatorData,
+    alpha: Array,
+    beta: Array,
+    *,
+    bottom_density: bool,
+    bottom_projection: bool,
+) -> tuple[Array, Array]:
+    density_alpha = _unrestricted_transition_density(
+        data.orbo_alpha,
+        data.orbv_alpha,
+        alpha,
+        bottom=bottom_density,
+    )
+    density_beta = _unrestricted_transition_density(
+        data.orbo_beta,
+        data.orbv_beta,
+        beta,
+        bottom=bottom_density,
+    )
+    response_alpha, response_beta = data.ao_response_action_fn(density_alpha, density_beta)
+    out_alpha = _unrestricted_project_response(
+        response_alpha,
+        data.orbo_alpha,
+        data.orbv_alpha,
+        bottom=bottom_projection,
+    )
+    out_beta = _unrestricted_project_response(
+        response_beta,
+        data.orbo_beta,
+        data.orbv_beta,
+        bottom=bottom_projection,
+    )
+    return out_alpha, out_beta
 
 
 def _unrestricted_a_action(
@@ -457,28 +450,16 @@ def _unrestricted_a_action(
     rows: Array,
 ) -> Array:
     alpha, beta = _split_unrestricted_rows(data, rows)
-    out_alpha = jnp.einsum(
-        "iajb,njb->nia",
-        data.a_aa,
+    out_alpha, out_beta = _unrestricted_ao_mo_action(
+        data,
         alpha,
-        precision=Precision.HIGHEST,
-    ) + jnp.einsum(
-        "iajb,njb->nia",
-        data.a_ab,
         beta,
-        precision=Precision.HIGHEST,
+        bottom_density=False,
+        bottom_projection=False,
     )
-    out_beta = jnp.einsum(
-        "iajb,njb->nia",
-        data.a_ba,
-        alpha,
-        precision=Precision.HIGHEST,
-    ) + jnp.einsum(
-        "iajb,njb->nia",
-        data.a_bb,
-        beta,
-        precision=Precision.HIGHEST,
-    )
+    xc_alpha, xc_beta = _unrestricted_xc_action(data, alpha, beta)
+    out_alpha = out_alpha + xc_alpha + alpha * data.orbital_energy_differences_alpha[None, :, :]
+    out_beta = out_beta + xc_beta + beta * data.orbital_energy_differences_beta[None, :, :]
     return _join_unrestricted_rows(out_alpha, out_beta)
 
 
@@ -487,38 +468,95 @@ def _unrestricted_b_action(
     rows: Array,
 ) -> Array:
     alpha, beta = _split_unrestricted_rows(data, rows)
-    out_alpha = jnp.einsum(
-        "iajb,njb->nia",
-        data.b_aa,
+    out_alpha, out_beta = _unrestricted_ao_mo_action(
+        data,
         alpha,
-        precision=Precision.HIGHEST,
-    ) + jnp.einsum(
-        "iajb,njb->nia",
-        data.b_ab,
         beta,
-        precision=Precision.HIGHEST,
+        bottom_density=True,
+        bottom_projection=False,
     )
-    out_beta = jnp.einsum(
-        "iajb,njb->nia",
-        data.b_ba,
-        alpha,
-        precision=Precision.HIGHEST,
-    ) + jnp.einsum(
-        "iajb,njb->nia",
-        data.b_bb,
-        beta,
-        precision=Precision.HIGHEST,
-    )
+    xc_alpha, xc_beta = _unrestricted_xc_action(data, alpha, beta)
+    out_alpha = out_alpha + xc_alpha
+    out_beta = out_beta + xc_beta
     return _join_unrestricted_rows(out_alpha, out_beta)
 
 
 def _unrestricted_tda_diagonal(data: _UnrestrictedResponseOperatorData) -> Array:
     return jnp.concatenate(
         [
-            _block_diagonal(data.a_aa),
-            _block_diagonal(data.a_bb),
+            data.orbital_energy_differences_alpha.reshape(-1),
+            data.orbital_energy_differences_beta.reshape(-1),
         ],
         axis=0,
+    )
+
+
+def _unrestricted_tdhf_action(
+    data: _UnrestrictedResponseOperatorData,
+    x_rows: Array,
+    y_rows: Array,
+) -> tuple[Array, Array]:
+    x_alpha, x_beta = _split_unrestricted_rows(data, x_rows)
+    y_alpha, y_beta = _split_unrestricted_rows(data, y_rows)
+    density_alpha = _unrestricted_transition_density(
+        data.orbo_alpha,
+        data.orbv_alpha,
+        x_alpha,
+        bottom=False,
+    ) + _unrestricted_transition_density(
+        data.orbo_alpha,
+        data.orbv_alpha,
+        y_alpha,
+        bottom=True,
+    )
+    density_beta = _unrestricted_transition_density(
+        data.orbo_beta,
+        data.orbv_beta,
+        x_beta,
+        bottom=False,
+    ) + _unrestricted_transition_density(
+        data.orbo_beta,
+        data.orbv_beta,
+        y_beta,
+        bottom=True,
+    )
+    response_alpha, response_beta = data.ao_response_action_fn(density_alpha, density_beta)
+    upper_alpha = _unrestricted_project_response(
+        response_alpha,
+        data.orbo_alpha,
+        data.orbv_alpha,
+        bottom=False,
+    )
+    upper_beta = _unrestricted_project_response(
+        response_beta,
+        data.orbo_beta,
+        data.orbv_beta,
+        bottom=False,
+    )
+    lower_alpha = _unrestricted_project_response(
+        response_alpha,
+        data.orbo_alpha,
+        data.orbv_alpha,
+        bottom=True,
+    )
+    lower_beta = _unrestricted_project_response(
+        response_beta,
+        data.orbo_beta,
+        data.orbv_beta,
+        bottom=True,
+    )
+    xc_alpha, xc_beta = _unrestricted_xc_action(
+        data,
+        x_alpha + y_alpha,
+        x_beta + y_beta,
+    )
+    upper_alpha = upper_alpha + xc_alpha + x_alpha * data.orbital_energy_differences_alpha[None, :, :]
+    upper_beta = upper_beta + xc_beta + x_beta * data.orbital_energy_differences_beta[None, :, :]
+    lower_alpha = lower_alpha + xc_alpha + y_alpha * data.orbital_energy_differences_alpha[None, :, :]
+    lower_beta = lower_beta + xc_beta + y_beta * data.orbital_energy_differences_beta[None, :, :]
+    return _join_unrestricted_rows(upper_alpha, upper_beta), _join_unrestricted_rows(
+        lower_alpha,
+        lower_beta,
     )
 
 
@@ -567,9 +605,8 @@ def build_unrestricted_tdhf_operator(
         rows = jnp.asarray(rows).reshape(-1, 2 * dim)
         x = rows[:, :dim]
         y = rows[:, dim:]
-        upper = _unrestricted_a_action(data, x) + _unrestricted_b_action(data, y)
-        lower = -(_unrestricted_b_action(data, x) + _unrestricted_a_action(data, y))
-        return jnp.concatenate([upper, lower], axis=-1)
+        upper, lower = _unrestricted_tdhf_action(data, x, y)
+        return jnp.concatenate([upper, -lower], axis=-1)
 
     return (
         vind,

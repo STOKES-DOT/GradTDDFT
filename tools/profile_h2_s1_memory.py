@@ -28,8 +28,7 @@ import optax
 from td_graddft.features import restricted_transition_response_features
 from td_graddft.features import restricted_grid_features_with_gradients
 from td_graddft.tddft.response import (
-    build_restricted_tda_matrix,
-    refresh_restricted_response_eri_slices,
+    build_restricted_tda_operator,
 )
 from td_graddft.training import (
     GroundStateTrainingConfig,
@@ -371,19 +370,6 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
-    molecule = run_phase("response_eri_cache", lambda: refresh_restricted_response_eri_slices(molecule))
-    point = type(point)(
-        r_angstrom=point.r_angstrom,
-        atom=point.atom,
-        molecule=molecule,
-        fci_energy_h=point.fci_energy_h,
-        fci_total_energies_h=point.fci_total_energies_h,
-        fci_excitation_energies_h=point.fci_excitation_energies_h,
-        fci_dm_ao=point.fci_dm_ao,
-        fci_density_grid=point.fci_density_grid,
-        fci_electron_count=point.fci_electron_count,
-    )
-
     functional = _H2._make_s1_functional(h2_args)
     optimizer = optax.adam(1e-3)
     state = run_phase(
@@ -582,21 +568,27 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if not bool(args.skip_pregrad_probes):
-        def tda_matrix_fn(local_params: Any, local_molecule: Any) -> Any:
-            return build_restricted_tda_matrix(local_molecule, functional, xc_params=local_params)
+        def tda_action_fn(local_params: Any, local_molecule: Any) -> Any:
+            vind, diagonal, delta_eps = build_restricted_tda_operator(
+                local_molecule,
+                functional,
+                xc_params=local_params,
+            )
+            trial = jnp.ones((1, int(delta_eps.size)), dtype=diagonal.dtype)
+            return vind(trial), diagonal
 
         if bool(args.jit_kernels):
             compiled_tda: dict[str, Any] = {}
             run_phase(
-                "compile_tda_matrix",
+                "compile_tda_action",
                 lambda: compiled_tda.setdefault(
                     "fn",
-                    jax.jit(tda_matrix_fn).lower(state.params, response_molecule).compile(),
+                    jax.jit(tda_action_fn).lower(state.params, response_molecule).compile(),
                 ),
             )
-            run_phase("execute_tda_matrix", lambda: compiled_tda["fn"](state.params, response_molecule))
+            run_phase("execute_tda_action", lambda: compiled_tda["fn"](state.params, response_molecule))
         else:
-            run_phase("execute_tda_matrix", lambda: tda_matrix_fn(state.params, response_molecule))
+            run_phase("execute_tda_action", lambda: tda_action_fn(state.params, response_molecule))
 
         def s1_forward_fn(local_params: Any, local_molecule: Any) -> Any:
             return predict_excitation_energies(

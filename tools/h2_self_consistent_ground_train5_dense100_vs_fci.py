@@ -712,6 +712,7 @@ def build_training_data(
     *,
     density_constraint_weight: float,
 ) -> tuple[GroundStateDatum, ...]:
+    _load_runtime_dependencies()
     return tuple(
         GroundStateDatum.from_parts(
             point.molecule,

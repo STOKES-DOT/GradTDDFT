@@ -40,3 +40,10 @@ def test_custom_cuda_integral_modules_are_removed():
     assert not Path("src/td_graddft/data/integrals/jax/cuda_direct_jk_kernel.cu").exists()
     assert not Path("src/td_graddft/data/integrals/jax/cuda_one_electron.py").exists()
     assert not Path("src/td_graddft/data/integrals/jax/cuda_one_electron_kernel.cu").exists()
+
+
+def test_janak_constraint_code_is_removed_from_core_sources():
+    source_text = "\n".join(path.read_text() for path in Path("src/td_graddft").rglob("*.py"))
+
+    assert "janak" not in source_text.lower()
+    assert "eta_autodiff" not in source_text

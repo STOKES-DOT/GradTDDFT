@@ -81,7 +81,7 @@ class RHFExcitedStateSurfaceConfig:
     state_index: int = 0
     response_method: Literal["tda", "casida"] = "tda"
     coordinate_unit: Literal["angstrom", "bohr"] = "angstrom"
-    eigensolver: Literal["auto", "dense", "davidson"] = "dense"
+    eigensolver: Literal["auto", "davidson"] = "auto"
     excitation_threshold: float = 1e-7
     matrix_eps: float = 1e-10
     davidson_tol: float = 1e-6

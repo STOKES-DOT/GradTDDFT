@@ -83,8 +83,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--response-grid-chunk-size", type=int, default=1024)
     p.add_argument(
         "--strict-hfx-response-mode",
-        choices=("dense", "low_memory"),
-        default="dense",
+        choices=("low_memory",),
+        default="low_memory",
     )
     p.add_argument("--semilocal-xc", nargs="+", default=list(b3lyp_component_basis()))
     p.add_argument("--eval-use-tda", action=argparse.BooleanOptionalAction, default=True)
@@ -145,7 +145,7 @@ def _apply_checkpoint_metadata(args: argparse.Namespace) -> argparse.Namespace:
         "include_pt2_channel": False,
         "pt2_channel_mode": "scaled_projected",
         "response_grid_chunk_size": 1024,
-        "strict_hfx_response_mode": "dense",
+        "strict_hfx_response_mode": "low_memory",
         "scf_gradient_mode": "unrolled",
         "scf_implicit_diff_solver": "normal_cg",
         "scf_implicit_diff_tolerance": 1e-6,

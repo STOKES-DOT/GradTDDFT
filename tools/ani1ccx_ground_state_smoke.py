@@ -25,7 +25,7 @@ import numpy as np
 import optax
 
 from td_graddft import neural_xc
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
 from td_graddft.training import (
     GroundStateDatum,
     GroundStateTrainingConfig,
@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--response-hf-mode",
         choices=("approx", "strict"),
-        default="strict",
+        default=neural_xc.DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     )
     parser.add_argument(
         "--response-pt2-mode",

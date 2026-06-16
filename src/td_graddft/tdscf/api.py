@@ -68,7 +68,7 @@ class _BaseTD:
     occupation_tolerance: float
     excitation_threshold: float
     matrix_eps: float
-    eigensolver: Literal["auto", "dense", "davidson"]
+    eigensolver: Literal["auto", "davidson"]
     davidson_tol: float
     davidson_max_iter: int
     davidson_max_subspace: int | None
@@ -83,7 +83,7 @@ class _BaseTD:
         occupation_tolerance: float = 1e-8,
         excitation_threshold: float = 1e-7,
         matrix_eps: float = 1e-10,
-        eigensolver: Literal["auto", "dense", "davidson"] = "auto",
+        eigensolver: Literal["auto", "davidson"] = "auto",
         davidson_tol: float = 1e-6,
         davidson_max_iter: int = 60,
         davidson_max_subspace: int | None = None,
@@ -155,6 +155,19 @@ class _BaseTD:
         )
         return kwargs
 
+    def _unrestricted_solver_kwargs(self, molecule: Any) -> dict[str, Any]:
+        kwargs = self._common_solver_kwargs(molecule)
+        kwargs.update(
+            {
+                "matrix_eps": self.matrix_eps,
+                "eigensolver": self.eigensolver,
+                "davidson_tol": self.davidson_tol,
+                "davidson_max_iter": self.davidson_max_iter,
+                "davidson_max_subspace": self.davidson_max_subspace,
+            }
+        )
+        return kwargs
+
     def _set_result(self, result: Any) -> Any:
         self.result = result
         self.e = result.excitation_energies
@@ -192,7 +205,9 @@ class TDA(_BaseTD):
     def _build_solver(self) -> Any:
         molecule = self.molecule
         if _is_unrestricted_molecule(molecule):
-            return UnrestrictedTDA(**self._common_solver_kwargs(molecule))
+            kwargs = self._unrestricted_solver_kwargs(molecule)
+            kwargs.pop("matrix_eps")
+            return UnrestrictedTDA(**kwargs)
         return RestrictedCasidaTDDFT(**self._restricted_solver_kwargs(molecule))
 
     def kernel(self, nstates: int | None = None) -> Any:
@@ -215,9 +230,7 @@ class TDDFT(_BaseTD):
     def _build_solver(self) -> Any:
         molecule = self.molecule
         if _is_unrestricted_molecule(molecule):
-            kwargs = self._common_solver_kwargs(molecule)
-            kwargs["matrix_eps"] = self.matrix_eps
-            return UnrestrictedCasidaTDDFT(**kwargs)
+            return UnrestrictedCasidaTDDFT(**self._unrestricted_solver_kwargs(molecule))
         return RestrictedCasidaTDDFT(**self._restricted_solver_kwargs(molecule))
 
     def kernel(self, nstates: int | None = None) -> Any:

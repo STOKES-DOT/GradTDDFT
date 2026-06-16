@@ -67,8 +67,7 @@ class StrictJaxFullFlowRow:
     nvir: int
     td_dim: int
     jax_reference_s: float
-    jax_response_build_s: float
-    jax_casida_solve_s: float
+    jax_tddft_kernel_s: float
     jax_oscillator_s: float
     jax_total_s: float
     jax_total_energy_ha: float
@@ -197,7 +196,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--damping", type=float, default=0.05)
     parser.add_argument("--precompile-eri", action="store_true")
     parser.add_argument("--precompile-eri-chunk-size", type=int, default=512)
-    parser.add_argument("--eigensolver", choices=("auto", "dense", "davidson"), default="auto")
+    parser.add_argument("--eigensolver", choices=("auto", "davidson"), default="auto")
     parser.add_argument("--include-pyscf", action="store_true")
     parser.add_argument("--skip-pyscf-td", action="store_true")
     parser.add_argument("--repeats", type=int, default=1)
@@ -309,9 +308,8 @@ def _run_strict_jax_full_flow(args: argparse.Namespace) -> dict[str, Any]:
     import jax.numpy as jnp
 
     from td_graddft.spectra import HARTREE_TO_EV, oscillator_strengths
+    from td_graddft import tdscf
     from td_graddft.tddft._semilocal_response import SemilocalResponseFunctional
-    from td_graddft.tddft.casida import solve_casida
-    from td_graddft.tddft.response import build_restricted_response_matrices
 
     jax.config.update("jax_enable_x64", True)
     device = _pick_device(str(args.platform))
@@ -335,19 +333,15 @@ def _run_strict_jax_full_flow(args: argparse.Namespace) -> dict[str, Any]:
 
         t1 = _timer()
         with jax.default_device(device):
-            matrices = build_restricted_response_matrices(reference, functional)
-        _block_tree(matrices)
-        response_build_s = _timer() - t1
-
-        t2 = _timer()
-        with jax.default_device(device):
-            result = solve_casida(
-                matrices,
-                nstates=nstates_eff,
+            result = tdscf.TDDFT(
+                reference,
+                xc_functional=functional,
                 eigensolver=str(args.eigensolver),
+            ).kernel(
+                nstates=nstates_eff,
             )
         _block_tree(result)
-        casida_solve_s = _timer() - t2
+        tddft_kernel_s = _timer() - t1
 
         t3 = _timer()
         strengths = oscillator_strengths(reference, result)
@@ -357,7 +351,7 @@ def _run_strict_jax_full_flow(args: argparse.Namespace) -> dict[str, Any]:
         energies_ha = np.asarray(result.excitation_energies, dtype=float).reshape(-1)
         strengths_np = np.asarray(strengths, dtype=float).reshape(-1)
         del strengths_np
-        total_s = reference_s + response_build_s + casida_solve_s + oscillator_s
+        total_s = reference_s + tddft_kernel_s + oscillator_s
         stats = sampler.stop()
         scf_result = getattr(reference, "scf_result", None)
         return {
@@ -368,8 +362,7 @@ def _run_strict_jax_full_flow(args: argparse.Namespace) -> dict[str, Any]:
             "td_dim": int(nocc * nvir),
             "nstates": int(nstates_eff),
             "reference_s": float(reference_s),
-            "response_build_s": float(response_build_s),
-            "casida_solve_s": float(casida_solve_s),
+            "tddft_kernel_s": float(tddft_kernel_s),
             "oscillator_s": float(oscillator_s),
             "total_s": float(total_s),
             "total_energy_ha": _jax_scalar_to_float(reference.mf_energy),
@@ -496,8 +489,7 @@ def _make_row(
         nvir=int(strict_result["nvir"]),
         td_dim=int(strict_result["td_dim"]),
         jax_reference_s=float(strict_result["reference_s"]),
-        jax_response_build_s=float(strict_result["response_build_s"]),
-        jax_casida_solve_s=float(strict_result["casida_solve_s"]),
+        jax_tddft_kernel_s=float(strict_result["tddft_kernel_s"]),
         jax_oscillator_s=float(strict_result["oscillator_s"]),
         jax_total_s=float(strict_result["total_s"]),
         jax_total_energy_ha=float(strict_result["total_energy_ha"]),

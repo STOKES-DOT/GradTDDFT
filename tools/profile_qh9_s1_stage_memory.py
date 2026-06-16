@@ -197,7 +197,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--grids-level", type=int, default=2)
     p.add_argument("--response-grid-chunk-size", type=int, default=1024)
-    p.add_argument("--strict-hfx-response-mode", choices=("dense", "low_memory"), default="dense")
+    p.add_argument("--strict-hfx-response-mode", choices=("low_memory",), default="low_memory")
     p.add_argument("--learning-rate", type=float, default=3e-4)
     p.add_argument("--hidden-dims", type=int, nargs="+", default=(64, 64))
     p.add_argument("--training-mode", choices=("fixed_density", "self_consistent"), default="self_consistent")
