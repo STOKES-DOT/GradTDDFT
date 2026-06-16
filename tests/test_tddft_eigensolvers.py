@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 
 from td_graddft.tddft.casida import solve_casida_from_tdhf_operator
-from td_graddft.tddft.eigensolvers import davidson_lowest_symmetric
+from td_graddft.tddft.eigensolvers import implicit_differential_davidson_lowest_symmetric
 from td_graddft.tddft.tda import solve_tda_from_operator
 from td_graddft.tddft.types import TDAResult, TDDFTResult
 from td_graddft.tddft.unrestricted import (
@@ -59,7 +59,7 @@ def test_davidson_restart_matches_numpy_on_random_symmetric_matrix():
     matrix = 0.5 * (matrix + matrix.T)
 
     ref_eigvals, _ = np.linalg.eigh(matrix)
-    eigvals, _, converged = davidson_lowest_symmetric(
+    eigvals, _, converged = implicit_differential_davidson_lowest_symmetric(
         jnp.asarray(matrix),
         nroots=4,
         tol=1e-5,
@@ -84,7 +84,7 @@ def test_davidson_callable_matches_numpy_on_random_symmetric_matrix():
     matrix = 0.5 * (matrix + matrix.T)
 
     ref_eigvals, _ = np.linalg.eigh(matrix)
-    eigvals, _, converged = davidson_lowest_symmetric(
+    eigvals, _, converged = implicit_differential_davidson_lowest_symmetric(
         lambda vectors: jnp.asarray(matrix) @ vectors,
         nroots=5,
         size=dim,
@@ -249,6 +249,39 @@ def test_operator_results_are_jittable_pytrees():
     assert casida_result.y_amplitudes.shape == (2, 2, 2)
 
 
+def test_tda_operator_gradient_matches_dense_eigenvalue_perturbation():
+    matrix = jnp.asarray(
+        [
+            [0.95, 0.02, 0.00, 0.01],
+            [0.02, 1.20, 0.03, 0.00],
+            [0.00, 0.03, 1.55, 0.02],
+            [0.01, 0.00, 0.02, 2.05],
+        ],
+        dtype=jnp.float32,
+    )
+    delta_eps = jnp.asarray([[0.8, 1.1], [1.4, 1.9]], dtype=jnp.float32)
+
+    def davidson_energy(raw_matrix):
+        sym = 0.5 * (raw_matrix + raw_matrix.T)
+        return solve_tda_from_operator(
+            delta_eps,
+            _tda_vind(sym),
+            jnp.diag(sym),
+            nstates=1,
+        ).excitation_energies[0]
+
+    def dense_energy(raw_matrix):
+        sym = 0.5 * (raw_matrix + raw_matrix.T)
+        return jnp.linalg.eigvalsh(sym)[0]
+
+    np.testing.assert_allclose(
+        np.asarray(jax.grad(davidson_energy)(matrix)),
+        np.asarray(jax.grad(dense_energy)(matrix)),
+        atol=5e-5,
+        rtol=5e-5,
+    )
+
+
 def test_unrestricted_operator_results_are_jittable_pytrees():
     de_a = jnp.asarray([[0.8, 1.1]], dtype=jnp.float32)
     de_b = jnp.asarray([[0.9, 1.2]], dtype=jnp.float32)
@@ -300,7 +333,7 @@ def test_davidson_callable_is_jittable():
     diag = jnp.diag(jnp.asarray(matrix))
 
     compiled = jax.jit(
-        lambda d: davidson_lowest_symmetric(
+        lambda d: implicit_differential_davidson_lowest_symmetric(
             lambda vectors: jnp.asarray(matrix) @ vectors,
             nroots=4,
             size=dim,
@@ -332,7 +365,7 @@ def test_davidson_callable_is_jittable_with_x64_enabled():
 
     with enable_x64(True):
         compiled = jax.jit(
-            lambda d: davidson_lowest_symmetric(
+            lambda d: implicit_differential_davidson_lowest_symmetric(
                 lambda vectors: jnp.asarray(matrix) @ vectors,
                 nroots=4,
                 size=dim,

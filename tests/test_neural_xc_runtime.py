@@ -40,6 +40,7 @@ from td_graddft.tddft.cisd import (
 from td_graddft.tddft.response import (
     build_restricted_tda_operator,
 )
+import td_graddft.tddft.response as response_module
 from td_graddft.tddft.unrestricted import build_unrestricted_tda_operator
 from td_graddft.training import (
     GroundStateDatum,
@@ -324,6 +325,45 @@ def test_response_hvp_does_not_materialize_grid_response_tensor(monkeypatch):
 
     assert response.shape == tangent.shape
     assert jnp.all(jnp.isfinite(response))
+
+
+def test_response_hvp_tda_action_avoids_dense_transition_features(monkeypatch):
+    molecule = _make_toy_molecule()
+    non_hf_module = make_custom_semilocal_module(
+        channel_names=("rho",),
+        energy_density_channels_fn=lambda local_features: jnp.expand_dims(
+            local_features.rho,
+            axis=-1,
+        ),
+        name="response_hvp_tda_factorized_semilocal",
+    )
+    functional = make_neural_xc_functional(
+        non_hf_module=non_hf_module,
+        input_feature_mode="canonical",
+        hidden_dims=(8,),
+        name="response_hvp_tda_factorized",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(230), molecule)
+
+    def fail_dense_features(*args, **kwargs):
+        raise AssertionError("TDA HVP action should not build features[x,g,i,a]")
+
+    monkeypatch.setattr(
+        response_module,
+        "_restricted_response_features",
+        fail_dense_features,
+    )
+
+    vind, diagonal, _ = build_restricted_tda_operator(
+        molecule,
+        functional,
+        xc_params=params,
+    )
+    action = vind(jnp.ones((1, 1), dtype=jnp.float64))
+
+    assert diagonal.shape == (1,)
+    assert action.shape == (1, 1)
+    assert jnp.all(jnp.isfinite(action))
 
 
 def test_projected_hf_uses_current_hfx_nu_when_cached_hfx_local_is_present():

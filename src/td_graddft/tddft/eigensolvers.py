@@ -12,6 +12,11 @@ from ._utils import _symmetrize
 _MATMUL_PRECISION = jax.lax.Precision.HIGHEST
 _DEFAULT_MATMUL_PRECISION = "highest"
 
+__all__ = [
+    "implicit_differential_davidson_lowest_symmetric",
+    "implicit_differential_davidson_lowest_tdhf",
+]
+
 
 def _solver_dtype(dtype: jnp.dtype) -> jnp.dtype:
     dtype = jnp.dtype(dtype)
@@ -42,9 +47,9 @@ def _resolve_symmetric_linear_operator(
 ) -> tuple[Callable[[Array], Array], Array, int, jnp.dtype]:
     if callable(matrix_or_matvec):
         if size is None:
-            raise ValueError("size is required when davidson_lowest_symmetric receives a matvec.")
+            raise ValueError("size is required when _davidson_lowest_symmetric receives a matvec.")
         if diag is None:
-            raise ValueError("diag is required when davidson_lowest_symmetric receives a matvec.")
+            raise ValueError("diag is required when _davidson_lowest_symmetric receives a matvec.")
         op_diag = jnp.asarray(diag)
         dim = int(size)
         dtype = _solver_dtype(op_diag.dtype)
@@ -75,7 +80,7 @@ def _resolve_symmetric_linear_operator(
     return apply, jnp.diag(matrix), dim, dtype
 
 
-def davidson_lowest_symmetric(
+def _davidson_lowest_symmetric(
     matrix_or_matvec: Array | Callable[[Array], Array],
     *,
     nroots: int,
@@ -501,6 +506,59 @@ def davidson_lowest_symmetric(
     return best_theta, best_vecs, converged
 
 
+def implicit_differential_davidson_lowest_symmetric(
+    matrix_or_matvec: Array | Callable[[Array], Array],
+    *,
+    nroots: int,
+    size: int | None = None,
+    diag: Array | None = None,
+    tol: float = 1e-6,
+    max_iter: int = 60,
+    max_subspace: int | None = None,
+    collapse_subspace: int | None = None,
+    preconditioner_floor: float = 1e-6,
+    preconditioner_level_shift: float = 1e-3,
+    orth_eps: float = 1e-10,
+) -> tuple[Array, Array, Array]:
+    """Return Davidson roots with implicit eigenvalue differentiation.
+
+    Davidson is used only as a numerical eigensolver.  The solver matvec is
+    stopped for reverse-mode AD, and the differentiable value is reconstructed
+    from the converged Ritz vectors through the Rayleigh quotient.
+    """
+
+    apply, diag, dim, _dtype = _resolve_symmetric_linear_operator(
+        matrix_or_matvec,
+        size=size,
+        diag=diag,
+    )
+
+    def solver_matvec(vectors: Array) -> Array:
+        return jax.lax.stop_gradient(apply(vectors))
+
+    eigvals, eigvecs, converged = _davidson_lowest_symmetric(
+        solver_matvec,
+        nroots=nroots,
+        size=dim,
+        diag=diag,
+        tol=tol,
+        max_iter=max_iter,
+        max_subspace=max_subspace,
+        collapse_subspace=collapse_subspace,
+        preconditioner_floor=preconditioner_floor,
+        preconditioner_level_shift=preconditioner_level_shift,
+        orth_eps=orth_eps,
+    )
+    eigvecs = jax.lax.stop_gradient(eigvecs)
+    applied = apply(eigvecs)
+    denom = jnp.maximum(
+        jnp.sum(eigvecs * eigvecs, axis=0),
+        jnp.asarray(1e-30, dtype=eigvecs.dtype),
+    )
+    eigvals = jnp.sum(eigvecs * applied, axis=0) / denom
+    return eigvals, eigvecs, converged
+
+
 def _tdhf_subspace_eigen_solver(
     a: Array,
     b: Array,
@@ -542,7 +600,7 @@ def _tdhf_subspace_eigen_solver(
     return omega, x, y
 
 
-def davidson_lowest_tdhf(
+def _davidson_lowest_tdhf(
     vind: Callable[[Array], Array],
     *,
     nroots: int,
@@ -953,3 +1011,52 @@ def davidson_lowest_tdhf(
         _done,
     ) = final_state
     return best_w, best_x, best_y, converged
+
+
+def implicit_differential_davidson_lowest_tdhf(
+    vind: Callable[[Array], Array],
+    *,
+    nroots: int,
+    size: int,
+    diag: Array,
+    tol: float = 1e-6,
+    max_iter: int = 60,
+    max_subspace: int | None = None,
+    matrix_eps: float = 1e-10,
+    preconditioner_floor: float = 1e-8,
+    preconditioner_level_shift: float = 0.0,
+    orth_eps: float = 1e-10,
+) -> tuple[Array, Array, Array, Array]:
+    """Return TDHF Davidson roots with implicit eigenvalue differentiation."""
+
+    dim = int(size)
+
+    def solver_vind(values: Array) -> Array:
+        return jax.lax.stop_gradient(vind(values))
+
+    omega, x_vecs, y_vecs, converged = _davidson_lowest_tdhf(
+        solver_vind,
+        nroots=nroots,
+        size=dim,
+        diag=diag,
+        tol=tol,
+        max_iter=max_iter,
+        max_subspace=max_subspace,
+        matrix_eps=matrix_eps,
+        preconditioner_floor=preconditioner_floor,
+        preconditioner_level_shift=preconditioner_level_shift,
+        orth_eps=orth_eps,
+    )
+    x_vecs = jax.lax.stop_gradient(x_vecs)
+    y_vecs = jax.lax.stop_gradient(y_vecs)
+    applied = vind(jnp.concatenate([x_vecs.T, y_vecs.T], axis=-1))
+    top = applied[:, :dim].T
+    bottom = -applied[:, dim:].T
+    numerator = jnp.sum(x_vecs * top, axis=0) + jnp.sum(y_vecs * bottom, axis=0)
+    denominator = jnp.sum(x_vecs * x_vecs, axis=0) - jnp.sum(y_vecs * y_vecs, axis=0)
+    denominator = jnp.where(
+        jnp.abs(denominator) > jnp.asarray(1e-30, dtype=x_vecs.dtype),
+        denominator,
+        jnp.asarray(1e-30, dtype=x_vecs.dtype),
+    )
+    return numerator / denominator, x_vecs, y_vecs, converged

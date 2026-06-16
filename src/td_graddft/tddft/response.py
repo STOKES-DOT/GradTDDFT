@@ -245,6 +245,122 @@ def _restricted_response_features(
     return jnp.concatenate([mgga_features, lapl_ov[None, ...]], axis=0)
 
 
+@dataclass(frozen=True)
+class _RestrictedResponseFactors:
+    feature_kind: str
+    channels: tuple[tuple[tuple[float, Array, Array], ...], ...]
+
+
+def _restricted_response_factors(
+    molecule: Any,
+    orbo: Array,
+    orbv: Array,
+    *,
+    feature_kind: str,
+    dtype: Any,
+) -> _RestrictedResponseFactors:
+    ao = jnp.asarray(molecule.ao, dtype=dtype)
+    rho_o = jnp.einsum("gp,pi->gi", ao, orbo, precision=Precision.HIGHEST)
+    rho_v = jnp.einsum("gp,pa->ga", ao, orbv, precision=Precision.HIGHEST)
+    channels: list[tuple[tuple[float, Array, Array], ...]] = [((1.0, rho_o, rho_v),)]
+    if feature_kind == "LDA":
+        return _RestrictedResponseFactors(feature_kind, tuple(channels))
+
+    ao_deriv1 = getattr(molecule, "ao_deriv1", None)
+    if ao_deriv1 is None:
+        raise AttributeError(
+            "Molecule-like object must define ao_deriv1 for GGA/meta-GGA transition features."
+        )
+    ao_deriv1 = jnp.asarray(ao_deriv1, dtype=dtype)
+    if ao_deriv1.shape[0] < 4:
+        raise ValueError("ao_deriv1 must contain AO values plus first derivatives.")
+    rho_o_full = jnp.einsum(
+        "xgp,pi->xgi",
+        ao_deriv1[:4],
+        orbo,
+        precision=Precision.HIGHEST,
+    )
+    rho_v_full = jnp.einsum(
+        "xgp,pa->xga",
+        ao_deriv1[:4],
+        orbv,
+        precision=Precision.HIGHEST,
+    )
+    channels.extend(
+        (
+            (1.0, rho_o_full[axis], rho_v),
+            (1.0, rho_o, rho_v_full[axis]),
+        )
+        for axis in range(1, 4)
+    )
+    if feature_kind == "GGA":
+        return _RestrictedResponseFactors(feature_kind, tuple(channels))
+
+    channels.append(
+        tuple((0.5, rho_o_full[axis], rho_v_full[axis]) for axis in range(1, 4))
+    )
+    if feature_kind == "MGGA":
+        return _RestrictedResponseFactors(feature_kind, tuple(channels))
+    if feature_kind != "MGGA_LAPL":
+        raise ValueError(f"Unsupported response_feature_kind={feature_kind!r}.")
+
+    ao_laplacian = getattr(molecule, "ao_laplacian", None)
+    if ao_laplacian is None:
+        raise AttributeError(
+            "Molecule-like object must define ao_laplacian for MGGA_LAPL transition features."
+        )
+    ao_laplacian = jnp.asarray(ao_laplacian, dtype=dtype)
+    lapl_o = jnp.einsum("gp,pi->gi", ao_laplacian, orbo, precision=Precision.HIGHEST)
+    lapl_v = jnp.einsum("gp,pa->ga", ao_laplacian, orbv, precision=Precision.HIGHEST)
+    lapl_terms = [(1.0, lapl_o, rho_v)]
+    lapl_terms.extend((2.0, rho_o_full[axis], rho_v_full[axis]) for axis in range(1, 4))
+    lapl_terms.append((1.0, rho_o, lapl_v))
+    channels.append(tuple(lapl_terms))
+    return _RestrictedResponseFactors(feature_kind, tuple(channels))
+
+
+def _project_restricted_transition_to_grid(
+    factors: _RestrictedResponseFactors,
+    values: Array,
+) -> Array:
+    projected = []
+    for channel in factors.channels:
+        total = None
+        for coefficient, left, right in channel:
+            term = coefficient * jnp.einsum(
+                "gi,nia,ga->ng",
+                left,
+                values,
+                right,
+                precision=Precision.HIGHEST,
+            )
+            total = term if total is None else total + term
+        projected.append(total)
+    return jnp.stack(projected, axis=1)
+
+
+def _project_grid_response_to_restricted_transition(
+    factors: _RestrictedResponseFactors,
+    weighted: Array,
+) -> Array:
+    first_left = factors.channels[0][0][1]
+    first_right = factors.channels[0][0][2]
+    out = jnp.zeros(
+        (int(weighted.shape[0]), int(first_left.shape[1]), int(first_right.shape[1])),
+        dtype=weighted.dtype,
+    )
+    for channel_idx, channel in enumerate(factors.channels):
+        channel_weight = weighted[:, channel_idx, :]
+        for coefficient, left, right in channel:
+            out = out + coefficient * jnp.einsum(
+                "gi,ng,ga->nia",
+                left,
+                channel_weight,
+                right,
+                precision=Precision.HIGHEST,
+            )
+    return out
+
 def _restricted_grid_xc_response(
     molecule: Any,
     orbo: Array,
@@ -310,7 +426,7 @@ def _restricted_grid_xc_response_hvp(
     weights = jnp.asarray(molecule.grid.weights, dtype=dtype)
     nocc = int(orbo.shape[1])
     nvir = int(orbv.shape[1])
-    features = _restricted_response_features(
+    factors = _restricted_response_factors(
         molecule,
         orbo,
         orbv,
@@ -321,20 +437,10 @@ def _restricted_grid_xc_response_hvp(
     def action(x: Array) -> Array:
         original_shape = jnp.asarray(x).shape
         values = jnp.asarray(x, dtype=dtype).reshape(-1, nocc, nvir)
-        projected = jnp.einsum(
-            "xgia,nia->nxg",
-            features,
-            values,
-            precision=Precision.HIGHEST,
-        )
+        projected = _project_restricted_transition_to_grid(factors, values)
         weighted = response_hvp(molecule, projected)
         weighted = jnp.asarray(weighted, dtype=dtype) * weights[None, None, :]
-        out = 2.0 * jnp.einsum(
-            "xgia,nxg->nia",
-            features,
-            weighted,
-            precision=Precision.HIGHEST,
-        )
+        out = 2.0 * _project_grid_response_to_restricted_transition(factors, weighted)
         return out.reshape(original_shape)
 
     return action

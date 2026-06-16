@@ -1119,6 +1119,49 @@ def test_strict_gga_response_tensor_contracts_gradient_channels():
     assert jnp.allclose(b_matrix, xc_expected, atol=1e-8)
 
 
+def test_grid_response_hvp_tda_matches_dense_mgga_tensor_action():
+    molecule = _make_toy_molecule()
+    tensor = jnp.zeros((5, 5, 2), dtype=jnp.float64)
+    tensor = tensor.at[0, 0].set(jnp.array([0.2, 0.3]))
+    tensor = tensor.at[1, 1].set(jnp.array([0.4, 0.1]))
+    tensor = tensor.at[3, 3].set(jnp.array([0.2, 0.5]))
+    tensor = tensor.at[4, 4].set(jnp.array([0.8, 1.1]))
+    tensor = tensor.at[0, 4].set(jnp.array([0.1, 0.2]))
+    tensor = tensor.at[4, 0].set(jnp.array([0.1, 0.2]))
+
+    class _DenseMGGAXC:
+        exact_exchange_fraction = 0.0
+        response_feature_kind = "MGGA"
+
+        def grid_response_tensor(self, mol):
+            del mol
+            return tensor
+
+    class _HVPMGGAXC:
+        exact_exchange_fraction = 0.0
+        response_feature_kind = "MGGA"
+
+        def grid_response_hvp(self, mol, tangent):
+            del mol
+            return jnp.einsum("xyg,nyg->nxg", tensor, tangent)
+
+    dense_vind, dense_diagonal, _ = build_restricted_tda_operator(
+        molecule,
+        _DenseMGGAXC(),
+    )
+    hvp_vind, hvp_diagonal, _ = build_restricted_tda_operator(
+        molecule,
+        _HVPMGGAXC(),
+    )
+
+    assert jnp.allclose(hvp_diagonal, dense_diagonal, atol=1e-10)
+    assert jnp.allclose(
+        _operator_matrix(hvp_vind, 1),
+        _operator_matrix(dense_vind, 1),
+        atol=1e-10,
+    )
+
+
 def test_strict_mgga_response_tensor_contracts_tau_channel():
     molecule = _make_toy_molecule()
 
