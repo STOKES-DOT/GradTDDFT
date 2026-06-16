@@ -285,7 +285,7 @@ def test_hdf5_chunked_hfx_nu_reads_at_runtime_under_jit(tmp_path):
     api = ChunkedHFXNu.from_hdf5_dataset(str(path), "hfx_nu", chunk_size=2)
 
     def chunk_sum(scale):
-        return jnp.sum(api.grid_chunk(1, 3) * scale)
+        return jnp.sum(api.grid_chunk_padded(jnp.asarray(1, dtype=jnp.int32), 2) * scale)
 
     jitted_chunk_sum = jax.jit(chunk_sum)
     jitted_chunk_grad = jax.jit(jax.grad(chunk_sum))
