@@ -3052,7 +3052,6 @@ def _build_excited_state_solver(
         xc_functional=functional,
         xc_params=params,
         eigensolver=eigensolver,
-        davidson_max_iter=8,
     )
 
 

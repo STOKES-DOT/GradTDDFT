@@ -691,6 +691,7 @@ def test_predict_excitation_energies_uses_davidson_for_traced_params(monkeypatch
 
     assert jnp.allclose(excitation, jnp.asarray([0.31]))
     assert calls[0]["eigensolver"] == "davidson"
+    assert "davidson_max_iter" not in calls[0]
     assert calls[0].get("davidson_max_subspace") is None
 
 

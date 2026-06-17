@@ -1,8 +1,10 @@
 import numpy as np
 import pytest
+import jax.numpy as jnp
 
 from td_graddft.scf import UKSConfig, run_uks_from_integrals
 from td_graddft.scf.inputs import build_uks_integral_inputs
+from td_graddft.scf.uks import run_unrestricted_scf_scan
 
 
 def _toy_grid():
@@ -37,6 +39,45 @@ def _toy_grid():
     )
     weights = np.asarray([0.5, 0.7, 0.6], dtype=np.float64)
     return ao, ao_deriv1, weights
+
+
+def test_unrestricted_scan_honors_energy_convergence_metric():
+    fock = jnp.diag(jnp.asarray([-1.0, 0.5], dtype=jnp.float64))
+    fock_spin = jnp.stack([fock, fock], axis=0)
+
+    def fock_builder(_density_spin, _mo_coeff_spin, _mo_energy_spin):
+        return fock_spin, fock_spin, jnp.asarray(0.0, dtype=jnp.float64)
+
+    (
+        density,
+        _mo_coeff,
+        _mo_energy,
+        _raw_fock,
+        converged,
+        cycles,
+        _rms_history,
+        _selected_cycle,
+        _best_cycle,
+        _selected_rms,
+        _best_rms,
+    ) = run_unrestricted_scf_scan(
+        fock_builder=fock_builder,
+        density_spin=jnp.zeros((2, 2, 2), dtype=jnp.float64),
+        mo_coeff_spin=jnp.stack([jnp.eye(2, dtype=jnp.float64), jnp.eye(2, dtype=jnp.float64)]),
+        mo_occ_spin=jnp.asarray([[1.0, 0.0], [0.0, 0.0]], dtype=jnp.float64),
+        mo_energy_spin=jnp.asarray([[-1.0, 0.5], [-1.0, 0.5]], dtype=jnp.float64),
+        overlap=jnp.eye(2, dtype=jnp.float64),
+        max_cycle=4,
+        damping=0.0,
+        conv_tol=1e-8,
+        conv_tol_density=0.0,
+        orthogonalization_eps=1e-10,
+        convergence_metric="energy",
+    )
+
+    assert bool(converged)
+    assert int(cycles) == 2
+    assert not np.allclose(np.asarray(density), 0.0)
 
 
 def test_uks_respects_explicit_fixed_spin_occupations():

@@ -50,7 +50,7 @@ from td_graddft.training import (
 
 HARTREE_TO_EV = 27.211386245988
 _DEFAULT_SEMILOCAL_XC = ("lda_x", "gga_x_b88", "lda_c_vwn_rpa", "gga_c_lyp")
-_TRAIN_SCF_SAFETY_MAX_CYCLE = 32
+_TRAIN_SCF_SAFETY_MAX_CYCLE = 512
 _JAX_UKS_CACHE_VERSION = "spinpolarized-fci-density-v2"
 
 
