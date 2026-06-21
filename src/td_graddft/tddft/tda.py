@@ -5,6 +5,9 @@ from collections.abc import Callable
 import jax.numpy as jnp
 from jax import core as jax_core
 
+from .eigensolvers import PYSCF_TD_DAVIDSON_MAX_CYCLE
+from .eigensolvers import PYSCF_TD_DAVIDSON_TOL
+from .eigensolvers import PYSCF_TD_POSITIVE_EIG_THRESHOLD
 from .eigensolvers import _davidson_search_nroots
 from .eigensolvers import implicit_differential_davidson_lowest_symmetric
 from .types import TDAResult
@@ -42,9 +45,9 @@ def solve_tda_from_operator(
     diagonal,
     *,
     nstates: int | None = None,
-    excitation_threshold: float = 1e-7,
-    davidson_tol: float = 1e-6,
-    davidson_max_iter: int = 60,
+    excitation_threshold: float = PYSCF_TD_POSITIVE_EIG_THRESHOLD,
+    davidson_tol: float = PYSCF_TD_DAVIDSON_TOL,
+    davidson_max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
     davidson_max_subspace: int | None = None,
 ) -> TDAResult:
     nocc, nvir = delta_eps.shape
@@ -59,6 +62,7 @@ def solve_tda_from_operator(
         tol=davidson_tol,
         max_iter=davidson_max_iter,
         max_subspace=davidson_max_subspace,
+        positive_eig_threshold=excitation_threshold,
     )
     if not _is_traced_convergence_flag(converged) and not bool(converged):
         raise RuntimeError("Davidson TDA solver did not converge.")

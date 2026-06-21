@@ -50,8 +50,8 @@ from td_graddft.training import (
 
 HARTREE_TO_EV = 27.211386245988
 _DEFAULT_SEMILOCAL_XC = ("lda_x", "gga_x_b88", "lda_c_vwn_rpa", "gga_c_lyp")
-_TRAIN_SCF_SAFETY_MAX_CYCLE = 32
-_JAX_UKS_CACHE_VERSION = "spinpolarized-fci-density-v2"
+_TRAIN_SCF_SAFETY_MAX_CYCLE = 512
+_JAX_UKS_CACHE_VERSION = "spinpolarized-fci-dm-v3"
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,7 @@ class ReferencePoint:
     exact_energy_h: float
     exact_total_energies_h: np.ndarray
     exact_density_grid: np.ndarray
+    exact_density_matrix: np.ndarray
     exact_electron_count: float
     reference_backend: str
     reference_converged: bool
@@ -160,6 +161,7 @@ def build_reference_point(
         exact_energy_h=float(exact_energy_h),
         exact_total_energies_h=exact_total_energies_h,
         exact_density_grid=exact_density_grid,
+        exact_density_matrix=exact_rdm1_ao,
         exact_electron_count=float(np.dot(weights, exact_density_grid)),
         reference_backend=reference_backend,
         reference_converged=reference_converged,
@@ -191,7 +193,7 @@ def _write_reference_point(group: Any, point: ReferencePoint) -> None:
     group.attrs["exact_electron_count"] = float(point.exact_electron_count)
     group.attrs["reference_backend"] = str(point.reference_backend)
     group.attrs["reference_converged"] = bool(point.reference_converged)
-    for name in ("exact_total_energies_h", "exact_density_grid"):
+    for name in ("exact_total_energies_h", "exact_density_grid", "exact_density_matrix"):
         if name in group:
             del group[name]
         group.create_dataset(name, data=np.asarray(getattr(point, name)), compression="gzip")
@@ -207,6 +209,7 @@ def _read_reference_point(group: Any) -> ReferencePoint:
         exact_energy_h=float(group.attrs["exact_energy_h"]),
         exact_total_energies_h=np.asarray(group["exact_total_energies_h"][()], dtype=np.float64),
         exact_density_grid=np.asarray(group["exact_density_grid"][()], dtype=np.float64),
+        exact_density_matrix=np.asarray(group["exact_density_matrix"][()], dtype=np.float64),
         exact_electron_count=float(group.attrs["exact_electron_count"]),
         reference_backend=str(group.attrs["reference_backend"]),
         reference_converged=bool(group.attrs["reference_converged"]),
@@ -317,7 +320,7 @@ def build_training_data(
             point.molecule,
             core=GroundStateCoreDatum(
                 target_total_energy=jnp.asarray(point.exact_energy_h, dtype=jnp.float64),
-                target_density=jnp.asarray(point.exact_density_grid, dtype=jnp.float64),
+                target_density_matrix=jnp.asarray(point.exact_density_matrix, dtype=jnp.float64),
                 density_constraint_weight=float(density_constraint_weight),
             ),
         )
@@ -336,14 +339,22 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
         architecture=str(args.network_architecture),
         input_feature_mode=str(args.input_feature_mode),
         include_pt2_channel=False,
+        include_hfx_channel=bool(args.include_hfx_channel),
         name="neural_xc_h2plus_fci_ground",
     )
     coefficient_prior = neural_xc.resolve_coefficient_prior_values(
         tuple(str(name) for name in args.semilocal_xc)
     )
+    if coefficient_prior is not None:
+        n_semilocal = len(tuple(str(name) for name in args.semilocal_xc))
+        if len(coefficient_prior) == n_semilocal + 1:
+            coefficient_prior = (
+                tuple(coefficient_prior[:n_semilocal])
+                + (tuple(coefficient_prior[n_semilocal:]) if bool(args.include_hfx_channel) else ())
+            )
     training_config = GroundStateTrainingConfig.from_parts(
         core=GroundStateCoreTrainingConfig(
-            mode="self_consistent",
+            mode=str(args.training_mode),
             energy_mse_weight=float(args.energy_mse_weight),
             energy_mae_weight=float(args.energy_mae_weight),
             energy_normalization=str(args.energy_normalization),
@@ -623,10 +634,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--learning-rate", type=float, default=5e-5)
     p.add_argument("--lr-decay-every", type=int, default=200)
     p.add_argument("--lr-decay-factor", type=float, default=0.8)
+    p.add_argument(
+        "--training-mode",
+        choices=("fixed_density", "self_consistent"),
+        default="self_consistent",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--hidden-dims", type=int, nargs="+", default=list(DEFAULT_NETWORK_HIDDEN_DIMS))
     p.add_argument("--network-architecture", choices=("simple_mlp", "graddft_residual"), default=DEFAULT_NETWORK_ARCHITECTURE)
     p.add_argument("--input-feature-mode", choices=("enhanced", "canonical", "dm21_original"), default=DEFAULT_INPUT_FEATURE_MODE)
+    p.add_argument("--include-hfx-channel", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--semilocal-xc", nargs="+", default=list(_DEFAULT_SEMILOCAL_XC))
     p.add_argument("--energy-mse-weight", type=float, default=1.0)
     p.add_argument("--energy-mae-weight", type=float, default=1.0)

@@ -266,6 +266,25 @@ def _metric_mean(metrics: dict[str, Any], key: str, default: float = float("nan"
     return float(jnp.mean(arr))
 
 
+def _ground_only_best_score(
+    args: argparse.Namespace,
+    *,
+    train_loss: float,
+    train_metrics: dict[str, Any],
+    val_loss: float | None,
+    val_metrics: dict[str, Any] | None,
+    has_validation: bool,
+) -> float:
+    if float(getattr(args, "s1_weight", 1.0)) == 0.0:
+        if has_validation and val_loss is not None:
+            return float(val_loss)
+        return float(train_loss)
+    if has_validation and val_metrics is not None:
+        fallback = float(val_loss) if val_loss is not None else float("inf")
+        return _metric_mean(val_metrics, "s1_mae", fallback)
+    return _metric_mean(train_metrics, "s1_mae", float(train_loss))
+
+
 def _normalize_input_feature_mode(value: str) -> str:
     mode = str(value).strip().lower()
     if mode == "dm21_original":
@@ -992,10 +1011,13 @@ def _train_streaming(
             val_dataset,
             eval_kernel,
         )
-        best_score = (
-            initial_val_metrics["s1_mae"]
-            if val_dataset
-            else initial_train_metrics["s1_mae"]
+        best_score = _ground_only_best_score(
+            args,
+            train_loss=float(initial_train_loss),
+            train_metrics=initial_train_metrics,
+            val_loss=float(initial_val_loss),
+            val_metrics=initial_val_metrics,
+            has_validation=bool(val_dataset),
         )
     best_params = state.params
     best_step = 0
@@ -1123,7 +1145,14 @@ def _train_streaming(
             eval_train_s1_mae_history.append(eval_train_metrics["s1_mae"])
             eval_val_loss_history.append(eval_val_loss)
             eval_val_s1_mae_history.append(eval_val_metrics["s1_mae"])
-            score = eval_val_metrics["s1_mae"] if val_dataset else eval_train_metrics["s1_mae"]
+            score = _ground_only_best_score(
+                args,
+                train_loss=float(eval_train_loss),
+                train_metrics=eval_train_metrics,
+                val_loss=float(eval_val_loss),
+                val_metrics=eval_val_metrics,
+                has_validation=bool(val_dataset),
+            )
             if score < best_score:
                 best_score = score
                 best_params = state.params
@@ -1166,7 +1195,11 @@ def _train_streaming(
         if not np.isfinite(best_score):
             best_params = state.params
             best_step = int(args.steps)
-            best_score = float(final_train_metrics["s1_mae"])
+            best_score = (
+                float(final_train_loss)
+                if float(getattr(args, "s1_weight", 1.0)) == 0.0
+                else float(final_train_metrics["s1_mae"])
+            )
     else:
         final_train_loss, final_train_metrics = _streaming_average_eval(
             state.params,
@@ -1364,10 +1397,24 @@ def _train(
                 functional=functional,
                 training_config=training_config,
             )
-        best_score = _metric_mean(initial_val_metrics, "s1_mae", float(initial_val_loss))
+        best_score = _ground_only_best_score(
+            args,
+            train_loss=float(initial_train_loss),
+            train_metrics=initial_train_metrics,
+            val_loss=float(initial_val_loss),
+            val_metrics=initial_val_metrics,
+            has_validation=True,
+        )
     else:
         initial_val_loss, initial_val_metrics = None, None
-        best_score = _metric_mean(initial_train_metrics, "s1_mae", float(initial_train_loss))
+        best_score = _ground_only_best_score(
+            args,
+            train_loss=float(initial_train_loss),
+            train_metrics=initial_train_metrics,
+            val_loss=None,
+            val_metrics=None,
+            has_validation=False,
+        )
     best_params = state.params
     best_step = 0
 
@@ -1484,11 +1531,25 @@ def _train(
                 val_s1_mae_val = _metric_mean(eval_val_metrics, "s1_mae", float("nan"))
                 eval_val_loss_history.append(val_loss_val)
                 eval_val_s1_mae_history.append(val_s1_mae_val)
-                score = val_s1_mae_val
+                score = _ground_only_best_score(
+                    args,
+                    train_loss=float(eval_train_loss),
+                    train_metrics=eval_train_metrics,
+                    val_loss=float(eval_val_loss),
+                    val_metrics=eval_val_metrics,
+                    has_validation=True,
+                )
             else:
                 eval_val_loss_history.append(float("nan"))
                 eval_val_s1_mae_history.append(float("nan"))
-                score = _metric_mean(eval_train_metrics, "s1_mae", float(eval_train_loss))
+                score = _ground_only_best_score(
+                    args,
+                    train_loss=float(eval_train_loss),
+                    train_metrics=eval_train_metrics,
+                    val_loss=None,
+                    val_metrics=None,
+                    has_validation=False,
+                )
             if score < best_score:
                 best_score = score
                 best_params = state.params

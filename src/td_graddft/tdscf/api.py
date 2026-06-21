@@ -4,6 +4,9 @@ from typing import Any, Literal
 
 from .. import spectra
 from ..spectra import HARTREE_TO_EV
+from ..tddft.eigensolvers import PYSCF_TD_DAVIDSON_MAX_CYCLE
+from ..tddft.eigensolvers import PYSCF_TD_DAVIDSON_TOL
+from ..tddft.eigensolvers import PYSCF_TD_POSITIVE_EIG_THRESHOLD
 from ..tddft import RestrictedCasidaTDDFT, UnrestrictedCasidaTDDFT, UnrestrictedTDA
 from ..tddft._semilocal_response import SemilocalResponseFunctional
 
@@ -81,11 +84,11 @@ class _BaseTD:
         xc_params: Any | None = None,
         nstates: int | None = 3,
         occupation_tolerance: float = 1e-8,
-        excitation_threshold: float = 1e-7,
+        excitation_threshold: float = PYSCF_TD_POSITIVE_EIG_THRESHOLD,
         matrix_eps: float = 1e-10,
         eigensolver: Literal["auto", "davidson"] = "auto",
-        davidson_tol: float = 1e-6,
-        davidson_max_iter: int = 60,
+        davidson_tol: float = PYSCF_TD_DAVIDSON_TOL,
+        davidson_max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
         davidson_max_subspace: int | None = None,
         **kwargs: Any,
     ) -> None:

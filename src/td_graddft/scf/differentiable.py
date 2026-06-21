@@ -1325,7 +1325,7 @@ class DifferentiableSCF:
             density_spin: Array,
             mo_coeff_ref_spin: Array,
             mo_energy_ref_spin: Array,
-        ) -> tuple[Array, Array]:
+        ) -> tuple[Array, Array, Array]:
             updates = dict(
                 rdm1=density_spin,
                 mo_coeff=mo_coeff_ref_spin,
@@ -1396,7 +1396,26 @@ class DifferentiableSCF:
                 ],
                 axis=0,
             )
-            return fock_spin, fock_spin
+            one_body = jnp.einsum("spq,pq->", density_spin, h1e, optimize=True)
+            coulomb = 0.5 * jnp.einsum("pq,pq->", density_total, j_mat, optimize=True)
+            exchange = -0.5 * alpha * (
+                jnp.einsum("pq,pq->", density_spin[0], k_alpha, optimize=True)
+                + jnp.einsum("pq,pq->", density_spin[1], k_beta, optimize=True)
+            )
+            energy_from_molecule = getattr(xc_functional, "energy_from_molecule", None)
+            xc_energy = (
+                energy_from_molecule(xc_params, molecule_iter)
+                if callable(energy_from_molecule)
+                else jnp.asarray(0.0, dtype=h1e.dtype)
+            )
+            total_energy = (
+                one_body
+                + coulomb
+                + exchange
+                + jnp.asarray(xc_energy, dtype=h1e.dtype)
+                + jnp.asarray(getattr(molecule, "nuclear_repulsion", 0.0), dtype=h1e.dtype)
+            )
+            return fock_spin, fock_spin, total_energy
 
         (
             density_spin_final,
@@ -1419,8 +1438,10 @@ class DifferentiableSCF:
             overlap=overlap,
             max_cycle=int(self.config.max_cycle),
             damping=float(self.config.damping),
+            conv_tol=float(self.config.energy_convergence_tolerance()),
             conv_tol_density=float(self.config.conv_tol_density),
             orthogonalization_eps=float(self.config.orthogonalization_eps),
+            convergence_metric=str(self.config.convergence_metric),
             eigenvalue_jitter=float(self.config.eigenvalue_jitter),
             iterate_selection=str(self.config.iterate_selection),
         )

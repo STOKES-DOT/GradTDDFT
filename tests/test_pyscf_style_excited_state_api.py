@@ -8,6 +8,20 @@ from td_graddft import gto, scf, tdscf
 from td_graddft.spectra import HARTREE_TO_EV
 
 
+def test_tdscf_facade_defaults_match_pyscf_tda_solver_settings():
+    reference = types.SimpleNamespace(
+        mo_coeff=jnp.zeros((2, 2)),
+        mo_occ=jnp.asarray([2.0, 0.0]),
+        mo_energy=jnp.asarray([-0.5, 0.1]),
+    )
+
+    td = tdscf.TDA(reference)
+
+    assert td.davidson_tol == pytest.approx(1e-5)
+    assert td.davidson_max_iter == 100
+    assert td.excitation_threshold == pytest.approx(1e-3)
+
+
 def test_tda_from_restricted_mf_stores_fields_and_spectra(monkeypatch):
     import td_graddft.tdscf.api as api
 

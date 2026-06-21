@@ -49,7 +49,7 @@ def test_h2_ground_tool_normalizes_legacy_cli_aliases():
     assert not hasattr(args, "density_matrix_constraint_weight")
 
 
-def test_h2_ground_training_data_uses_total_density_grid_target_only():
+def test_h2_ground_training_data_uses_density_matrix_target():
     module = _load_tool_module(
         "tools/h2_self_consistent_ground_train5_dense100_vs_fci.py",
         "h2_self_consistent_ground_train5_dense100_vs_fci_test_density_target",
@@ -58,13 +58,13 @@ def test_h2_ground_training_data_uses_total_density_grid_target_only():
         molecule=SimpleNamespace(),
         fci_energy_h=-1.0,
         fci_density_grid=np.asarray([0.2, 0.3], dtype=np.float64),
-        fci_dm_ao=np.asarray([[1.0]], dtype=np.float64),
+        fci_density_matrix=np.asarray([[1.0]], dtype=np.float64),
     )
 
     (datum,) = module.build_training_data([point], density_constraint_weight=0.7)
 
-    assert np.allclose(np.asarray(datum.target_density), point.fci_density_grid)
-    assert datum.target_density_matrix is None
+    assert datum.target_density is None
+    assert np.allclose(np.asarray(datum.target_density_matrix), point.fci_density_matrix)
     assert datum.density_constraint_weight == 0.7
     assert datum.density_matrix_constraint_weight == 0.0
 
@@ -208,6 +208,7 @@ def test_h2_s1_reference_cache_writer_matches_current_reference_point(tmp_path, 
         fci_total_energies_h=np.asarray([-1.0, -0.5], dtype=np.float64),
         fci_excitation_energies_h=np.asarray([0.5], dtype=np.float64),
         fci_density_grid=np.asarray([0.2, 0.3], dtype=np.float64),
+        fci_density_matrix=np.asarray([[1.0]], dtype=np.float64),
         fci_electron_count=2.0,
     )
     monkeypatch.setattr(module, "write_restricted_molecule", lambda group, molecule: None)
@@ -216,10 +217,11 @@ def test_h2_s1_reference_cache_writer_matches_current_reference_point(tmp_path, 
         group = handle.create_group("point")
         module._write_reference_point(group, point)
         assert "fci_density_grid" in group
+        assert "fci_density_matrix" in group
         assert "fci_dm_ao" not in group
 
 
-def test_h2_s1_training_data_uses_total_density_grid_target_only():
+def test_h2_s1_training_data_uses_density_matrix_target():
     module = _load_tool_module(
         "tools/h2_s1_tda_train5_dense100_vs_fci.py",
         "h2_s1_tda_train5_dense100_vs_fci_test_density_target",
@@ -227,9 +229,10 @@ def test_h2_s1_training_data_uses_total_density_grid_target_only():
     point = SimpleNamespace(
         molecule=SimpleNamespace(),
         fci_energy_h=-1.0,
+        fci_total_energies_h=np.asarray([-1.0, -0.4], dtype=np.float64),
         fci_excitation_energies_h=np.asarray([0.5], dtype=np.float64),
         fci_density_grid=np.asarray([0.2, 0.3], dtype=np.float64),
-        fci_dm_ao=np.asarray([[1.0]], dtype=np.float64),
+        fci_density_matrix=np.asarray([[1.0]], dtype=np.float64),
     )
 
     (datum,) = module.build_s1_training_data(
@@ -238,10 +241,14 @@ def test_h2_s1_training_data_uses_total_density_grid_target_only():
         density_constraint_weight=0.4,
     )
 
-    assert np.allclose(np.asarray(datum.target_density), point.fci_density_grid)
-    assert datum.target_density_matrix is None
+    assert datum.target_density is None
+    assert np.allclose(np.asarray(datum.target_density_matrix), point.fci_density_matrix)
     assert datum.density_constraint_weight == 0.4
     assert datum.density_matrix_constraint_weight == 0.0
+    assert datum.s1_constraint_weight == 0.0
+    assert datum.target_s1_energy is None
+    assert datum.first_excited_total_energy_constraint_weight == 1.0
+    assert np.isclose(np.asarray(datum.target_first_excited_total_energy), -0.4)
 
 
 def test_h2_s1_tool_e0_only_objective_disables_s1_supervision():

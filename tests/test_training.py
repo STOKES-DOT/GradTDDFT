@@ -6,6 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import pytest
 from flax import linen as nn
 from jax.lax import Precision
 
@@ -691,6 +692,7 @@ def test_predict_excitation_energies_uses_davidson_for_traced_params(monkeypatch
 
     assert jnp.allclose(excitation, jnp.asarray([0.31]))
     assert calls[0]["eigensolver"] == "davidson"
+    assert "davidson_max_iter" not in calls[0]
     assert calls[0].get("davidson_max_subspace") is None
 
 
@@ -838,6 +840,8 @@ def test_density_matrix_matching_penalty_is_separate_from_grid_density_loss():
     assert metrics["density_matrix_penalty"].shape == (1,)
     assert metrics["density_mse"].shape == (1,)
     assert metrics["density_matrix_mse"].shape == (1,)
+    assert metrics["density_mse"][0] == penalty
+    assert metrics["density_penalty"][0] == jnp.asarray(0.1) * penalty
     assert metrics["density_matrix_penalty"][0] == jnp.asarray(0.2) * metrics["density_matrix_mse"][0]
 
 
@@ -1261,10 +1265,12 @@ def test_first_excited_total_energy_constraint_penalty_is_finite_and_affects_los
 
     assert metrics["first_excited_total_penalty"].shape == (1,)
     assert metrics["first_excited_total_mse"].shape == (1,)
+    assert metrics["first_excited_total_mae"].shape == (1,)
     assert metrics["first_excited_total_predicted"].shape == (1,)
     assert metrics["first_excited_total_target"].shape == (1,)
-    assert metrics["first_excited_total_penalty"][0] > 0.0
-    assert metrics["first_excited_total_mse"][0] > 0.0
+    assert metrics["first_excited_total_mse"][0] == pytest.approx(0.01)
+    assert metrics["first_excited_total_mae"][0] == pytest.approx(0.1)
+    assert metrics["first_excited_total_penalty"][0] == pytest.approx(0.5 * (0.01 + 0.1))
     assert loss_constrained > loss_plain
 
 

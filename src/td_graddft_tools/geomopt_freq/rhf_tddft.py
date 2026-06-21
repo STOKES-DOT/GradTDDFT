@@ -19,6 +19,9 @@ from td_graddft.scf.rhf import (
     nuclear_repulsion_energy,
 )
 from td_graddft.tddft import RestrictedCasidaTDDFT
+from td_graddft.tddft.eigensolvers import PYSCF_TD_DAVIDSON_MAX_CYCLE
+from td_graddft.tddft.eigensolvers import PYSCF_TD_DAVIDSON_TOL
+from td_graddft.tddft.eigensolvers import PYSCF_TD_POSITIVE_EIG_THRESHOLD
 
 from .objectives import EnergySurface
 from .optimization import (
@@ -82,10 +85,10 @@ class RHFExcitedStateSurfaceConfig:
     response_method: Literal["tda", "casida"] = "tda"
     coordinate_unit: Literal["angstrom", "bohr"] = "angstrom"
     eigensolver: Literal["auto", "davidson"] = "auto"
-    excitation_threshold: float = 1e-7
+    excitation_threshold: float = PYSCF_TD_POSITIVE_EIG_THRESHOLD
     matrix_eps: float = 1e-10
-    davidson_tol: float = 1e-6
-    davidson_max_iter: int = 60
+    davidson_tol: float = PYSCF_TD_DAVIDSON_TOL
+    davidson_max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE
     davidson_max_subspace: int | None = None
 
 
