@@ -157,7 +157,7 @@ def _objective_display_label(args: argparse.Namespace) -> str:
         return "E0-only"
     solver_label = "TDA" if bool(args.s1_use_tda) else "Casida"
     if kind == "s1_only":
-        return f"S1-only {solver_label}"
+        return f"S1-total-only {solver_label}"
     return f"Joint {solver_label}"
 
 
@@ -185,15 +185,44 @@ def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
-            "Train Neural_xc on the H2 S1 excitation gap only, using TDA for both "
-            "training supervision and evaluation, then compare dense TDA results "
-            "against FCI and plot the equilibrium stick spectrum."
+            "Train Neural_xc on the H2 first excited-state total energy curve "
+            "E1(R)=E0(R)+Omega1(R), using TDA for the excitation contribution, "
+            "then compare dense TDA results against FCI and plot the equilibrium "
+            "stick spectrum."
         )
     )
     p.add_argument("--basis", default="sto-3g")
     p.add_argument("--xc", default="b3lyp")
+    p.add_argument("--system-label", default="H2")
+    p.add_argument("--atom1", default="H")
+    p.add_argument("--atom2", default="H")
+    p.add_argument("--charge", type=int, default=0)
+    p.add_argument("--spin", type=int, default=0)
+    p.add_argument(
+        "--external-s1-total-csv",
+        default=None,
+        help=(
+            "Optional CSV containing an external first-excited-state total-energy "
+            "curve. When provided, FCI reference construction is skipped and this "
+            "curve supplies target_first_excited_total_energy."
+        ),
+    )
+    p.add_argument("--external-r-column", default="r_angstrom")
+    p.add_argument("--external-s1-total-column", default="mr_ccca_hartree")
+    p.add_argument(
+        "--external-reference-label",
+        default=None,
+        help="Label used in plots/summary for the external target curve.",
+    )
     p.add_argument("--r-min", type=float, default=0.05)
     p.add_argument("--r-max", type=float, default=5.0)
+    p.add_argument(
+        "--train-r-values",
+        type=float,
+        nargs="+",
+        default=None,
+        help="Optional explicit training bond lengths in Angstrom; overrides linspace train points.",
+    )
     p.add_argument("--train-points", type=int, default=5)
     p.add_argument("--dense-points", type=int, default=100)
     p.add_argument("--steps", type=int, default=2000)
@@ -314,7 +343,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--s1-weight",
         type=float,
         default=1.0,
-        help="Weight for the S1 excitation-energy supervision term.",
+        help="Weight for the first excited-state total-energy supervision term.",
     )
     p.add_argument(
         "--s1-use-tda",
@@ -335,20 +364,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "Training objective selection. 'auto' infers the mode from the active "
             "loss weights; explicit modes disable or backfill supervision weights "
-            "to match E0-only, S1-only, or joint training."
+            "to match E0-only, S1-total-only, or joint training."
         ),
     )
     p.add_argument(
         "--energy-mse-weight",
         type=float,
         default=0.0,
-        help="Ground-state energy MSE weight. Keep at 0 for S1-only training.",
+        help="Ground-state energy MSE weight. Keep at 0 for S1-total-only training.",
     )
     p.add_argument(
         "--energy-mae-weight",
         type=float,
         default=0.0,
-        help="Ground-state energy MAE weight. Keep at 0 for S1-only training.",
+        help="Ground-state energy MAE weight. Keep at 0 for S1-total-only training.",
     )
     p.add_argument(
         "--density-constraint-weight",
@@ -461,13 +490,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--jit-train",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Attempt to JIT the S1-only train step.",
+        help="Attempt to JIT the S1-total-only train step.",
     )
     p.add_argument(
         "--equilibrium-spectrum-nstates",
         type=int,
         default=3,
         help="Number of TDA states used for the equilibrium stick spectrum.",
+    )
+    p.add_argument(
+        "--skip-equilibrium-spectrum",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Skip the equilibrium stick spectrum. Useful for external C2 targets where FCI is not rebuilt.",
     )
     p.add_argument(
         "--excited-nstates",
@@ -498,6 +533,39 @@ def _metric_mean(metrics: dict[str, Any], key: str, default: float = float("nan"
     if int(arr.size) <= 0:
         return default
     return float(jnp.mean(arr))
+
+
+def _s1_total_supervision_penalty(metrics: dict[str, Any]) -> float:
+    if "first_excited_total_penalty" in metrics:
+        return _metric_mean(metrics, "first_excited_total_penalty", 0.0)
+    return _metric_mean(metrics, "s1_penalty", 0.0)
+
+
+def _s1_total_supervision_mse(metrics: dict[str, Any]) -> float:
+    if "first_excited_total_mse" in metrics:
+        return _metric_mean(metrics, "first_excited_total_mse", 0.0)
+    return _metric_mean(metrics, "s1_mse", 0.0)
+
+
+def _s1_total_supervision_mae(metrics: dict[str, Any]) -> float:
+    if "first_excited_total_mae" in metrics:
+        return _metric_mean(metrics, "first_excited_total_mae", 0.0)
+    mse = _s1_total_supervision_mse(metrics)
+    if np.isfinite(mse):
+        return float(np.sqrt(max(mse, 0.0)))
+    return _metric_mean(metrics, "s1_mae", 0.0)
+
+
+def _s1_total_predicted_metric(metrics: dict[str, Any]) -> float:
+    if "first_excited_total_predicted" in metrics:
+        return _metric_mean(metrics, "first_excited_total_predicted", float("nan"))
+    return _metric_mean(metrics, "s1_predicted", float("nan"))
+
+
+def _s1_total_target_metric(metrics: dict[str, Any]) -> float:
+    if "first_excited_total_target" in metrics:
+        return _metric_mean(metrics, "first_excited_total_target", float("nan"))
+    return _metric_mean(metrics, "s1_target", float("nan"))
 
 
 def _with_scf_initial_density(molecule: Any, density: Any) -> Any:
@@ -584,6 +652,78 @@ def _make_s1_functional(args: argparse.Namespace) -> Any:
     )
 
 
+def _reference_s1_total_energy_h(point: Any) -> float:
+    total_energies = np.asarray(getattr(point, "fci_total_energies_h", ()), dtype=np.float64)
+    if int(total_energies.size) > 1:
+        return float(total_energies[1])
+    if int(np.asarray(point.fci_excitation_energies_h).size) < 1:
+        raise ValueError("Reference point must provide at least one FCI excitation energy.")
+    return float(point.fci_energy_h) + float(point.fci_excitation_energies_h[0])
+
+
+def _load_external_s1_total_curve(args: argparse.Namespace) -> tuple[np.ndarray, np.ndarray] | None:
+    csv_path = getattr(args, "external_s1_total_csv", None)
+    if not csv_path:
+        return None
+    path = Path(str(csv_path))
+    r_column = str(getattr(args, "external_r_column", "r_angstrom"))
+    energy_column = str(getattr(args, "external_s1_total_column", "mr_ccca_hartree"))
+    rows: list[tuple[float, float]] = []
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        if reader.fieldnames is None:
+            raise ValueError(f"External target CSV {path} has no header.")
+        missing = [name for name in (r_column, energy_column) if name not in reader.fieldnames]
+        if missing:
+            raise KeyError(f"External target CSV {path} is missing columns: {missing}")
+        for row in reader:
+            raw_r = str(row.get(r_column, "")).strip()
+            raw_e = str(row.get(energy_column, "")).strip()
+            if not raw_r or not raw_e:
+                continue
+            rows.append((float(raw_r), float(raw_e)))
+    if len(rows) < 2:
+        raise ValueError(
+            f"External target CSV {path} needs at least two finite rows in {r_column}/{energy_column}."
+        )
+    rows = sorted(rows)
+    return (
+        np.asarray([row[0] for row in rows], dtype=np.float64),
+        np.asarray([row[1] for row in rows], dtype=np.float64),
+    )
+
+
+def _external_s1_total_at_r(
+    curve: tuple[np.ndarray, np.ndarray] | None,
+    r_angstrom: float,
+) -> float | None:
+    if curve is None:
+        return None
+    r_values, e_values = curve
+    r = float(r_angstrom)
+    r_min = float(np.min(r_values))
+    r_max = float(np.max(r_values))
+    if r < r_min - 1e-10 or r > r_max + 1e-10:
+        raise ValueError(
+            f"Requested R={r:.8g} A lies outside external target range "
+            f"[{r_min:.8g}, {r_max:.8g}] A."
+        )
+    return float(np.interp(r, r_values, e_values))
+
+
+def _system_label(args: argparse.Namespace) -> str:
+    return str(getattr(args, "system_label", "H2") or "H2")
+
+
+def _reference_label(args: argparse.Namespace) -> str:
+    explicit = getattr(args, "external_reference_label", None)
+    if explicit:
+        return str(explicit)
+    if getattr(args, "external_s1_total_csv", None):
+        return str(getattr(args, "external_s1_total_column", "external E1"))
+    return "FCI"
+
+
 def build_s1_training_data(
     points: list[Any],
     *,
@@ -594,20 +734,21 @@ def build_s1_training_data(
     for point in points:
         if int(np.asarray(point.fci_excitation_energies_h).size) < 1:
             raise ValueError("Every training point must provide at least one FCI excitation energy.")
+        target_first_excited_total_energy = _reference_s1_total_energy_h(point)
         data.append(
             GroundStateDatum.from_parts(
                 point.molecule,
                 core=GroundStateCoreDatum(
                     target_total_energy=jnp.asarray(point.fci_energy_h, dtype=jnp.float64),
-                    target_density=jnp.asarray(point.fci_density_grid, dtype=jnp.float64),
+                    target_density_matrix=jnp.asarray(point.fci_density_matrix, dtype=jnp.float64),
                     density_constraint_weight=float(density_constraint_weight),
                 ),
                 excited_state=ExcitedStateDatum(
-                    target_s1_energy=jnp.asarray(
-                        float(point.fci_excitation_energies_h[0]),
+                    target_first_excited_total_energy=jnp.asarray(
+                        target_first_excited_total_energy,
                         dtype=jnp.float64,
                     ),
-                    s1_constraint_weight=float(s1_weight),
+                    first_excited_total_energy_constraint_weight=float(s1_weight),
                 ),
             )
         )
@@ -623,6 +764,7 @@ def _write_reference_point(group: Any, point: Any) -> None:
         "fci_total_energies_h",
         "fci_excitation_energies_h",
         "fci_density_grid",
+        "fci_density_matrix",
     ):
         if name in group:
             del group[name]
@@ -642,6 +784,7 @@ def _read_reference_point(group: Any) -> Any:
             dtype=np.float64,
         ),
         fci_density_grid=np.asarray(group["fci_density_grid"][()], dtype=np.float64),
+        fci_density_matrix=np.asarray(group["fci_density_matrix"][()], dtype=np.float64),
         fci_electron_count=float(group.attrs["fci_electron_count"]),
     )
 
@@ -649,12 +792,24 @@ def _read_reference_point(group: Any) -> Any:
 def _cache_group_name(label: str, args: argparse.Namespace) -> str:
     pt2 = "pt2" if bool(args.include_pt2_channel) else "nopt2"
     npoints = int(args.train_points if label == "train" else args.dense_points)
+    target_csv = getattr(args, "external_s1_total_csv", None)
+    target_tag = (
+        "internal_fci"
+        if not target_csv
+        else f"external={Path(str(target_csv)).stem}/col={str(getattr(args, 'external_s1_total_column', ''))}"
+    )
     return (
         f"{label}/basis={str(args.basis).replace('/', '_')}/"
+        f"system={_system_label(args)}/"
+        f"atoms={str(getattr(args, 'atom1', 'H'))}-{str(getattr(args, 'atom2', 'H'))}/"
+        f"charge={int(getattr(args, 'charge', 0))}/"
+        f"spin={int(getattr(args, 'spin', 0))}/"
         f"grid={int(args.grids_level)}/"
         f"r={float(args.r_min):.8g}-{float(args.r_max):.8g}/"
         f"n={npoints}/{pt2}/"
-        f"pt2mode={str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else 'none'}"
+        f"pt2mode={str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else 'none'}/"
+        f"target={target_tag}/"
+        "density=dm-v2"
     )
 
 
@@ -683,6 +838,67 @@ def _has_hdf5_group(path: Path, group_name: str) -> bool:
         return group_name in handle
 
 
+def _build_reference_curve_for_s1(
+    r_values: np.ndarray,
+    *,
+    args: argparse.Namespace,
+    logger: RunLogger,
+    label: str,
+) -> list[Any]:
+    external_curve = _load_external_s1_total_curve(args)
+    if external_curve is None:
+        return build_reference_curve(r_values, args=args, logger=logger, label=label)
+    points: list[Any] = []
+    rhf_dm0 = None
+    t0 = time.perf_counter()
+    for idx, r_val in enumerate(r_values, start=1):
+        target_e1 = _external_s1_total_at_r(external_curve, float(r_val))
+        point, rhf_dm0 = _HELPERS.build_reference_point(
+            float(r_val),
+            atom1=str(getattr(args, "atom1", "H")),
+            atom2=str(getattr(args, "atom2", "H")),
+            charge=int(getattr(args, "charge", 0)),
+            spin=int(getattr(args, "spin", 0)),
+            basis=str(args.basis),
+            xc=str(args.xc),
+            grids_level=int(args.grids_level),
+            max_l=int(args.max_l),
+            grid_ao_backend=str(args.grid_ao_backend),
+            integral_backend=str(args.integral_backend),
+            jk_backend=str(args.jk_backend),
+            df_tol=float(args.df_tol),
+            df_max_rank=args.df_max_rank,
+            reference_scf_max_cycle=int(args.reference_scf_max_cycle),
+            reference_scf_conv_tol=float(args.reference_scf_conv_tol),
+            reference_scf_conv_tol_density=float(args.reference_scf_conv_tol_density),
+            reference_scf_damping=float(args.reference_scf_damping),
+            reference_scf_potential_clip=float(args.reference_scf_potential_clip),
+            excited_nstates=int(args.excited_nstates),
+            fci_dm0=rhf_dm0,
+            compute_local_hfx_features=(str(args.input_feature_mode) == "canonical"),
+            compute_local_pt2_features=bool(getattr(args, "include_pt2_channel", False)),
+            reference_scf_backend=str(getattr(args, "reference_scf_backend", "pyscf")),
+            external_s1_total_energy_h=target_e1,
+        )
+        s1_total = _reference_s1_total_energy_h(point)
+        s1_gap = (
+            float(point.fci_excitation_energies_h[0])
+            if point.fci_excitation_energies_h.size > 0
+            else float("nan")
+        )
+        points.append(point)
+        logger.log(
+            f"[{label}] {idx:3d}/{len(r_values):3d} "
+            f"R={point.r_angstrom:.4f} A "
+            f"E0_ref={point.fci_energy_h:.10f} Eh "
+            f"E1_target={s1_total:.10f} Eh "
+            f"pseudo_gap={s1_gap:.10f} Eh "
+            f"grid_n={int(np.asarray(point.molecule.grid.weights).size)}"
+        )
+    logger.log(f"[{label}] done in {time.perf_counter() - t0:.2f} s")
+    return points
+
+
 def _get_or_build_reference_curve(
     r_values: np.ndarray,
     *,
@@ -693,7 +909,7 @@ def _get_or_build_reference_curve(
     cache_arg = getattr(args, "reference_cache", None)
     cache_label = "train" if label.startswith("train") else "dense"
     if cache_arg is None:
-        return build_reference_curve(r_values, args=args, logger=logger, label=label)
+        return _build_reference_curve_for_s1(r_values, args=args, logger=logger, label=label)
     cache_path = Path(str(cache_arg))
     group_name = _cache_group_name(cache_label, args)
     if _has_hdf5_group(cache_path, group_name) and not bool(args.rebuild_reference_cache):
@@ -701,7 +917,7 @@ def _get_or_build_reference_curve(
         points = _load_reference_points_hdf5(cache_path, group_name)
         logger.log(f"[{label}] loaded {len(points)} cached references")
         return points
-    points = build_reference_curve(r_values, args=args, logger=logger, label=label)
+    points = _build_reference_curve_for_s1(r_values, args=args, logger=logger, label=label)
     logger.log(f"[{label}] writing cached references to {cache_path}:{group_name}")
     _save_reference_points_hdf5(cache_path, group_name, points)
     return points
@@ -729,9 +945,9 @@ def _streaming_average_eval(
     for datum in data:
         loss, metrics = eval_kernel(params, datum)
         losses.append(float(loss))
-        s1_penalties.append(_metric_mean(metrics, "s1_penalty", 0.0))
-        s1_maes.append(_metric_mean(metrics, "s1_mae", 0.0))
-        s1_mses.append(_metric_mean(metrics, "s1_mse", 0.0))
+        s1_penalties.append(_s1_total_supervision_penalty(metrics))
+        s1_maes.append(_s1_total_supervision_mae(metrics))
+        s1_mses.append(_s1_total_supervision_mse(metrics))
     return float(np.mean(losses)), {
         "s1_penalty": float(np.mean(s1_penalties)),
         "s1_mae": float(np.mean(s1_maes)),
@@ -898,9 +1114,9 @@ def _train_functional_streaming(
         for datum in training_data:
             loss, metrics, grads = loss_and_grad_kernel(params_for_loss, datum)
             losses.append(float(loss))
-            s1_penalties.append(_metric_mean(metrics, "s1_penalty", 0.0))
-            s1_maes.append(_metric_mean(metrics, "s1_mae", 0.0))
-            s1_mses.append(_metric_mean(metrics, "s1_mse", 0.0))
+            s1_penalties.append(_s1_total_supervision_penalty(metrics))
+            s1_maes.append(_s1_total_supervision_mae(metrics))
+            s1_mses.append(_s1_total_supervision_mse(metrics))
             grad_norms.append(_metric_scalar(metrics, "grad_norm"))
             grad_abs_maxes.append(_metric_scalar(metrics, "grad_abs_max"))
             nonfinite_fracs.append(_metric_scalar(metrics, "nonfinite_grad_fraction", 0.0))
@@ -955,7 +1171,7 @@ def _train_functional_streaming(
                 "[train] "
                 f"step={step:4d}/{int(args.steps):4d} "
                 f"loss={train_loss_val:.8e} "
-                f"s1_mae={train_s1_mae_val:.8e} "
+                f"s1_total_mae={train_s1_mae_val:.8e} "
                 f"grad_norm={grad_norm_val:.8e} "
                 f"grad_abs_max={grad_abs_max_val:.8e} "
                 f"update_norm={param_update_norm_val:.8e} "
@@ -1223,16 +1439,16 @@ def train_functional(
 
     history_steps = [0]
     loss_history = [initial_loss_val]
-    s1_penalty_history = [_metric_mean(initial_metrics, "s1_penalty", 0.0)]
-    s1_mae_history = [_metric_mean(initial_metrics, "s1_mae", 0.0)]
-    s1_mse_history = [_metric_mean(initial_metrics, "s1_mse", 0.0)]
+    s1_penalty_history = [_s1_total_supervision_penalty(initial_metrics)]
+    s1_mae_history = [_s1_total_supervision_mae(initial_metrics)]
+    s1_mse_history = [_s1_total_supervision_mse(initial_metrics)]
     grad_norm_history = [float("nan")]
     grad_abs_max_history = [float("nan")]
     param_update_norm_history = [float("nan")]
     nonfinite_grad_fraction_history = [0.0]
     eval_steps = [0]
     eval_loss_history = [initial_loss_val]
-    eval_s1_mae_history = [_metric_mean(initial_metrics, "s1_mae", 0.0)]
+    eval_s1_mae_history = [_s1_total_supervision_mae(initial_metrics)]
 
     logger.log(
         "[train] "
@@ -1325,9 +1541,9 @@ def train_functional(
         )
         nonfinite_grad_fraction_val = _metric_scalar(train_metrics, "nonfinite_grad_fraction", 0.0)
         train_loss_val = _metric_scalar(train_metrics, "loss")
-        train_s1_penalty_val = _metric_mean(train_metrics, "s1_penalty", 0.0)
-        train_s1_mae_val = _metric_mean(train_metrics, "s1_mae", 0.0)
-        train_s1_mse_val = _metric_mean(train_metrics, "s1_mse", 0.0)
+        train_s1_penalty_val = _s1_total_supervision_penalty(train_metrics)
+        train_s1_mae_val = _s1_total_supervision_mae(train_metrics)
+        train_s1_mse_val = _s1_total_supervision_mse(train_metrics)
 
         grad_norm_history.append(grad_norm_val)
         grad_abs_max_history.append(grad_abs_max_val)
@@ -1358,9 +1574,9 @@ def train_functional(
                 "[train] "
                 f"step={step:4d}/{int(args.steps):4d} "
                 f"loss={train_loss_val:.8e} "
-                f"s1_mae={train_s1_mae_val:.8e} "
-                f"s1_pred_h={_metric_mean(train_metrics, 's1_predicted', float('nan')):.8e} "
-                f"s1_target_h={_metric_mean(train_metrics, 's1_target', float('nan')):.8e} "
+                f"s1_total_mae={train_s1_mae_val:.8e} "
+                f"s1_total_pred_h={_s1_total_predicted_metric(train_metrics):.8e} "
+                f"s1_total_target_h={_s1_total_target_metric(train_metrics):.8e} "
                 f"grad_norm={grad_norm_val:.8e} "
                 f"grad_abs_max={grad_abs_max_val:.8e} "
                 f"update_norm={param_update_norm_val:.8e} "
@@ -1372,9 +1588,9 @@ def train_functional(
     final_loss, final_metrics = compiled_eval(state.params)
     final_loss_val = float(final_loss)
     final_step = int(args.steps)
-    final_s1_penalty = _metric_mean(final_metrics, "s1_penalty", 0.0)
-    final_s1_mae = _metric_mean(final_metrics, "s1_mae", 0.0)
-    final_s1_mse = _metric_mean(final_metrics, "s1_mse", 0.0)
+    final_s1_penalty = _s1_total_supervision_penalty(final_metrics)
+    final_s1_mae = _s1_total_supervision_mae(final_metrics)
+    final_s1_mse = _s1_total_supervision_mse(final_metrics)
     if history_steps and int(history_steps[-1]) == final_step:
         loss_history[-1] = final_loss_val
         s1_penalty_history[-1] = final_s1_penalty
@@ -1479,6 +1695,8 @@ def evaluate_dense_curve_tda(
             if int(np.asarray(point.fci_excitation_energies_h).size) > 0
             else float("nan")
         )
+        fci_total = _reference_s1_total_energy_h(point) if np.isfinite(fci_gap) else float("nan")
+        pred_total = float(predicted_energy_h + pred_gap) if np.isfinite(pred_gap) else float("nan")
         rows.append(
             {
                 "r_angstrom": float(point.r_angstrom),
@@ -1486,6 +1704,10 @@ def evaluate_dense_curve_tda(
                 "exact_energy_h": float(point.fci_energy_h),
                 "predicted_energy_h": predicted_energy_h,
                 "energy_abs_err_ev": abs(predicted_energy_h - point.fci_energy_h) * HARTREE_TO_EV,
+                "fci_s1_total_energy_h": fci_total,
+                "exact_s1_total_energy_h": fci_total,
+                "predicted_s1_total_energy_h": pred_total,
+                "s1_total_abs_err_ev": abs(pred_total - fci_total) * HARTREE_TO_EV,
                 "fci_s1_h": fci_gap,
                 "exact_s1_h": fci_gap,
                 "predicted_s1_h": pred_gap,
@@ -1504,8 +1726,6 @@ def evaluate_dense_curve_tda(
         solver_name = "tda" if bool(use_tda) else "casida"
         solver_label = "TDA" if bool(use_tda) else "Casida"
         if np.isfinite(fci_gap) and np.isfinite(pred_gap):
-            fci_total = float(point.fci_total_energies_h[1])
-            pred_total = float(predicted_energy_h + pred_gap)
             excited_rows.append(
                 {
                     "r_angstrom": float(point.r_angstrom),
@@ -1527,6 +1747,7 @@ def evaluate_dense_curve_tda(
                 f"[eval] {idx:3d}/{len(dense_points):3d} "
                 f"R={point.r_angstrom:.4f} A "
                 f"E0_pred={predicted_energy_h:.10f} Eh "
+                f"S1_total_err={abs(pred_total - fci_total) * HARTREE_TO_EV:.6e} eV "
                 f"S1_{solver_label}_gap_err={abs(pred_gap - fci_gap) * HARTREE_TO_EV:.6e} eV "
                 f"f_{solver_label}={pred_strength:.6e}"
             )
@@ -1545,6 +1766,8 @@ def plot_dense_summary(
     training_mode: str,
     objective_label: str,
     use_tda: bool,
+    system_label: str,
+    reference_label: str,
 ) -> None:
     plt = _get_plt()
     r = np.asarray([row["r_angstrom"] for row in rows], dtype=np.float64)
@@ -1553,6 +1776,9 @@ def plot_dense_summary(
     energy_err_ev = np.asarray([row["energy_abs_err_ev"] for row in rows], dtype=np.float64)
     fci_s1 = np.asarray([row["fci_s1_h"] for row in rows], dtype=np.float64)
     pred_s1 = np.asarray([row["predicted_s1_h"] for row in rows], dtype=np.float64)
+    fci_s1_total = np.asarray([row["fci_s1_total_energy_h"] for row in rows], dtype=np.float64)
+    pred_s1_total = np.asarray([row["predicted_s1_total_energy_h"] for row in rows], dtype=np.float64)
+    s1_total_err_ev = np.asarray([row["s1_total_abs_err_ev"] for row in rows], dtype=np.float64)
     s1_gap_err_ev = np.asarray([row["s1_gap_abs_err_ev"] for row in rows], dtype=np.float64)
     density_l2 = np.asarray([row["density_l2"] for row in rows], dtype=np.float64)
 
@@ -1560,7 +1786,7 @@ def plot_dense_summary(
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 8.2))
 
     ax = axes[0, 0]
-    ax.plot(r, fci_energy, lw=2.0, label="FCI ground")
+    ax.plot(r, fci_energy, lw=2.0, label=f"{reference_label} ground")
     ax.plot(r, pred_energy, lw=2.0, label=f"Neural_xc {training_mode}")
     ax.scatter(
         train_r_values,
@@ -1571,33 +1797,33 @@ def plot_dense_summary(
         label="5 training points",
         zorder=5,
     )
-    ax.set_xlabel("H-H distance (Angstrom)")
+    ax.set_xlabel(f"{system_label} bond distance (Angstrom)")
     ax.set_ylabel("Total energy (Hartree)")
     ax.set_title("Ground-State Curve")
     ax.grid(alpha=0.25)
     ax.legend(frameon=False, fontsize=9)
 
     ax = axes[0, 1]
-    ax.plot(r, fci_s1 * HARTREE_TO_EV, lw=2.0, label="FCI S1 gap")
-    ax.plot(r, pred_s1 * HARTREE_TO_EV, lw=2.0, label=f"Neural {solver_label} S1 gap")
+    ax.plot(r, fci_s1_total, lw=2.0, label=f"{reference_label} E1 total")
+    ax.plot(r, pred_s1_total, lw=2.0, label=f"Neural {solver_label} S1 total")
     ax.scatter(
         train_r_values,
-        np.interp(train_r_values, r, fci_s1 * HARTREE_TO_EV),
+        np.interp(train_r_values, r, fci_s1_total),
         s=36,
         c="black",
         marker="o",
         zorder=5,
     )
-    ax.set_xlabel("H-H distance (Angstrom)")
-    ax.set_ylabel("Excitation energy (eV)")
-    ax.set_title(f"S1 Gap Curve ({solver_label})")
+    ax.set_xlabel(f"{system_label} bond distance (Angstrom)")
+    ax.set_ylabel("Total energy (Hartree)")
+    ax.set_title(f"S1 Total-Energy Curve ({solver_label})")
     ax.grid(alpha=0.25)
     ax.legend(frameon=False, fontsize=9)
 
     ax = axes[1, 0]
     ax.plot(r, np.maximum(energy_err_ev, 1e-16), lw=1.8, label="Ground abs. err. (eV)")
     ax.plot(r, np.maximum(density_l2, 1e-16), lw=1.8, label="Density L2")
-    ax.set_xlabel("H-H distance (Angstrom)")
+    ax.set_xlabel(f"{system_label} bond distance (Angstrom)")
     ax.set_ylabel("Error")
     ax.set_yscale("log")
     ax.set_title("Ground-State Diagnostics")
@@ -1605,15 +1831,19 @@ def plot_dense_summary(
     ax.legend(frameon=False, fontsize=9)
 
     ax = axes[1, 1]
-    ax.plot(r, np.maximum(s1_gap_err_ev, 1e-16), lw=1.9, label="S1 gap abs. err. (eV)")
-    ax.set_xlabel("H-H distance (Angstrom)")
+    ax.plot(r, np.maximum(s1_total_err_ev, 1e-16), lw=1.9, label="S1 total abs. err. (eV)")
+    ax.plot(r, np.maximum(s1_gap_err_ev, 1e-16), lw=1.4, alpha=0.75, label="S1 gap abs. err. (eV)")
+    ax.set_xlabel(f"{system_label} bond distance (Angstrom)")
     ax.set_ylabel("Error (eV)")
     ax.set_yscale("log")
-    ax.set_title(f"S1 Gap Error ({solver_label})")
+    ax.set_title(f"S1 Total-Energy Error ({solver_label})")
     ax.grid(alpha=0.25)
     ax.legend(frameon=False, fontsize=9)
 
-    fig.suptitle(f"H2 {objective_label} training vs FCI | {xc}/{basis}", y=0.985)
+    fig.suptitle(
+        f"{system_label} {objective_label} training vs {reference_label} | {xc}/{basis}",
+        y=0.985,
+    )
     fig.tight_layout()
     fig.savefig(path, dpi=220)
     plt.close(fig)
@@ -1950,7 +2180,7 @@ def plot_training_loss(
     axes[0].grid(alpha=0.2)
     axes[0].legend(frameon=False, fontsize=8)
 
-    axes[1].plot(steps, np.maximum(s1_mae, 1e-16), lw=1.9, label="pre-update S1 MAE")
+    axes[1].plot(steps, np.maximum(s1_mae, 1e-16), lw=1.9, label="pre-update E1 MAE")
     if eval_steps.size and eval_s1_mae.size:
         axes[1].plot(
             eval_steps,
@@ -1959,12 +2189,12 @@ def plot_training_loss(
             ms=2.8,
             lw=1.0,
             alpha=0.8,
-            label="re-evaluated S1 MAE",
+            label="re-evaluated E1 MAE",
         )
     axes[1].set_xlabel("Step")
-    axes[1].set_ylabel("S1 MAE (Eh)")
+    axes[1].set_ylabel("E1 total-energy MAE (Eh)")
     axes[1].set_yscale("log")
-    axes[1].set_title("S1 Supervision" if str(objective_kind) != "e0_only" else "S1 Diagnostic")
+    axes[1].set_title("S1 Total-Energy Supervision" if str(objective_kind) != "e0_only" else "S1 Diagnostic")
     axes[1].grid(alpha=0.2)
     axes[1].legend(frameon=False, fontsize=8)
 
@@ -2002,15 +2232,15 @@ def write_training_history_csv(path: Path, training: dict[str, Any]) -> None:
             [
                 "step",
                 "loss_pre_update",
-                "s1_penalty_pre_update",
-                "s1_mae_pre_update",
-                "s1_mse_pre_update",
+                "e1_total_penalty_pre_update",
+                "e1_total_mae_pre_update",
+                "e1_total_mse_pre_update",
                 "grad_norm",
                 "grad_abs_max",
                 "param_update_norm",
                 "nonfinite_grad_fraction",
                 "loss_reevaluated",
-                "s1_mae_reevaluated",
+                "e1_total_mae_reevaluated",
             ]
         )
         for idx, step in enumerate(steps):
@@ -2032,6 +2262,84 @@ def write_training_history_csv(path: Path, training: dict[str, Any]) -> None:
             )
 
 
+def save_training_artifacts(
+    *,
+    outdir: Path,
+    args: argparse.Namespace,
+    training: dict[str, Any],
+    params: Any,
+    train_r_values: np.ndarray,
+    eval_use_tda: bool,
+) -> tuple[Path, Path, Path, Path]:
+    training_png = outdir / "training_loss.png"
+    plot_training_loss(
+        training_png,
+        training,
+        title=f"{_system_label(args)} {_objective_display_label(args)} training loss",
+        objective_kind=_resolved_objective_kind(args),
+    )
+
+    training_history_csv = outdir / "training_history.csv"
+    write_training_history_csv(training_history_csv, training)
+
+    checkpoint_path = outdir / "neural_xc_params.msgpack"
+    checkpoint_path, checkpoint_meta_path = save_params_checkpoint(
+        checkpoint_path,
+        params,
+        metadata={
+            "basis": str(args.basis),
+            "xc": str(args.xc),
+            "system_label": _system_label(args),
+            "atom1": str(getattr(args, "atom1", "H")),
+            "atom2": str(getattr(args, "atom2", "H")),
+            "charge": int(getattr(args, "charge", 0)),
+            "spin": int(getattr(args, "spin", 0)),
+            "external_s1_total_csv": (
+                None
+                if getattr(args, "external_s1_total_csv", None) is None
+                else str(args.external_s1_total_csv)
+            ),
+            "external_s1_total_column": str(
+                getattr(args, "external_s1_total_column", "")
+            ),
+            "external_reference_label": _reference_label(args),
+            "training_mode": str(args.training_mode),
+            "reference_scf_backend": str(args.reference_scf_backend),
+            "objective": _objective_name(args),
+            "objective_kind": _resolved_objective_kind(args),
+            "include_hfx_channel": bool(args.include_hfx_channel),
+            "response_hf_mode": str(args.response_hf_mode),
+            "include_pt2_channel": bool(args.include_pt2_channel),
+            "pt2_channel_mode": (
+                str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None
+            ),
+            "response_pt2_mode": (
+                str(args.response_pt2_mode) if bool(args.include_pt2_channel) else None
+            ),
+            "s1_weight": float(args.s1_weight),
+            "energy_mse_weight": float(args.energy_mse_weight),
+            "energy_mae_weight": float(args.energy_mae_weight),
+            "density_constraint_weight": float(args.density_constraint_weight),
+            "s1_use_tda": bool(args.s1_use_tda),
+            "eval_use_tda": bool(eval_use_tda),
+            "scf_warm_start": bool(args.scf_warm_start),
+            "scf_warm_start_update_interval": int(args.scf_warm_start_update_interval),
+            "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
+            "scf_gradient_mode": str(args.scf_gradient_mode),
+            "scf_implicit_diff_max_iter": int(args.scf_implicit_diff_max_iter),
+            "scf_implicit_diff_clip": float(args.scf_implicit_diff_clip),
+            "scf_implicit_diff_tolerance": float(args.scf_implicit_diff_tolerance),
+            "scf_implicit_diff_regularization": float(args.scf_implicit_diff_regularization),
+            "steps": int(args.steps),
+            "learning_rate": float(args.learning_rate),
+            "hidden_dims": [int(value) for value in args.hidden_dims],
+            "train_r_values_angstrom": [float(value) for value in train_r_values],
+            "dense_points": int(args.dense_points),
+        },
+    )
+    return training_png, training_history_csv, checkpoint_path, checkpoint_meta_path
+
+
 def write_summary(
     path: Path,
     *,
@@ -2048,14 +2356,38 @@ def write_summary(
     density_l2 = np.asarray([row["density_l2"] for row in dense_rows], dtype=np.float64)
     predicted_s1 = np.asarray([row["predicted_s1_h"] for row in dense_rows], dtype=np.float64)
     fci_s1 = np.asarray([row["fci_s1_h"] for row in dense_rows], dtype=np.float64)
+    predicted_e1_total = np.asarray(
+        [row["predicted_s1_total_energy_h"] for row in dense_rows],
+        dtype=np.float64,
+    )
+    fci_e1_total = np.asarray(
+        [row["fci_s1_total_energy_h"] for row in dense_rows],
+        dtype=np.float64,
+    )
+    s1_total_err_ev = np.asarray(
+        [row["s1_total_abs_err_ev"] for row in dense_rows],
+        dtype=np.float64,
+    )
     eq_idx = int(np.argmin(np.abs(np.asarray([row["r_angstrom"] for row in dense_rows]) - equilibrium_point.r_angstrom)))
 
     eval_use_tda = bool(args.s1_use_tda) if args.eval_use_tda is None else bool(args.eval_use_tda)
     evaluation_solver = "tda" if eval_use_tda else "casida"
     objective_name = _objective_name(args)
     summary = {
+        "system_label": _system_label(args),
+        "atom1": str(getattr(args, "atom1", "H")),
+        "atom2": str(getattr(args, "atom2", "H")),
+        "charge": int(getattr(args, "charge", 0)),
+        "spin": int(getattr(args, "spin", 0)),
         "basis": str(args.basis),
         "xc": str(args.xc),
+        "reference_label": _reference_label(args),
+        "external_s1_total_csv": (
+            None
+            if getattr(args, "external_s1_total_csv", None) is None
+            else str(args.external_s1_total_csv)
+        ),
+        "external_s1_total_column": str(getattr(args, "external_s1_total_column", "")),
         "training_mode": str(args.training_mode),
         "reference_scf_backend": str(args.reference_scf_backend),
         "objective": objective_name,
@@ -2084,6 +2416,8 @@ def write_summary(
         "min_loss_step": int(training["min_loss_step"]),
         "ground_mae_ev": float(ground_err_ev.mean()),
         "ground_max_ev": float(ground_err_ev.max()),
+        "s1_total_mae_ev": float(s1_total_err_ev.mean()),
+        "s1_total_max_ev": float(s1_total_err_ev.max()),
         "s1_gap_mae_ev": float(s1_gap_err_ev.mean()),
         "s1_gap_max_ev": float(s1_gap_err_ev.max()),
         "density_l2_mean": float(density_l2.mean()),
@@ -2091,6 +2425,7 @@ def write_summary(
         "equilibrium_r_angstrom": float(equilibrium_point.r_angstrom),
         "equilibrium_fci_s1_ev": float(fci_s1[eq_idx] * HARTREE_TO_EV),
         "equilibrium_predicted_s1_ev": float(predicted_s1[eq_idx] * HARTREE_TO_EV),
+        "equilibrium_s1_total_abs_err_ev": float(s1_total_err_ev[eq_idx]),
         "equilibrium_s1_abs_err_ev": float(s1_gap_err_ev[eq_idx]),
         "train_r_values_angstrom": [float(value) for value in train_r_values],
         "checkpoint": str(checkpoint_path),
@@ -2098,7 +2433,10 @@ def write_summary(
     }
 
     with path.open("w", encoding="utf-8") as handle:
-        handle.write(f"H2 {_objective_display_label(args)} Neural_xc vs FCI summary\n")
+        handle.write(
+            f"{_system_label(args)} {_objective_display_label(args)} "
+            f"Neural_xc vs {_reference_label(args)} summary\n"
+        )
         for key, value in summary.items():
             handle.write(f"{key} = {value}\n")
     return summary
@@ -2106,12 +2444,16 @@ def write_summary(
 
 def main() -> None:
     args = parse_args()
+    if args.train_r_values is not None:
+        args.train_points = int(np.asarray(args.train_r_values, dtype=np.float64).size)
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     logger = RunLogger(outdir / "run.log")
 
     logger.log(
         "Config: "
+        f"system={_system_label(args)}, atoms={str(args.atom1)}-{str(args.atom2)}, "
+        f"charge={int(args.charge)}, spin={int(args.spin)}, "
         f"basis={args.basis}, xc={args.xc}, "
         f"R=[{args.r_min},{args.r_max}], train_points={args.train_points}, "
         f"dense_points={args.dense_points}, steps={args.steps}, "
@@ -2125,16 +2467,26 @@ def main() -> None:
         f"s1_weight={float(args.s1_weight)}, energy_mse_weight={float(args.energy_mse_weight)}, "
         f"energy_mae_weight={float(args.energy_mae_weight)}, density_constraint_weight={float(args.density_constraint_weight)}, "
         f"train_solver={'tda' if bool(args.s1_use_tda) else 'casida'}, "
-        f"eval_solver={'tda' if (bool(args.s1_use_tda) if args.eval_use_tda is None else bool(args.eval_use_tda)) else 'casida'}"
+        f"eval_solver={'tda' if (bool(args.s1_use_tda) if args.eval_use_tda is None else bool(args.eval_use_tda)) else 'casida'}, "
+        f"reference_label={_reference_label(args)}"
     )
     logger.log("Loading runtime dependencies...")
     _HELPERS._load_runtime_dependencies(logger)
     logger.log("Runtime dependencies loaded.")
 
-    train_r_values = np.linspace(float(args.r_min), float(args.r_max), int(args.train_points))
+    if args.train_r_values is None:
+        train_r_values = np.linspace(float(args.r_min), float(args.r_max), int(args.train_points))
+    else:
+        train_r_values = np.asarray(args.train_r_values, dtype=np.float64)
+        if train_r_values.ndim != 1 or int(train_r_values.size) <= 0:
+            raise ValueError("--train-r-values must provide at least one bond length.")
+        args.train_points = int(train_r_values.size)
     dense_r_values = np.linspace(float(args.r_min), float(args.r_max), int(args.dense_points))
 
-    logger.log(f"Building {int(args.train_points)}-point training references (FCI + strict-JAX reference)...")
+    logger.log(
+        f"Building {int(args.train_points)}-point training references "
+        f"({_reference_label(args)} target + strict-JAX reference)..."
+    )
     train_points = _get_or_build_reference_curve(
         train_r_values,
         args=args,
@@ -2143,7 +2495,10 @@ def main() -> None:
     )
     dense_points = None
     if not bool(args.defer_dense_eval):
-        logger.log(f"Building {int(args.dense_points)}-point dense references (FCI + strict-JAX reference)...")
+        logger.log(
+            f"Building {int(args.dense_points)}-point dense references "
+            f"({_reference_label(args)} target + strict-JAX reference)..."
+        )
         dense_points = _get_or_build_reference_curve(
             dense_r_values,
             args=args,
@@ -2184,8 +2539,24 @@ def main() -> None:
     functional = training["functional"]
     gs_training = training["training_config"]
 
+    eval_use_tda = bool(args.s1_use_tda) if args.eval_use_tda is None else bool(args.eval_use_tda)
+    training_png, training_history_csv, checkpoint_path, checkpoint_meta_path = save_training_artifacts(
+        outdir=outdir,
+        args=args,
+        training=training,
+        params=params,
+        train_r_values=train_r_values,
+        eval_use_tda=eval_use_tda,
+    )
+    logger.log(f"Wrote training curve : {training_png}")
+    logger.log(f"Wrote training history: {training_history_csv}")
+    logger.log(f"Wrote pre-eval params : {checkpoint_path}")
+
     if dense_points is None:
-        logger.log(f"Building {int(args.dense_points)}-point dense references after training...")
+        logger.log(
+            f"Building {int(args.dense_points)}-point dense references after training "
+            f"({_reference_label(args)} target + strict-JAX reference)..."
+        )
         dense_points = _get_or_build_reference_curve(
             dense_r_values,
             args=args,
@@ -2201,10 +2572,9 @@ def main() -> None:
                 checkpoint_path=fixed_density_reference_checkpoint,
             )
 
-    eval_use_tda = bool(args.s1_use_tda) if args.eval_use_tda is None else bool(args.eval_use_tda)
     eval_solver_label = "TDA" if eval_use_tda else "Casida"
     logger.log(
-        f"Evaluating dense {int(args.dense_points)}-point {eval_solver_label} S1 curve and equilibrium spectrum..."
+        f"Evaluating dense {int(args.dense_points)}-point {eval_solver_label} S1 curve..."
     )
     dense_rows, excited_rows = evaluate_dense_curve_tda(
         dense_points,
@@ -2241,7 +2611,12 @@ def main() -> None:
                 "exact_electron_count": float(point.fci_electron_count),
                 "reference_backend": str(getattr(args, "reference_scf_backend", "pyscf")),
                 "reference_converged": 1,
-                "reference_excited_method": "fci",
+                "reference_excited_method": (
+                    "external_s1_total"
+                    if getattr(args, "external_s1_total_csv", None)
+                    else "fci"
+                ),
+                "reference_label": _reference_label(args),
             }
             for point in train_points
         ],
@@ -2257,74 +2632,29 @@ def main() -> None:
         training_mode=str(args.training_mode),
         objective_label=_objective_display_label(args),
         use_tda=eval_use_tda,
+        system_label=_system_label(args),
+        reference_label=_reference_label(args),
     )
 
     equilibrium_point = min(dense_points, key=lambda point: float(point.fci_energy_h))
-    spectrum_png = outdir / "h2_equilibrium_tda_spectrum_vs_fci.png"
-    spectrum_json = outdir / "h2_equilibrium_tda_spectrum_vs_fci.json"
-    spectrum_sticks_csv, spectrum_broadened_csv = plot_equilibrium_spectrum(
-        spectrum_png,
-        spectrum_json,
-        point=equilibrium_point,
-        basis=str(args.basis),
-        functional=functional,
-        params=params,
-        training_config=gs_training,
-        nstates=int(args.equilibrium_spectrum_nstates),
-        use_tda=eval_use_tda,
-    )
-
-    training_png = outdir / "training_loss.png"
-    plot_training_loss(
-        training_png,
-        training,
-        title=f"H2 {_objective_display_label(args)} training loss",
-        objective_kind=_resolved_objective_kind(args),
-    )
-    training_history_csv = outdir / "training_history.csv"
-    write_training_history_csv(training_history_csv, training)
-
-    checkpoint_path = outdir / "neural_xc_params.msgpack"
-    checkpoint_path, checkpoint_meta_path = save_params_checkpoint(
-        checkpoint_path,
-        params,
-        metadata={
-            "basis": str(args.basis),
-            "xc": str(args.xc),
-            "training_mode": str(args.training_mode),
-            "reference_scf_backend": str(args.reference_scf_backend),
-            "objective": _objective_name(args),
-            "objective_kind": _resolved_objective_kind(args),
-            "include_hfx_channel": bool(args.include_hfx_channel),
-            "response_hf_mode": str(args.response_hf_mode),
-            "include_pt2_channel": bool(args.include_pt2_channel),
-            "pt2_channel_mode": (
-                str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None
-            ),
-            "response_pt2_mode": (
-                str(args.response_pt2_mode) if bool(args.include_pt2_channel) else None
-            ),
-            "s1_weight": float(args.s1_weight),
-            "energy_mse_weight": float(args.energy_mse_weight),
-            "energy_mae_weight": float(args.energy_mae_weight),
-            "density_constraint_weight": float(args.density_constraint_weight),
-            "s1_use_tda": bool(args.s1_use_tda),
-            "eval_use_tda": eval_use_tda,
-            "scf_warm_start": bool(args.scf_warm_start),
-            "scf_warm_start_update_interval": int(args.scf_warm_start_update_interval),
-            "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
-            "scf_gradient_mode": str(args.scf_gradient_mode),
-            "scf_implicit_diff_max_iter": int(args.scf_implicit_diff_max_iter),
-            "scf_implicit_diff_clip": float(args.scf_implicit_diff_clip),
-            "scf_implicit_diff_tolerance": float(args.scf_implicit_diff_tolerance),
-            "scf_implicit_diff_regularization": float(args.scf_implicit_diff_regularization),
-            "steps": int(args.steps),
-            "learning_rate": float(args.learning_rate),
-            "hidden_dims": [int(value) for value in args.hidden_dims],
-            "train_r_values_angstrom": [float(value) for value in train_r_values],
-            "dense_points": int(args.dense_points),
-        },
-    )
+    spectrum_png = None
+    spectrum_json = None
+    spectrum_sticks_csv = None
+    spectrum_broadened_csv = None
+    if not bool(args.skip_equilibrium_spectrum):
+        spectrum_png = outdir / "h2_equilibrium_tda_spectrum_vs_fci.png"
+        spectrum_json = outdir / "h2_equilibrium_tda_spectrum_vs_fci.json"
+        spectrum_sticks_csv, spectrum_broadened_csv = plot_equilibrium_spectrum(
+            spectrum_png,
+            spectrum_json,
+            point=equilibrium_point,
+            basis=str(args.basis),
+            functional=functional,
+            params=params,
+            training_config=gs_training,
+            nstates=int(args.equilibrium_spectrum_nstates),
+            use_tda=eval_use_tda,
+        )
 
     summary_txt = outdir / "summary.txt"
     summary_json = outdir / "summary.json"
@@ -2347,62 +2677,77 @@ def main() -> None:
             "reference_points_csv": str(reference_points_csv),
             "curve_png": str(curve_png),
             "figure_png": str(curve_png),
-            "spectrum_png": str(spectrum_png),
-            "spectrum_json": str(spectrum_json),
-            "spectrum_sticks_csv": str(spectrum_sticks_csv),
-            "spectrum_broadened_csv": str(spectrum_broadened_csv),
+            "spectrum_png": None if spectrum_png is None else str(spectrum_png),
+            "spectrum_json": None if spectrum_json is None else str(spectrum_json),
+            "spectrum_sticks_csv": (
+                None if spectrum_sticks_csv is None else str(spectrum_sticks_csv)
+            ),
+            "spectrum_broadened_csv": (
+                None if spectrum_broadened_csv is None else str(spectrum_broadened_csv)
+            ),
             "training_curve_png": str(training_png),
             "summary_txt": str(summary_txt),
             "visualization_manifest": str(outdir / "visualization_manifest.json"),
         }
     )
     summary_json.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
-    visualization_manifest = {
-        "paper_experiment": "Bond-Scan S0/S1 Benchmarks",
-        "description": "Data files needed to reproduce H2 bond-scan training visualizations.",
-        "figures": [
-            {
-                "figure": str(curve_png),
-                "data_files": [
-                    str(dense_csv),
-                    str(excited_csv),
-                    str(reference_points_csv),
-                    str(training_history_csv),
-                ],
-                "x": "r_angstrom",
-                "y": [
-                    "fci_energy_h",
-                    "exact_energy_h",
-                    "predicted_energy_h",
-                    "fci_s1_h",
-                    "exact_s1_h",
-                    "predicted_s1_h",
-                    "energy_abs_err_ev",
-                    "s1_gap_abs_err_ev",
-                    "density_l2",
-                ],
-            },
+    manifest_figures = [
+        {
+            "figure": str(curve_png),
+            "data_files": [
+                str(dense_csv),
+                str(excited_csv),
+                str(reference_points_csv),
+                str(training_history_csv),
+            ],
+            "x": "r_angstrom",
+            "y": [
+                "fci_energy_h",
+                "exact_energy_h",
+                "predicted_energy_h",
+                "fci_s1_total_energy_h",
+                "exact_s1_total_energy_h",
+                "predicted_s1_total_energy_h",
+                "fci_s1_h",
+                "exact_s1_h",
+                "predicted_s1_h",
+                "energy_abs_err_ev",
+                "s1_total_abs_err_ev",
+                "s1_gap_abs_err_ev",
+                "density_l2",
+            ],
+        },
+        {
+            "figure": str(training_png),
+            "data_files": [str(training_history_csv)],
+            "x": "step",
+            "y": [
+                "loss_pre_update",
+                "e1_total_penalty_pre_update",
+                "e1_total_mae_pre_update",
+                "e1_total_mse_pre_update",
+                "grad_norm",
+                "grad_abs_max",
+                "param_update_norm",
+            ],
+        },
+    ]
+    if spectrum_png is not None and spectrum_sticks_csv is not None and spectrum_broadened_csv is not None:
+        manifest_figures.append(
             {
                 "figure": str(spectrum_png),
                 "data_files": [str(spectrum_sticks_csv), str(spectrum_broadened_csv)],
                 "x": "excitation_ev / energy_ev",
                 "y": ["oscillator_strength", "intensity"],
-            },
-            {
-                "figure": str(training_png),
-                "data_files": [str(training_history_csv)],
-                "x": "step",
-                "y": [
-                    "loss_pre_update",
-                    "s1_penalty_pre_update",
-                    "s1_mae_pre_update",
-                    "s1_mse_pre_update",
-                    "grad_norm",
-                    "grad_abs_max",
-                    "param_update_norm",
-                ],
-            },
-        ],
+            }
+        )
+    visualization_manifest = {
+        "paper_experiment": "Bond-Scan S0/S1 Benchmarks",
+        "description": (
+            f"Data files needed to reproduce {_system_label(args)} bond-scan "
+            "training visualizations."
+        ),
+        "figures": manifest_figures,
     }
     (outdir / "visualization_manifest.json").write_text(
         json.dumps(visualization_manifest, indent=2, sort_keys=True),
@@ -2412,8 +2757,9 @@ def main() -> None:
     logger.log(f"Wrote dense csv : {dense_csv}")
     logger.log(f"Wrote excited csv: {excited_csv}")
     logger.log(f"Wrote curve png : {curve_png}")
-    logger.log(f"Wrote spectrum  : {spectrum_png}")
-    logger.log(f"Wrote spectrum csv: {spectrum_sticks_csv}, {spectrum_broadened_csv}")
+    if spectrum_png is not None:
+        logger.log(f"Wrote spectrum  : {spectrum_png}")
+        logger.log(f"Wrote spectrum csv: {spectrum_sticks_csv}, {spectrum_broadened_csv}")
     logger.log(f"Wrote summary   : {summary_txt}")
     logger.log(f"Wrote params    : {checkpoint_path}")
 

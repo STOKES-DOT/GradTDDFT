@@ -2,6 +2,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 import pytest
+import jax
 import jax.numpy as jnp
 
 from pyscf_reference import restricted_reference_from_pyscf
@@ -307,6 +308,43 @@ def test_restricted_b3lyp_h2_pyscf_matrices_are_solved_correctly_by_local_casida
         ref_energies[:1],
         atol=1e-7,
         rtol=1e-7,
+    )
+
+
+def test_restricted_pbe_water_pyscf_matrices_are_solved_by_default_casida_davidson():
+    _pyscf_or_skip()
+    mf = _make_water_reference("pbe")
+    td = mf.TDDFT()
+    td.nstates = 3
+    td.kernel()
+    ref_energies = np.asarray(td.e, dtype=float)[:3]
+    ref_a, ref_b = td.get_ab()
+
+    reference = restricted_reference_from_pyscf(mf)
+    mo_energy = np.asarray(reference.mo_energy, dtype=float)
+    if mo_energy.ndim == 2:
+        mo_energy = mo_energy[0]
+    delta_eps = mo_energy[reference.nocc :] - mo_energy[: reference.nocc][:, None]
+    flat_a = np.asarray(ref_a).reshape(delta_eps.size, delta_eps.size)
+    flat_b = np.asarray(ref_b).reshape(delta_eps.size, delta_eps.size)
+
+    enable_x64 = getattr(jax, "enable_x64", None)
+    if enable_x64 is None:
+        enable_x64 = jax.experimental.enable_x64
+    with enable_x64(False):
+        flat_a32 = flat_a.astype(np.float32)
+        flat_b32 = flat_b.astype(np.float32)
+        result = solve_casida_from_tdhf_operator(
+            jnp.asarray(delta_eps, dtype=jnp.float32),
+            _matrix_tdhf_vind(flat_a32, flat_b32),
+            nstates=3,
+        )
+
+    np.testing.assert_allclose(
+        np.asarray(result.excitation_energies),
+        ref_energies,
+        atol=2e-7,
+        rtol=2e-7,
     )
 
 

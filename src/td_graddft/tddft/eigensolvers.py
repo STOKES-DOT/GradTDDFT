@@ -17,7 +17,9 @@ __all__ = [
     "implicit_differential_davidson_lowest_tdhf",
 ]
 
-_DAVIDSON_ROOT_PADDING = 3
+PYSCF_TD_DAVIDSON_TOL = 1e-5
+PYSCF_TD_DAVIDSON_MAX_CYCLE = 100
+PYSCF_TD_POSITIVE_EIG_THRESHOLD = 1e-3
 
 
 def _solver_dtype(dtype: jnp.dtype) -> jnp.dtype:
@@ -31,17 +33,22 @@ def _solver_dtype(dtype: jnp.dtype) -> jnp.dtype:
 
 
 def _davidson_search_nroots(nroots: int, dim: int) -> int:
-    """Track a few extra Davidson roots before truncating to requested states.
-
-    Residual convergence only proves that the current Ritz vectors are
-    eigenpairs; with a diagonal guess it does not prove that no lower root was
-    skipped in another symmetry/near-degenerate block.  Following the same
-    Davidson-only strategy, we compute a small buffer of roots and then keep the
-    lowest requested states.
-    """
-
     nroots = max(1, min(int(nroots), int(dim)))
-    return min(int(dim), nroots + _DAVIDSON_ROOT_PADDING)
+    return nroots
+
+
+def _davidson_max_subspace(nroots: int, dim: int, max_subspace: int | None) -> int:
+    if max_subspace is None:
+        return int(dim)
+    return min(int(dim), max(int(max_subspace), int(nroots) + 2))
+
+
+def _residual_tol_with_dtype_slack(tol: float, dtype: jnp.dtype) -> Array:
+    tol_arr = jnp.asarray(tol, dtype=dtype)
+    return tol_arr + jnp.asarray(100.0, dtype=dtype) * jnp.asarray(
+        jnp.finfo(dtype).eps,
+        dtype=dtype,
+    )
 
 
 def _matmul(lhs: Array, rhs: Array) -> Array:
@@ -102,10 +109,11 @@ def _davidson_lowest_symmetric(
     nroots: int,
     size: int | None = None,
     diag: Array | None = None,
-    tol: float = 1e-6,
-    max_iter: int = 60,
+    tol: float = PYSCF_TD_DAVIDSON_TOL,
+    max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
     max_subspace: int | None = None,
     collapse_subspace: int | None = None,
+    positive_eig_threshold: float | None = None,
     preconditioner_floor: float = 1e-6,
     preconditioner_level_shift: float = 1e-3,
     orth_eps: float = 1e-10,
@@ -127,16 +135,13 @@ def _davidson_lowest_symmetric(
         )
 
     nroots = max(1, min(int(nroots), dim))
-    if max_subspace is None:
-        max_subspace = min(dim, max(4 * nroots, nroots + 8))
-    else:
-        max_subspace = min(dim, max(int(max_subspace), nroots + 2))
+    max_subspace = _davidson_max_subspace(nroots, dim, max_subspace)
     if collapse_subspace is None:
         collapse_subspace = min(dim, max(2 * nroots, nroots + 4))
     else:
         collapse_subspace = min(dim, max(int(collapse_subspace), nroots))
 
-    guess_dim = min(dim, max(nroots, min(max_subspace, nroots + 2)))
+    guess_dim = min(dim, max_subspace, nroots)
     guess_idx = jnp.argsort(diag)[:guess_dim]
     guess_basis = jnp.eye(dim, dtype=dtype)[:, guess_idx]
     guess_basis, _ = jnp.linalg.qr(guess_basis, mode="reduced")
@@ -160,6 +165,10 @@ def _davidson_lowest_symmetric(
     )
     tol_arr = jnp.asarray(tol, dtype=dtype)
     orth_eps_arr = jnp.asarray(orth_eps, dtype=dtype)
+    if positive_eig_threshold is None:
+        positive_threshold_arr = None
+    else:
+        positive_threshold_arr = jnp.asarray(positive_eig_threshold, dtype=dtype)
     basis_dim0 = jnp.asarray(guess_dim, dtype=index_dtype)
     best_theta0 = jnp.zeros((nroots,), dtype=dtype)
     best_vecs0 = jnp.zeros((dim, nroots), dtype=dtype)
@@ -358,19 +367,37 @@ def _davidson_lowest_symmetric(
                 + inactive_shift * jnp.diag((~active_mask_it).astype(dtype))
             )
             sub_eigvals, sub_eigvecs = jnp.linalg.eigh(subspace)
-            order = jnp.argsort(sub_eigvals)
+            if positive_threshold_arr is None:
+                root_valid = jnp.ones_like(sub_eigvals, dtype=bool)
+                eig_score = sub_eigvals
+            else:
+                root_valid = sub_eigvals > positive_threshold_arr
+                eig_score = jnp.where(
+                    root_valid,
+                    sub_eigvals,
+                    inactive_shift + jnp.abs(sub_eigvals),
+                )
+            order = jnp.argsort(eig_score)
             sub_eigvals = sub_eigvals[order]
             sub_eigvecs = sub_eigvecs[:, order]
+            root_valid = root_valid[order]
 
             theta = sub_eigvals[:nroots]
             coeff = sub_eigvecs[:, :nroots]
+            selected_valid = root_valid[:nroots]
             vecs = _matmul(basis_it, coeff)
             avecs = _matmul(abasis_it, coeff)
             residuals = avecs - vecs * theta[None, :]
             residual_norms = jnp.linalg.norm(residuals, axis=0)
-            max_residual = jnp.max(residual_norms)
+            selected_residual_norms = jnp.where(
+                selected_valid,
+                residual_norms,
+                jnp.asarray(jnp.inf, dtype=dtype),
+            )
+            max_residual = jnp.max(selected_residual_norms)
             full_span = basis_dim_it >= jnp.asarray(dim, dtype=index_dtype)
-            converged_now = full_span | (max_residual < tol_arr)
+            enough_roots = jnp.all(selected_valid)
+            converged_now = enough_roots & (full_span | (max_residual < tol_arr))
             improve_best = (max_residual < best_residual_it) | converged_now
             best_theta_next = jnp.where(improve_best, theta, best_theta_it)
             best_vecs_next = jnp.where(improve_best, vecs, best_vecs_it)
@@ -396,7 +423,13 @@ def _davidson_lowest_symmetric(
                     axis=1,
                     keepdims=False,
                 )
-                root_needs_update = root_residual_norm > tol_arr
+                root_is_valid = jax.lax.dynamic_index_in_dim(
+                    selected_valid,
+                    root_idx,
+                    axis=0,
+                    keepdims=False,
+                )
+                root_needs_update = root_is_valid & (root_residual_norm > tol_arr)
                 denom = _safe_preconditioner_denominator(
                     root_theta - diag,
                     preconditioner_floor,
@@ -528,10 +561,11 @@ def implicit_differential_davidson_lowest_symmetric(
     nroots: int,
     size: int | None = None,
     diag: Array | None = None,
-    tol: float = 1e-6,
-    max_iter: int = 60,
+    tol: float = PYSCF_TD_DAVIDSON_TOL,
+    max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
     max_subspace: int | None = None,
     collapse_subspace: int | None = None,
+    positive_eig_threshold: float | None = None,
     preconditioner_floor: float = 1e-6,
     preconditioner_level_shift: float = 1e-3,
     orth_eps: float = 1e-10,
@@ -561,6 +595,7 @@ def implicit_differential_davidson_lowest_symmetric(
         max_iter=max_iter,
         max_subspace=max_subspace,
         collapse_subspace=collapse_subspace,
+        positive_eig_threshold=positive_eig_threshold,
         preconditioner_floor=preconditioner_floor,
         preconditioner_level_shift=preconditioner_level_shift,
         orth_eps=orth_eps,
@@ -622,8 +657,8 @@ def _davidson_lowest_tdhf(
     nroots: int,
     size: int,
     diag: Array,
-    tol: float = 1e-6,
-    max_iter: int = 60,
+    tol: float = PYSCF_TD_DAVIDSON_TOL,
+    max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
     max_subspace: int | None = None,
     matrix_eps: float = 1e-10,
     preconditioner_floor: float = 1e-8,
@@ -647,10 +682,7 @@ def _davidson_lowest_tdhf(
         return jnp.zeros((0,), dtype=dtype), empty, empty, jnp.asarray(True)
 
     nroots = max(1, min(int(nroots), dim))
-    if max_subspace is None:
-        max_subspace = min(dim, max(4 * nroots, nroots + 8))
-    else:
-        max_subspace = min(dim, max(int(max_subspace), nroots + 2))
+    max_subspace = _davidson_max_subspace(nroots, dim, max_subspace)
 
     def apply_pair(v_cols: Array, w_cols: Array) -> tuple[Array, Array]:
         rows = jnp.concatenate([v_cols.T, w_cols.T], axis=-1)
@@ -658,7 +690,7 @@ def _davidson_lowest_tdhf(
             applied = jnp.asarray(vind(rows), dtype=dtype).reshape(-1, 2 * dim)
         return applied[:, :dim].T, -applied[:, dim:].T
 
-    guess_dim = min(dim, max(nroots, min(max_subspace, nroots + 2)))
+    guess_dim = min(dim, max_subspace, nroots)
     guess_idx = jnp.argsort(diag)[:guess_dim]
     guess_v = jnp.eye(dim, dtype=dtype)[:, guess_idx]
     guess_w = jnp.zeros_like(guess_v)
@@ -683,7 +715,7 @@ def _davidson_lowest_tdhf(
         (jnp.maximum(jnp.max(jnp.abs(diag)), 1.0) + 1.0) * 1.0e6,
         dtype=dtype,
     )
-    tol_arr = jnp.asarray(tol, dtype=dtype)
+    tol_arr = _residual_tol_with_dtype_slack(tol, dtype)
     eps_arr = jnp.asarray(matrix_eps, dtype=dtype)
     orth_eps_arr = jnp.asarray(orth_eps, dtype=dtype)
     full_diag = jnp.concatenate([diag, -diag])
@@ -915,7 +947,7 @@ def _davidson_lowest_tdhf(
             )
             max_residual = jnp.max(residual_norms)
             full_span = basis_dim_it >= jnp.asarray(dim, dtype=index_dtype)
-            converged_now = full_span | (max_residual < tol_arr)
+            converged_now = full_span | (max_residual <= tol_arr)
             improve_best = (max_residual < best_residual_it) | converged_now
             best_w_next = jnp.where(improve_best, omega, best_w_it)
             best_x_next = jnp.where(improve_best, x_full, best_x_it)
@@ -1035,8 +1067,8 @@ def implicit_differential_davidson_lowest_tdhf(
     nroots: int,
     size: int,
     diag: Array,
-    tol: float = 1e-6,
-    max_iter: int = 60,
+    tol: float = PYSCF_TD_DAVIDSON_TOL,
+    max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
     max_subspace: int | None = None,
     matrix_eps: float = 1e-10,
     preconditioner_floor: float = 1e-8,

@@ -53,6 +53,7 @@ def _excited_state_extension_terms(
         "s1_target": jnp.asarray(0.0, dtype=dtype),
         "first_excited_total_penalty": jnp.asarray(0.0, dtype=dtype),
         "first_excited_total_mse": jnp.asarray(0.0, dtype=dtype),
+        "first_excited_total_mae": jnp.asarray(0.0, dtype=dtype),
         "first_excited_total_predicted": jnp.asarray(0.0, dtype=dtype),
         "first_excited_total_target": jnp.asarray(0.0, dtype=dtype),
         "excitation_penalty": jnp.asarray(0.0, dtype=dtype),
@@ -106,12 +107,14 @@ def _excited_state_extension_terms(
         terms["first_excited_total_predicted"] = (
             predicted_ground_state_energy + terms["s1_predicted"]
         )
-        terms["first_excited_total_mse"] = (
+        first_excited_total_residual = (
             terms["first_excited_total_predicted"] - terms["first_excited_total_target"]
-        ) ** 2
+        )
+        terms["first_excited_total_mse"] = first_excited_total_residual**2
+        terms["first_excited_total_mae"] = jnp.abs(first_excited_total_residual)
         terms["first_excited_total_penalty"] = (
             excited_datum.first_excited_total_energy_constraint_weight
-            * terms["first_excited_total_mse"]
+            * (terms["first_excited_total_mse"] + terms["first_excited_total_mae"])
         )
 
     if excited_datum.excitation_constraint_weight != 0.0:
@@ -328,6 +331,7 @@ _GROUND_STATE_LOSS_METRIC_KEYS = (
     "s1_target",
     "first_excited_total_penalty",
     "first_excited_total_mse",
+    "first_excited_total_mae",
     "first_excited_total_predicted",
     "first_excited_total_target",
     "excitation_penalty",
@@ -2367,7 +2371,7 @@ def _ground_state_mse_loss_batched_self_consistent(
         if bool(core_cfg.scf_require_convergence) and scf_info.mode == "self_consistent":
             weight = weight * jnp.asarray(scf_info.converged, dtype=predicted.dtype)
         density_weight = jnp.asarray(density_weight, dtype=predicted.dtype)
-        if use_density_targets:
+        if use_grid_density_targets:
             density_mse = density_matching_penalty(
                 params,
                 functional,
@@ -2375,6 +2379,11 @@ def _ground_state_mse_loss_batched_self_consistent(
                 training_config=training_config,
                 self_consistent_molecule=eval_molecule,
                 target_density=target_density,
+            )
+        elif use_density_matrix_for_density_targets:
+            density_mse = density_matrix_matching_penalty(
+                molecule,
+                self_consistent_molecule=eval_molecule,
                 target_density_matrix=target_density_matrix,
             )
         else:
@@ -2508,7 +2517,7 @@ def _ground_state_mse_loss_batched_self_consistent(
         "coefficient_prior_penalty coefficient_prior_mse stationarity_penalty "
         "dm21_scf_penalty dm21_scf_mse dm21_scf_delta_energy fractional_penalty "
         "s1_penalty s1_mse s1_mae s1_predicted s1_target "
-        "first_excited_total_penalty first_excited_total_mse "
+        "first_excited_total_penalty first_excited_total_mse first_excited_total_mae "
         "first_excited_total_predicted first_excited_total_target "
         "excitation_penalty excitation_mse excitation_mae "
         "oscillator_strength_penalty oscillator_strength_mse oscillator_strength_mae "
@@ -2767,15 +2776,21 @@ def ground_state_mse_loss(
                 )
             )
         if core_datum.density_constraint_weight != 0.0:
-            density_mse = density_matching_penalty(
-                params,
-                functional,
-                datum.molecule,
-                training_config=cfg,
-                self_consistent_molecule=self_consistent_molecule,
-                target_density=core_datum.target_density,
-                target_density_matrix=core_datum.target_density_matrix,
-            )
+            if core_datum.target_density is None:
+                density_mse = density_matrix_matching_penalty(
+                    datum.molecule,
+                    self_consistent_molecule=self_consistent_molecule,
+                    target_density_matrix=core_datum.target_density_matrix,
+                )
+            else:
+                density_mse = density_matching_penalty(
+                    params,
+                    functional,
+                    datum.molecule,
+                    training_config=cfg,
+                    self_consistent_molecule=self_consistent_molecule,
+                    target_density=core_datum.target_density,
+                )
             density_penalty = core_datum.density_constraint_weight * density_mse
         if core_datum.density_matrix_constraint_weight != 0.0:
             if core_datum.target_density_matrix is None:

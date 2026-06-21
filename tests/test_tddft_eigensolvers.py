@@ -4,6 +4,7 @@ import jax.numpy as jnp
 import pytest
 
 from td_graddft.tddft.casida import solve_casida_from_tdhf_operator
+from td_graddft.tddft.eigensolvers import _davidson_search_nroots
 from td_graddft.tddft.eigensolvers import implicit_differential_davidson_lowest_symmetric
 from td_graddft.tddft.tda import solve_tda_from_operator
 from td_graddft.tddft.types import TDAResult, TDDFTResult
@@ -53,7 +54,26 @@ def _tdhf_vind(flat_a, flat_b):
     return vind
 
 
-def test_operator_solvers_track_extra_davidson_roots_before_truncation():
+def test_davidson_search_nroots_matches_pyscf_requested_root_count():
+    assert _davidson_search_nroots(1, 12) == 1
+    assert _davidson_search_nroots(3, 12) == 3
+    assert _davidson_search_nroots(20, 12) == 12
+
+
+def test_tda_rejects_roots_below_pyscf_positive_threshold():
+    flat_a = np.diag(np.asarray([5.0e-4], dtype=np.float64))
+    delta_eps = jnp.asarray([[5.0e-4]], dtype=jnp.float64)
+
+    with pytest.raises(RuntimeError, match="Davidson TDA solver did not converge"):
+        solve_tda_from_operator(
+            delta_eps,
+            _tda_vind(flat_a),
+            jnp.diag(jnp.asarray(flat_a)),
+            nstates=1,
+        )
+
+
+def test_operator_solvers_use_requested_root_count_by_default():
     flat_a = np.asarray(
         [
             [2.0, 0.0, 0.0, 0.0],
@@ -82,18 +102,8 @@ def test_operator_solvers_track_extra_davidson_roots_before_truncation():
         davidson_max_iter=20,
     )
 
-    np.testing.assert_allclose(
-        np.asarray(tda.excitation_energies),
-        np.asarray([0.5]),
-        atol=1e-8,
-        rtol=1e-8,
-    )
-    np.testing.assert_allclose(
-        np.asarray(casida.excitation_energies),
-        np.asarray([0.5]),
-        atol=1e-8,
-        rtol=1e-8,
-    )
+    np.testing.assert_allclose(np.asarray(tda.excitation_energies), np.asarray([2.0]))
+    np.testing.assert_allclose(np.asarray(casida.excitation_energies), np.asarray([2.0]))
 
 
 def test_restricted_casida_raises_when_davidson_does_not_converge():

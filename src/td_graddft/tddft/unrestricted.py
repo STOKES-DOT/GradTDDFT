@@ -13,6 +13,9 @@ from jaxtyping import Array
 
 from .cisd import unrestricted_cisd_second_order_correction
 from .eigensolvers import (
+    PYSCF_TD_DAVIDSON_MAX_CYCLE,
+    PYSCF_TD_DAVIDSON_TOL,
+    PYSCF_TD_POSITIVE_EIG_THRESHOLD,
     _davidson_search_nroots,
     _solver_dtype,
     implicit_differential_davidson_lowest_symmetric,
@@ -820,9 +823,9 @@ def solve_unrestricted_tda_from_operator(
     diagonal: Array,
     *,
     nstates: int | None = None,
-    excitation_threshold: float = 1e-7,
-    davidson_tol: float = 1e-6,
-    davidson_max_iter: int = 60,
+    excitation_threshold: float = PYSCF_TD_POSITIVE_EIG_THRESHOLD,
+    davidson_tol: float = PYSCF_TD_DAVIDSON_TOL,
+    davidson_max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
     davidson_max_subspace: int | None = None,
 ) -> UnrestrictedTDAResult:
     dim = int(jnp.asarray(diagonal).size)
@@ -836,6 +839,7 @@ def solve_unrestricted_tda_from_operator(
         tol=davidson_tol,
         max_iter=davidson_max_iter,
         max_subspace=davidson_max_subspace,
+        positive_eig_threshold=excitation_threshold,
     )
     if not _is_traced_convergence_flag(converged) and not bool(converged):
         raise RuntimeError("Davidson unrestricted TDA solver did not converge.")
@@ -897,10 +901,10 @@ def solve_unrestricted_casida_from_tdhf_operator(
     tdhf_vind_rows: Callable[[Array], Array],
     *,
     nstates: int | None = None,
-    excitation_threshold: float = 1e-7,
+    excitation_threshold: float = PYSCF_TD_POSITIVE_EIG_THRESHOLD,
     matrix_eps: float = 1e-10,
-    davidson_tol: float = 1e-6,
-    davidson_max_iter: int = 60,
+    davidson_tol: float = PYSCF_TD_DAVIDSON_TOL,
+    davidson_max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
     davidson_max_subspace: int | None = None,
 ) -> UnrestrictedTDDFTResult:
     dim = int(jnp.asarray(de_a).size + jnp.asarray(de_b).size)
@@ -945,10 +949,10 @@ class UnrestrictedTDA:
     xc_functional: Any | None = None
     xc_params: Any | None = None
     occupation_tolerance: float = 1e-8
-    excitation_threshold: float = 1e-7
+    excitation_threshold: float = PYSCF_TD_POSITIVE_EIG_THRESHOLD
     eigensolver: Literal["auto", "davidson"] = "auto"
-    davidson_tol: float = 1e-6
-    davidson_max_iter: int = 60
+    davidson_tol: float = PYSCF_TD_DAVIDSON_TOL
+    davidson_max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE
     davidson_max_subspace: int | None = None
 
     def gen_tda_vind(self):
@@ -1038,11 +1042,11 @@ class UnrestrictedCasidaTDDFT:
     xc_functional: Any | None = None
     xc_params: Any | None = None
     occupation_tolerance: float = 1e-8
-    excitation_threshold: float = 1e-7
+    excitation_threshold: float = PYSCF_TD_POSITIVE_EIG_THRESHOLD
     matrix_eps: float = 1e-10
     eigensolver: Literal["auto", "davidson"] = "auto"
-    davidson_tol: float = 1e-6
-    davidson_max_iter: int = 60
+    davidson_tol: float = PYSCF_TD_DAVIDSON_TOL
+    davidson_max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE
     davidson_max_subspace: int | None = None
 
     def tda(self, nstates: int | None = None) -> UnrestrictedTDAResult:

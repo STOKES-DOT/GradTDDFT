@@ -373,8 +373,12 @@ def build_reference_point(
     )
     reference = restricted_reference_from_pyscf(
         mf_ref,
-        compute_local_hfx_features=(str(args.input_feature_mode) == "canonical"),
-        compute_local_hfx_aux=(str(args.input_feature_mode) == "canonical"),
+        compute_local_hfx_features=(
+            str(args.input_feature_mode) == "canonical" or bool(args.include_hfx_channel)
+        ),
+        compute_local_hfx_aux=(
+            str(args.input_feature_mode) == "canonical" or bool(args.include_hfx_channel)
+        ),
         compute_local_pt2_features=bool(args.include_pt2_channel),
     )
     if str(args.reference_method) == "graddft_data":
@@ -415,6 +419,7 @@ def build_training_data(
 
 def _cache_base_group_name(args: argparse.Namespace) -> str:
     pt2 = "pt2" if bool(args.include_pt2_channel) else "nopt2"
+    hfx = "hfx" if bool(args.include_hfx_channel) else "nohfx"
     active = "none"
     if str(args.reference_method) in {"casscf", "casscf_nevpt2"}:
         labels = "-".join(str(label).replace(" ", "") for label in args.active_labels)
@@ -429,6 +434,7 @@ def _cache_base_group_name(args: argparse.Namespace) -> str:
         f"basis={str(args.basis).replace('/', '_')}/"
         f"grid={int(args.grids_level)}/"
         f"{pt2}/"
+        f"{hfx}/"
         f"pt2mode={str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else 'none'}"
     )
 
@@ -652,6 +658,7 @@ def build_functional_and_training_config(
         architecture=str(args.network_architecture),
         input_feature_mode=str(args.input_feature_mode),
         include_pt2_channel=bool(args.include_pt2_channel),
+        include_hfx_channel=bool(args.include_hfx_channel),
         pt2_channel_mode=str(args.pt2_channel_mode),
         response_pt2_mode="approx",
         name="neural_xc_n2_ccsdt_ground",
@@ -659,13 +666,15 @@ def build_functional_and_training_config(
     coefficient_prior = neural_xc.resolve_coefficient_prior_values(
         tuple(str(name) for name in args.semilocal_xc)
     )
-    if coefficient_prior is not None and bool(args.include_pt2_channel):
+    if coefficient_prior is not None and (
+        bool(args.include_pt2_channel) or bool(args.include_hfx_channel)
+    ):
         n_semilocal = len(tuple(str(name) for name in args.semilocal_xc))
         if len(coefficient_prior) == n_semilocal + 1:
             coefficient_prior = (
                 tuple(coefficient_prior[:n_semilocal])
-                + (0.0,)
-                + tuple(coefficient_prior[n_semilocal:])
+                + ((0.0,) if bool(args.include_pt2_channel) else ())
+                + (tuple(coefficient_prior[n_semilocal:]) if bool(args.include_hfx_channel) else ())
             )
     training_config = GroundStateTrainingConfig.from_parts(
         core=GroundStateCoreTrainingConfig(
@@ -820,6 +829,7 @@ def train_functional(
             f"steps={int(args.steps)} lr={float(args.learning_rate):.6g} "
             f"lr_decay_every={int(args.lr_decay_every)} lr_decay_factor={float(args.lr_decay_factor):.6g} "
             f"include_pt2_channel={bool(args.include_pt2_channel)} "
+            f"include_hfx_channel={bool(args.include_hfx_channel)} "
             "train_step_mode=stream_single_geometry"
         )
         t0 = time.perf_counter()
@@ -1002,6 +1012,7 @@ def train_functional(
         f"steps={int(args.steps)} lr={float(args.learning_rate):.6g} "
         f"lr_decay_every={int(args.lr_decay_every)} lr_decay_factor={float(args.lr_decay_factor):.6g} "
         f"include_pt2_channel={bool(args.include_pt2_channel)} "
+        f"include_hfx_channel={bool(args.include_hfx_channel)} "
         f"train_step_mode={train_step_mode}"
     )
 
@@ -1515,6 +1526,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--include-pt2-channel", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument(
+        "--include-hfx-channel",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Add a projected local exact-exchange channel to the Neural_xc basis.",
+    )
+    p.add_argument(
         "--pt2-channel-mode",
         choices=("scaled_projected", "local_exact"),
         default="local_exact",
@@ -1732,6 +1749,7 @@ def run_eval_only_checkpoint_streaming(
         "eval_only": True,
         "eval_only_checkpoint": str(args.eval_only_checkpoint),
         "include_pt2_channel": bool(args.include_pt2_channel),
+        "include_hfx_channel": bool(args.include_hfx_channel),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
         "density_constraint_weight": float(args.density_constraint_weight),
         "density_matrix_constraint_weight": float(args.density_matrix_constraint_weight),
@@ -1837,6 +1855,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         f"steps={args.steps} lr={args.learning_rate} "
         f"lr_decay_every={args.lr_decay_every} lr_decay_factor={args.lr_decay_factor} "
         f"include_pt2_channel={bool(args.include_pt2_channel)} "
+        f"include_hfx_channel={bool(args.include_hfx_channel)} "
         f"pt2_channel_mode={args.pt2_channel_mode if bool(args.include_pt2_channel) else 'none'} "
         f"density_constraint_weight={args.density_constraint_weight} "
         f"density_matrix_constraint_weight={args.density_matrix_constraint_weight} "
@@ -1977,6 +1996,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "eval_only": True,
             "eval_only_checkpoint": str(args.eval_only_checkpoint),
             "include_pt2_channel": bool(args.include_pt2_channel),
+            "include_hfx_channel": bool(args.include_hfx_channel),
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
             "density_constraint_weight": float(args.density_constraint_weight),
             "density_matrix_constraint_weight": float(args.density_matrix_constraint_weight),
@@ -2108,6 +2128,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "lr_decay_every": int(args.lr_decay_every),
             "lr_decay_factor": float(args.lr_decay_factor),
             "include_pt2_channel": bool(args.include_pt2_channel),
+            "include_hfx_channel": bool(args.include_hfx_channel),
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
             "density_constraint_weight": float(args.density_constraint_weight),
             "density_matrix_constraint_weight": float(args.density_matrix_constraint_weight),
@@ -2136,6 +2157,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "ncas": int(args.ncas) if uses_active_space else None,
         "nelecas": int(args.nelecas) if uses_active_space else None,
         "include_pt2_channel": bool(args.include_pt2_channel),
+        "include_hfx_channel": bool(args.include_hfx_channel),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
         "density_constraint_weight": float(args.density_constraint_weight),
         "density_matrix_constraint_weight": float(args.density_matrix_constraint_weight),

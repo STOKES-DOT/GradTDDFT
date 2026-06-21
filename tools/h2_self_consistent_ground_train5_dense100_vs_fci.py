@@ -142,6 +142,7 @@ class ReferencePoint:
     fci_total_energies_h: np.ndarray
     fci_excitation_energies_h: np.ndarray
     fci_density_grid: np.ndarray
+    fci_density_matrix: np.ndarray
     fci_electron_count: float
 
 
@@ -186,6 +187,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--r-min", type=float, default=0.05)
     p.add_argument("--r-max", type=float, default=5.0)
     p.add_argument("--train-points", type=int, default=5)
+    p.add_argument("--train-r-values", type=float, nargs="+", default=None)
     p.add_argument("--dense-points", type=int, default=100)
     p.add_argument("--steps", type=int, default=300)
     p.add_argument(
@@ -223,6 +225,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Add a projected restricted MP2 local channel to the Neural_xc basis.",
+    )
+    p.add_argument(
+        "--include-hfx-channel",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Add a projected local exact-exchange channel to the Neural_xc basis.",
     )
     p.add_argument(
         "--semilocal-xc",
@@ -336,8 +344,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return _normalize_args(p.parse_args(argv))
 
 
+def build_diatomic_atom(atom1: str, atom2: str, r_angstrom: float) -> str:
+    return (
+        f"{str(atom1)} 0 0 {-0.5 * r_angstrom:.12f}; "
+        f"{str(atom2)} 0 0 {0.5 * r_angstrom:.12f}"
+    )
+
+
 def build_h2_atom(r_angstrom: float) -> str:
-    return f"H 0 0 {-0.5 * r_angstrom:.12f}; H 0 0 {0.5 * r_angstrom:.12f}"
+    return build_diatomic_atom("H", "H", r_angstrom)
 
 
 def _timestamp() -> str:
@@ -382,22 +397,26 @@ def _tree_all_finite(tree: Any) -> bool:
     return all(bool(jnp.all(jnp.isfinite(jnp.asarray(leaf)))) for leaf in leaves)
 
 
-def solve_fci_singlet_states(
+def _run_restricted_hf(
     atom: str,
     *,
     basis: str,
-    nroots: int,
+    charge: int = 0,
+    spin: int = 0,
     dm0: np.ndarray | None = None,
-) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> scf.hf.RHF:
+    if int(spin) != 0:
+        raise ValueError("This restricted singlet reference builder requires spin=0.")
     mol = gto.M(
         atom=atom,
         unit="Angstrom",
         basis=basis,
-        spin=0,
-        charge=0,
+        spin=int(spin),
+        charge=int(charge),
         cart=True,
         verbose=0,
     )
+
     def _run_rhf(
         *,
         dm0_local: np.ndarray | None,
@@ -456,6 +475,26 @@ def solve_fci_singlet_states(
             break
     if mf is None or not mf.converged:
         raise RuntimeError(f"RHF did not converge for atom spec: {atom}")
+    return mf
+
+
+def solve_fci_singlet_states(
+    atom: str,
+    *,
+    basis: str,
+    nroots: int,
+    charge: int = 0,
+    spin: int = 0,
+    dm0: np.ndarray | None = None,
+) -> tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    mf = _run_restricted_hf(
+        atom,
+        basis=basis,
+        charge=int(charge),
+        spin=int(spin),
+        dm0=dm0,
+    )
+    mol = mf.mol
 
     mo_coeff = np.asarray(mf.mo_coeff, dtype=np.float64)
     h1_mo = mo_coeff.T @ np.asarray(mf.get_hcore(), dtype=np.float64) @ mo_coeff
@@ -491,6 +530,10 @@ def solve_fci_singlet_states(
 def build_reference_point(
     r_angstrom: float,
     *,
+    atom1: str = "H",
+    atom2: str = "H",
+    charge: int = 0,
+    spin: int = 0,
     basis: str,
     xc: str,
     grids_level: int,
@@ -510,20 +553,43 @@ def build_reference_point(
     compute_local_hfx_features: bool,
     compute_local_pt2_features: bool,
     reference_scf_backend: str = "pyscf",
+    external_s1_total_energy_h: float | None = None,
 ) -> tuple[ReferencePoint, np.ndarray]:
-    atom = build_h2_atom(r_angstrom)
-    (
-        fci_energy_h,
-        fci_total_energies_h,
-        fci_excitation_energies_h,
-        fci_rdm1_ao,
-        rhf_dm0,
-    ) = solve_fci_singlet_states(
-        atom,
-        basis=basis,
-        nroots=max(1, int(excited_nstates) + 1),
-        dm0=fci_dm0,
-    )
+    atom = build_diatomic_atom(atom1, atom2, r_angstrom)
+    if external_s1_total_energy_h is None:
+        (
+            fci_energy_h,
+            fci_total_energies_h,
+            fci_excitation_energies_h,
+            fci_rdm1_ao,
+            rhf_dm0,
+        ) = solve_fci_singlet_states(
+            atom,
+            basis=basis,
+            nroots=max(1, int(excited_nstates) + 1),
+            charge=int(charge),
+            spin=int(spin),
+            dm0=fci_dm0,
+        )
+    else:
+        mf_ground = _run_restricted_hf(
+            atom,
+            basis=basis,
+            charge=int(charge),
+            spin=int(spin),
+            dm0=fci_dm0,
+        )
+        rhf_dm0 = np.asarray(mf_ground.make_rdm1(), dtype=np.float64)
+        fci_rdm1_ao = rhf_dm0
+        fci_energy_h = float(mf_ground.e_tot)
+        fci_total_energies_h = np.asarray(
+            [fci_energy_h, float(external_s1_total_energy_h)],
+            dtype=np.float64,
+        )
+        fci_excitation_energies_h = np.asarray(
+            [float(external_s1_total_energy_h) - fci_energy_h],
+            dtype=np.float64,
+        )
 
     reference_backend = str(reference_scf_backend).strip().lower()
     if reference_backend == "jax_rks":
@@ -534,8 +600,8 @@ def build_reference_point(
             basis=basis,
             xc_spec=xc,
             unit="Angstrom",
-            spin=0,
-            charge=0,
+            spin=int(spin),
+            charge=int(charge),
             cart=True,
             grids_level=int(grids_level),
             max_l=int(max_l),
@@ -562,8 +628,8 @@ def build_reference_point(
             atom=atom,
             basis=basis,
             unit="Angstrom",
-            spin=0,
-            charge=0,
+            spin=int(spin),
+            charge=int(charge),
             cart=True,
             verbose=0,
         )
@@ -652,6 +718,7 @@ def build_reference_point(
         fci_total_energies_h=fci_total_energies_h,
         fci_excitation_energies_h=fci_excitation_energies_h,
         fci_density_grid=fci_density_grid,
+        fci_density_matrix=fci_rdm1_ao,
         fci_electron_count=fci_electron_count,
     )
     return point, rhf_dm0
@@ -686,7 +753,10 @@ def build_reference_curve(
             reference_scf_potential_clip=float(args.reference_scf_potential_clip),
             excited_nstates=int(args.excited_nstates),
             fci_dm0=rhf_dm0,
-            compute_local_hfx_features=(str(args.input_feature_mode) == "canonical"),
+            compute_local_hfx_features=(
+                str(args.input_feature_mode) == "canonical"
+                or bool(getattr(args, "include_hfx_channel", False))
+            ),
             compute_local_pt2_features=bool(getattr(args, "include_pt2_channel", False)),
             reference_scf_backend=str(getattr(args, "reference_scf_backend", "pyscf")),
         )
@@ -718,7 +788,7 @@ def build_training_data(
             point.molecule,
             core=GroundStateCoreDatum(
                 target_total_energy=jnp.asarray(point.fci_energy_h, dtype=jnp.float64),
-                target_density=jnp.asarray(point.fci_density_grid, dtype=jnp.float64),
+                target_density_matrix=jnp.asarray(point.fci_density_matrix, dtype=jnp.float64),
                 density_constraint_weight=float(density_constraint_weight),
             ),
         )
@@ -745,23 +815,25 @@ def train_functional(
         architecture=str(args.network_architecture),
         input_feature_mode=str(args.input_feature_mode),
         include_pt2_channel=bool(args.include_pt2_channel),
+        include_hfx_channel=bool(args.include_hfx_channel),
         name=f"neural_xc_h2_fci_{str(args.training_mode)}",
     )
     coefficient_prior = neural_xc.resolve_coefficient_prior_values(
         tuple(str(name) for name in args.semilocal_xc)
     )
-    if coefficient_prior is not None and bool(args.include_pt2_channel):
+    if coefficient_prior is not None:
         n_semilocal = len(tuple(str(name) for name in args.semilocal_xc))
         if len(coefficient_prior) == n_semilocal + 1:
             coefficient_prior = (
                 tuple(coefficient_prior[:n_semilocal])
-                + (0.0,)
-                + tuple(coefficient_prior[n_semilocal:])
+                + ((0.0,) if bool(args.include_pt2_channel) else ())
+                + (tuple(coefficient_prior[n_semilocal:]) if bool(args.include_hfx_channel) else ())
             )
     logger.log(
         "[init] coefficient_prior="
         f"{None if coefficient_prior is None else tuple(float(x) for x in coefficient_prior)} "
-        f"include_pt2_channel={bool(args.include_pt2_channel)}"
+        f"include_pt2_channel={bool(args.include_pt2_channel)} "
+        f"include_hfx_channel={bool(args.include_hfx_channel)}"
     )
     gs_training = GroundStateTrainingConfig.from_parts(
         core=GroundStateCoreTrainingConfig(
@@ -999,11 +1071,80 @@ def evaluate_dense_curve(
     functional: Any,
     params: Any,
     training_config: GroundStateTrainingConfig,
+    density_constraint_weight: float,
     excited_nstates: int,
     logger: RunLogger,
 ) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
     rows: list[dict[str, float]] = []
     excited_rows: list[dict[str, float]] = []
+    if int(excited_nstates) <= 0:
+        dense_dataset = build_training_data(
+            dense_points,
+            density_constraint_weight=float(density_constraint_weight),
+        )
+        _, metrics = ground_state_mse_loss_pointwise_dataset(
+            params,
+            functional,
+            dense_dataset,
+            training_config=training_config,
+        )
+        predicted_energies = np.asarray(metrics["predicted_total_energies"], dtype=np.float64)
+        density_matrix_mse = np.asarray(
+            metrics.get("density_mse", np.full_like(predicted_energies, np.nan)),
+            dtype=np.float64,
+        )
+        scf_converged = np.asarray(
+            metrics.get("scf_converged", np.full_like(predicted_energies, np.nan)),
+            dtype=np.float64,
+        )
+        scf_cycles = np.asarray(
+            metrics.get("scf_cycles", np.full_like(predicted_energies, np.nan)),
+            dtype=np.float64,
+        )
+        scf_final_rms = np.asarray(
+            metrics.get("scf_final_rms_density", np.full_like(predicted_energies, np.nan)),
+            dtype=np.float64,
+        )
+        scf_selected_rms = np.asarray(
+            metrics.get("scf_selected_rms_density", np.full_like(predicted_energies, np.nan)),
+            dtype=np.float64,
+        )
+        t0 = time.perf_counter()
+        for idx, point in enumerate(dense_points, start=1):
+            predicted_energy_h = float(predicted_energies[idx - 1])
+            dm_rmse = float(np.sqrt(max(float(density_matrix_mse[idx - 1]), 0.0)))
+            rows.append(
+                {
+                    "r_angstrom": float(point.r_angstrom),
+                    "fci_energy_h": float(point.fci_energy_h),
+                    "predicted_energy_h": predicted_energy_h,
+                    "energy_abs_err_ev": abs(predicted_energy_h - point.fci_energy_h) * HARTREE_TO_EV,
+                    "fci_electron_count": float(point.fci_electron_count),
+                    "predicted_electron_count": float("nan"),
+                    "electron_count_abs_err": float("nan"),
+                    "density_l1": dm_rmse,
+                    "density_l2": dm_rmse,
+                    "density_linf": dm_rmse,
+                    "density_matrix_mse": float(density_matrix_mse[idx - 1]),
+                    "density_matrix_rmse": dm_rmse,
+                    "scf_converged": float(scf_converged[idx - 1]),
+                    "scf_cycles": float(scf_cycles[idx - 1]),
+                    "scf_final_rms_density": float(scf_final_rms[idx - 1]),
+                    "scf_selected_rms_density": float(scf_selected_rms[idx - 1]),
+                }
+            )
+            if idx == 1 or idx % max(1, len(dense_points) // 10) == 0 or idx == len(dense_points):
+                logger.log(
+                    f"[eval] {idx:3d}/{len(dense_points):3d} "
+                    f"R={point.r_angstrom:.4f} A "
+                    f"E0_pred={predicted_energy_h:.10f} Eh "
+                    f"dm_rmse={dm_rmse:.6e} "
+                    f"scf_converged={float(scf_converged[idx - 1]):.0f} "
+                    f"scf_cycles={float(scf_cycles[idx - 1]):.0f} "
+                    f"scf_final_rms={float(scf_final_rms[idx - 1]):.6e}"
+                )
+        logger.log(f"[eval] done in {time.perf_counter() - t0:.2f} s")
+        return rows, excited_rows
     predictor = make_ground_state_predictor(
         functional,
         training_config=training_config,
@@ -1447,7 +1588,12 @@ def main() -> None:
     _load_runtime_dependencies(logger)
     logger.log("Runtime dependencies loaded.")
 
-    train_r_values = np.linspace(float(args.r_min), float(args.r_max), int(args.train_points))
+    train_r_values = (
+        np.asarray(args.train_r_values, dtype=np.float64)
+        if args.train_r_values is not None
+        else np.linspace(float(args.r_min), float(args.r_max), int(args.train_points))
+    )
+    args.train_points = int(train_r_values.size)
     dense_r_values = np.linspace(float(args.r_min), float(args.r_max), int(args.dense_points))
 
     logger.log(
@@ -1550,6 +1696,7 @@ def main() -> None:
             functional=functional,
             params=params,
             training_config=gs_training,
+            density_constraint_weight=float(args.density_constraint_weight),
             excited_nstates=int(args.excited_nstates),
             logger=logger,
         )

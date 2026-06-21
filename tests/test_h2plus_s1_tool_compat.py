@@ -49,7 +49,7 @@ def test_h2plus_s1_tool_joint_objective_backfills_ground_supervision():
     assert module._objective_name(args) == "joint_tda"
 
 
-def test_h2plus_s1_training_data_uses_total_density_grid_target_only():
+def test_h2plus_s1_training_data_uses_density_matrix_target():
     module = _load_tool_module(
         "tools/h2plus_s1_tda_train5_dense100.py",
         "h2plus_s1_tda_train5_dense100_test_density_target",
@@ -66,29 +66,22 @@ def test_h2plus_s1_training_data_uses_total_density_grid_target_only():
         [point],
         s1_weight=1.0,
         density_constraint_weight=0.4,
+        density_matrix_constraint_weight=0.0,
     )
 
-    assert np.allclose(np.asarray(datum.target_density), point.exact_density_grid)
-    assert datum.target_density_matrix is None
+    assert datum.target_density is None
+    assert np.allclose(np.asarray(datum.target_density_matrix), point.exact_dm_ao)
     assert datum.density_constraint_weight == 0.4
     assert datum.density_matrix_constraint_weight == 0.0
 
 
-def test_h2plus_s1_script_does_not_emit_dm_constraint_artifacts():
+def test_h2plus_s1_script_keeps_density_matrix_target_internal():
     source = Path("tools/h2plus_s1_tda_train5_dense100.py").read_text(encoding="utf-8")
 
-    for marker in (
-        "--density-matrix-constraint-weight",
-        "density_matrix_constraint_weight",
-        "density_matrix_penalty",
-        "density_matrix_mse",
-        "AO DM MSE",
-        "dm_mse=",
-    ):
-        assert marker not in source
+    assert "target_density_matrix" in source
 
 
-def test_h2plus_ground_training_data_uses_total_density_grid_target_only():
+def test_h2plus_ground_training_data_uses_density_matrix_target():
     module = _load_tool_module(
         "tools/h2plus_fci_ground_train5_dense100.py",
         "h2plus_fci_ground_train5_dense100_test_density_target",
@@ -98,14 +91,14 @@ def test_h2plus_ground_training_data_uses_total_density_grid_target_only():
         molecule=SimpleNamespace(),
         exact_energy_h=-0.5,
         exact_density_grid=np.asarray([0.2, 0.3], dtype=np.float64),
-        exact_dm_ao=np.asarray([[1.0]], dtype=np.float64),
+        exact_density_matrix=np.asarray([[1.0]], dtype=np.float64),
     )
 
     (datum,) = module.build_training_data([point], density_constraint_weight=0.4)
 
     assert not hasattr(args, "density_matrix_constraint_weight")
-    assert np.allclose(np.asarray(datum.target_density), point.exact_density_grid)
-    assert datum.target_density_matrix is None
+    assert datum.target_density is None
+    assert np.allclose(np.asarray(datum.target_density_matrix), point.exact_density_matrix)
     assert datum.density_constraint_weight == 0.4
     assert datum.density_matrix_constraint_weight == 0.0
 
@@ -151,6 +144,7 @@ def test_h2plus_ground_cache_validation_rejects_stale_hcore():
             exact_energy_h=-0.5,
             exact_total_energies_h=np.asarray([-0.5]),
             exact_density_grid=np.asarray([1.0]),
+            exact_density_matrix=np.asarray([[1.0]]),
             exact_electron_count=1.0,
             reference_backend="test",
             reference_converged=True,
