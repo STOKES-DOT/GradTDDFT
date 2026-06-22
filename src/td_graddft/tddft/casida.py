@@ -27,6 +27,7 @@ from .response import (
     gen_tda_vind,
     gen_tdhf_vind,
 )
+from .response_options import ResponseKernelOptions
 from .tda import solve_tda_from_operator
 from .types import TDDFTResult, TDAResult
 
@@ -137,6 +138,9 @@ class RestrictedCasidaTDDFT:
     davidson_tol: float = PYSCF_TD_DAVIDSON_TOL
     davidson_max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE
     davidson_max_subspace: int | None = None
+    davidson_initial_guess_count: int | None = None
+    davidson_max_trial_vectors: int | None = None
+    response_kernel_options: ResponseKernelOptions | dict[str, Any] | None = None
 
     def _posthoc_correction(
         self,
@@ -209,6 +213,7 @@ class RestrictedCasidaTDDFT:
             self.xc_functional,
             xc_params=self.xc_params,
             occupation_tolerance=self.occupation_tolerance,
+            response_kernel_options=self.response_kernel_options,
         )
         result = solve_tda_from_operator(
             delta_eps,
@@ -219,6 +224,8 @@ class RestrictedCasidaTDDFT:
             davidson_tol=self.davidson_tol,
             davidson_max_iter=self.davidson_max_iter,
             davidson_max_subspace=self.davidson_max_subspace,
+            davidson_initial_guess_count=self.davidson_initial_guess_count,
+            davidson_max_trial_vectors=self.davidson_max_trial_vectors,
         )
         return self._apply_posthoc_correction(result, use_tda=True)
 
@@ -228,6 +235,7 @@ class RestrictedCasidaTDDFT:
             self.xc_functional,
             xc_params=self.xc_params,
             occupation_tolerance=self.occupation_tolerance,
+            response_kernel_options=self.response_kernel_options,
         )
 
     def gen_tdhf_vind(self):
@@ -236,6 +244,7 @@ class RestrictedCasidaTDDFT:
             self.xc_functional,
             xc_params=self.xc_params,
             occupation_tolerance=self.occupation_tolerance,
+            response_kernel_options=self.response_kernel_options,
         )
 
     def kernel(self, nstates: int | None = None) -> TDDFTResult:
@@ -250,6 +259,7 @@ class RestrictedCasidaTDDFT:
             self.xc_functional,
             xc_params=self.xc_params,
             occupation_tolerance=self.occupation_tolerance,
+            response_kernel_options=self.response_kernel_options,
         )
         result = solve_casida_from_tdhf_operator(
             _restricted_delta_eps(self.molecule, self.occupation_tolerance),

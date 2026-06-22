@@ -275,6 +275,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--lr-decay-every", type=int, default=500)
     p.add_argument("--lr-decay-factor", type=float, default=0.5)
     p.add_argument(
+        "--checkpoint-every",
+        type=int,
+        default=10,
+        help=(
+            "Write neural_xc_params_latest.msgpack every N optimizer steps. "
+            "Best checkpoints are saved immediately when the training loss improves; "
+            "set to 0 to disable periodic latest checkpoints."
+        ),
+    )
+    p.add_argument(
         "--training-mode",
         choices=("fixed_density", "self_consistent"),
         default="self_consistent",
@@ -635,6 +645,164 @@ def _tree_l2_norm(tree: Any) -> jnp.ndarray:
 
 def _loss_and_metrics_all_finite(loss: Any, metrics: dict[str, Any]) -> bool:
     return bool(jnp.all(jnp.isfinite(jnp.asarray(loss)))) and _tree_all_finite(metrics)
+
+
+def _finite_float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(out):
+        return None
+    return out
+
+
+def _resolved_train_r_values(args: argparse.Namespace) -> np.ndarray:
+    if getattr(args, "train_r_values", None) is None:
+        return np.linspace(float(args.r_min), float(args.r_max), int(args.train_points))
+    return np.asarray(args.train_r_values, dtype=np.float64)
+
+
+def _training_checkpoint_metadata(
+    args: argparse.Namespace,
+    *,
+    checkpoint_kind: str,
+    parameter_state: str,
+    step: int,
+    train_r_values: np.ndarray | None = None,
+    eval_use_tda: bool | None = None,
+    loss: float | None = None,
+    s1_total_mae: float | None = None,
+    s1_total_mse: float | None = None,
+    s1_total_penalty: float | None = None,
+    learning_rate: float | None = None,
+    min_loss: float | None = None,
+    min_loss_step: int | None = None,
+) -> dict[str, Any]:
+    if train_r_values is None:
+        train_r_values = _resolved_train_r_values(args)
+    resolved_eval_use_tda = (
+        bool(args.s1_use_tda) if eval_use_tda is None else bool(eval_use_tda)
+    )
+    return {
+        "checkpoint_kind": str(checkpoint_kind),
+        "parameter_state": str(parameter_state),
+        "step": int(step),
+        "loss": _finite_float_or_none(loss),
+        "s1_total_mae": _finite_float_or_none(s1_total_mae),
+        "s1_total_mse": _finite_float_or_none(s1_total_mse),
+        "s1_total_penalty": _finite_float_or_none(s1_total_penalty),
+        "learning_rate": _finite_float_or_none(learning_rate),
+        "min_loss": _finite_float_or_none(min_loss),
+        "min_loss_step": None if min_loss_step is None else int(min_loss_step),
+        "basis": str(args.basis),
+        "xc": str(args.xc),
+        "system_label": _system_label(args),
+        "atom1": str(getattr(args, "atom1", "H")),
+        "atom2": str(getattr(args, "atom2", "H")),
+        "charge": int(getattr(args, "charge", 0)),
+        "spin": int(getattr(args, "spin", 0)),
+        "external_s1_total_csv": (
+            None
+            if getattr(args, "external_s1_total_csv", None) is None
+            else str(args.external_s1_total_csv)
+        ),
+        "external_s1_total_column": str(
+            getattr(args, "external_s1_total_column", "")
+        ),
+        "external_reference_label": _reference_label(args),
+        "training_mode": str(args.training_mode),
+        "reference_scf_backend": str(args.reference_scf_backend),
+        "objective": _objective_name(args),
+        "objective_kind": _resolved_objective_kind(args),
+        "include_hfx_channel": bool(args.include_hfx_channel),
+        "response_hf_mode": str(args.response_hf_mode),
+        "include_pt2_channel": bool(args.include_pt2_channel),
+        "pt2_channel_mode": (
+            str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None
+        ),
+        "response_pt2_mode": (
+            str(args.response_pt2_mode) if bool(args.include_pt2_channel) else None
+        ),
+        "s1_weight": float(args.s1_weight),
+        "energy_mse_weight": float(args.energy_mse_weight),
+        "energy_mae_weight": float(args.energy_mae_weight),
+        "density_constraint_weight": float(args.density_constraint_weight),
+        "s1_use_tda": bool(args.s1_use_tda),
+        "eval_use_tda": resolved_eval_use_tda,
+        "scf_warm_start": bool(args.scf_warm_start),
+        "scf_warm_start_update_interval": int(args.scf_warm_start_update_interval),
+        "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
+        "scf_gradient_mode": str(args.scf_gradient_mode),
+        "scf_implicit_diff_max_iter": int(args.scf_implicit_diff_max_iter),
+        "scf_implicit_diff_clip": float(args.scf_implicit_diff_clip),
+        "scf_implicit_diff_tolerance": float(args.scf_implicit_diff_tolerance),
+        "scf_implicit_diff_regularization": float(args.scf_implicit_diff_regularization),
+        "steps": int(args.steps),
+        "learning_rate": float(args.learning_rate),
+        "learning_rate_initial": float(args.learning_rate),
+        "lr_decay_every": int(args.lr_decay_every),
+        "lr_decay_factor": float(args.lr_decay_factor),
+        "checkpoint_every": int(args.checkpoint_every),
+        "hidden_dims": [int(value) for value in args.hidden_dims],
+        "train_r_values_angstrom": [float(value) for value in train_r_values],
+        "dense_points": int(args.dense_points),
+    }
+
+
+def _save_params_checkpoint_atomic(
+    path: Path,
+    params: Any,
+    *,
+    metadata: dict[str, Any],
+) -> tuple[Path, Path]:
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_checkpoint, tmp_meta = save_params_checkpoint(
+        tmp_path,
+        params,
+        metadata=metadata,
+    )
+    tmp_checkpoint.replace(path)
+    final_meta_path = path.with_suffix(path.suffix + ".meta.json")
+    if tmp_meta is None:
+        final_meta_path.write_text("{}", encoding="utf-8")
+    else:
+        tmp_meta.replace(final_meta_path)
+    return path, final_meta_path
+
+
+def _save_training_checkpoint(
+    args: argparse.Namespace,
+    *,
+    kind: str,
+    params: Any,
+    step: int,
+    parameter_state: str,
+    loss: float | None = None,
+    s1_total_mae: float | None = None,
+    s1_total_mse: float | None = None,
+    s1_total_penalty: float | None = None,
+    learning_rate: float | None = None,
+    min_loss: float | None = None,
+    min_loss_step: int | None = None,
+) -> tuple[Path, Path]:
+    path = Path(args.outdir) / f"neural_xc_params_{kind}.msgpack"
+    metadata = _training_checkpoint_metadata(
+        args,
+        checkpoint_kind=kind,
+        parameter_state=parameter_state,
+        step=step,
+        loss=loss,
+        s1_total_mae=s1_total_mae,
+        s1_total_mse=s1_total_mse,
+        s1_total_penalty=s1_total_penalty,
+        learning_rate=learning_rate,
+        min_loss=min_loss,
+        min_loss_step=min_loss_step,
+    )
+    return _save_params_checkpoint_atomic(path, params, metadata=metadata)
 
 
 def _make_s1_functional(args: argparse.Namespace) -> Any:
@@ -1099,6 +1267,42 @@ def _train_functional_streaming(
         f"s1_weight={float(args.s1_weight):.6g} "
         "train_step_mode=stream_single_geometry"
     )
+    initial_lr = (
+        float(lr_schedule(0))
+        if lr_schedule is not None
+        else float(args.learning_rate)
+    )
+    latest_checkpoint_path, latest_checkpoint_meta_path = _save_training_checkpoint(
+        args,
+        kind="latest",
+        params=state.params,
+        step=0,
+        parameter_state="initial",
+        loss=initial_loss_val,
+        s1_total_mae=initial_metrics["s1_mae"],
+        s1_total_mse=initial_metrics["s1_mse"],
+        s1_total_penalty=initial_metrics["s1_penalty"],
+        learning_rate=initial_lr,
+        min_loss=min_loss,
+        min_loss_step=min_loss_step,
+    )
+    best_checkpoint_path: Path | None = None
+    best_checkpoint_meta_path: Path | None = None
+    if np.isfinite(initial_loss_val):
+        best_checkpoint_path, best_checkpoint_meta_path = _save_training_checkpoint(
+            args,
+            kind="best",
+            params=best_params,
+            step=0,
+            parameter_state="initial",
+            loss=min_loss,
+            s1_total_mae=initial_metrics["s1_mae"],
+            s1_total_mse=initial_metrics["s1_mse"],
+            s1_total_penalty=initial_metrics["s1_penalty"],
+            learning_rate=initial_lr,
+            min_loss=min_loss,
+            min_loss_step=min_loss_step,
+        )
 
     t0 = time.perf_counter()
     for step in range(1, int(args.steps) + 1):
@@ -1129,10 +1333,12 @@ def _train_functional_streaming(
         grad_norm_val = float(np.mean(grad_norms))
         grad_abs_max_val = float(np.max(grad_abs_maxes))
         nonfinite_grad_fraction_val = float(np.mean(nonfinite_fracs))
+        best_updated = False
         if train_loss_val < min_loss:
             min_loss = train_loss_val
             min_loss_step = step
             best_params = params_for_loss
+            best_updated = True
 
         prev_state = state
         state = state.apply_gradients(grads=grads_avg)
@@ -1158,15 +1364,48 @@ def _train_functional_streaming(
         grad_abs_max_history.append(grad_abs_max_val)
         param_update_norm_history.append(param_update_norm_val)
         nonfinite_grad_fraction_history.append(nonfinite_grad_fraction_val)
+        current_lr = (
+            float(lr_schedule(step - 1))
+            if lr_schedule is not None
+            else float(args.learning_rate)
+        )
+        if best_updated:
+            best_checkpoint_path, best_checkpoint_meta_path = _save_training_checkpoint(
+                args,
+                kind="best",
+                params=best_params,
+                step=min_loss_step,
+                parameter_state="pre_update",
+                loss=min_loss,
+                s1_total_mae=train_s1_mae_val,
+                s1_total_mse=train_s1_mse_val,
+                s1_total_penalty=train_s1_penalty_val,
+                learning_rate=current_lr,
+                min_loss=min_loss,
+                min_loss_step=min_loss_step,
+            )
+        if (
+            int(args.checkpoint_every) > 0
+            and (step == 1 or step % int(args.checkpoint_every) == 0 or step == int(args.steps))
+        ):
+            latest_checkpoint_path, latest_checkpoint_meta_path = _save_training_checkpoint(
+                args,
+                kind="latest",
+                params=state.params,
+                step=step,
+                parameter_state="post_update",
+                loss=train_loss_val,
+                s1_total_mae=train_s1_mae_val,
+                s1_total_mse=train_s1_mse_val,
+                s1_total_penalty=train_s1_penalty_val,
+                learning_rate=current_lr,
+                min_loss=min_loss,
+                min_loss_step=min_loss_step,
+            )
         if step == 1 or step % 10 == 0 or step == int(args.steps):
             eval_steps.append(step)
             eval_loss_history.append(train_loss_val)
             eval_s1_mae_history.append(train_s1_mae_val)
-            current_lr = (
-                float(lr_schedule(step - 1))
-                if lr_schedule is not None
-                else float(args.learning_rate)
-            )
             logger.log(
                 "[train] "
                 f"step={step:4d}/{int(args.steps):4d} "
@@ -1188,10 +1427,61 @@ def _train_functional_streaming(
         min_loss = final_loss_val
         min_loss_step = int(args.steps)
         best_params = state.params
+        best_checkpoint_path, best_checkpoint_meta_path = _save_training_checkpoint(
+            args,
+            kind="best",
+            params=best_params,
+            step=min_loss_step,
+            parameter_state="final",
+            loss=min_loss,
+            s1_total_mae=final_metrics["s1_mae"],
+            s1_total_mse=final_metrics["s1_mse"],
+            s1_total_penalty=final_metrics["s1_penalty"],
+            learning_rate=(
+                float(lr_schedule(max(0, int(args.steps) - 1)))
+                if lr_schedule is not None
+                else float(args.learning_rate)
+            ),
+            min_loss=min_loss,
+            min_loss_step=min_loss_step,
+        )
     loss_history[-1] = final_loss_val
     s1_penalty_history[-1] = final_metrics["s1_penalty"]
     s1_mae_history[-1] = final_metrics["s1_mae"]
     s1_mse_history[-1] = final_metrics["s1_mse"]
+    final_lr = (
+        float(lr_schedule(max(0, int(args.steps) - 1)))
+        if lr_schedule is not None
+        else float(args.learning_rate)
+    )
+    final_checkpoint_path, final_checkpoint_meta_path = _save_training_checkpoint(
+        args,
+        kind="final",
+        params=state.params,
+        step=int(args.steps),
+        parameter_state="final",
+        loss=final_loss_val,
+        s1_total_mae=final_metrics["s1_mae"],
+        s1_total_mse=final_metrics["s1_mse"],
+        s1_total_penalty=final_metrics["s1_penalty"],
+        learning_rate=final_lr,
+        min_loss=min_loss,
+        min_loss_step=min_loss_step,
+    )
+    latest_checkpoint_path, latest_checkpoint_meta_path = _save_training_checkpoint(
+        args,
+        kind="latest",
+        params=state.params,
+        step=int(args.steps),
+        parameter_state="final",
+        loss=final_loss_val,
+        s1_total_mae=final_metrics["s1_mae"],
+        s1_total_mse=final_metrics["s1_mse"],
+        s1_total_penalty=final_metrics["s1_penalty"],
+        learning_rate=final_lr,
+        min_loss=min_loss,
+        min_loss_step=min_loss_step,
+    )
     logger.log(
         "[train] done "
         f"final_loss={final_loss_val:.8e} "
@@ -1218,6 +1508,14 @@ def _train_functional_streaming(
         "eval_steps": eval_steps,
         "eval_loss_history": eval_loss_history,
         "eval_s1_mae_history": eval_s1_mae_history,
+        "latest_checkpoint": str(latest_checkpoint_path),
+        "latest_checkpoint_meta": str(latest_checkpoint_meta_path),
+        "best_checkpoint": None if best_checkpoint_path is None else str(best_checkpoint_path),
+        "best_checkpoint_meta": (
+            None if best_checkpoint_meta_path is None else str(best_checkpoint_meta_path)
+        ),
+        "final_checkpoint": str(final_checkpoint_path),
+        "final_checkpoint_meta": str(final_checkpoint_meta_path),
     }
 
 
@@ -1450,6 +1748,40 @@ def train_functional(
     eval_loss_history = [initial_loss_val]
     eval_s1_mae_history = [_s1_total_supervision_mae(initial_metrics)]
 
+    initial_lr = (
+        float(lr_schedule(0))
+        if lr_schedule is not None
+        else float(args.learning_rate)
+    )
+    latest_checkpoint_path, latest_checkpoint_meta_path = _save_training_checkpoint(
+        args,
+        kind="latest",
+        params=state.params,
+        step=0,
+        parameter_state="initial",
+        loss=initial_loss_val,
+        s1_total_mae=_s1_total_supervision_mae(initial_metrics),
+        s1_total_mse=_s1_total_supervision_mse(initial_metrics),
+        s1_total_penalty=_s1_total_supervision_penalty(initial_metrics),
+        learning_rate=initial_lr,
+        min_loss=min_loss,
+        min_loss_step=min_loss_step,
+    )
+    best_checkpoint_path, best_checkpoint_meta_path = _save_training_checkpoint(
+        args,
+        kind="best",
+        params=best_params,
+        step=0,
+        parameter_state="initial",
+        loss=min_loss,
+        s1_total_mae=_s1_total_supervision_mae(initial_metrics),
+        s1_total_mse=_s1_total_supervision_mse(initial_metrics),
+        s1_total_penalty=_s1_total_supervision_penalty(initial_metrics),
+        learning_rate=initial_lr,
+        min_loss=min_loss,
+        min_loss_step=min_loss_step,
+    )
+
     logger.log(
         "[train] "
         f"steps={int(args.steps)} "
@@ -1553,6 +1885,7 @@ def train_functional(
         # ``train_metrics`` is evaluated on ``prev_state.params`` before the
         # optimizer update, so the loss observed during loop iteration ``step``
         # corresponds to the parameter state at ``step - 1``.
+        best_updated = False
         if step >= 2:
             tracked_step = step - 1
             history_steps.append(tracked_step)
@@ -1564,12 +1897,47 @@ def train_functional(
                 min_loss = train_loss_val
                 min_loss_step = tracked_step
                 best_params = prev_state.params
+                best_updated = True
+
+        current_lr = float(lr_schedule(step - 1)) if lr_schedule is not None else float(args.learning_rate)
+        if best_updated:
+            best_checkpoint_path, best_checkpoint_meta_path = _save_training_checkpoint(
+                args,
+                kind="best",
+                params=best_params,
+                step=min_loss_step,
+                parameter_state="pre_update",
+                loss=min_loss,
+                s1_total_mae=train_s1_mae_val,
+                s1_total_mse=train_s1_mse_val,
+                s1_total_penalty=train_s1_penalty_val,
+                learning_rate=current_lr,
+                min_loss=min_loss,
+                min_loss_step=min_loss_step,
+            )
+        if (
+            int(args.checkpoint_every) > 0
+            and (step == 1 or step % int(args.checkpoint_every) == 0 or step == int(args.steps))
+        ):
+            latest_checkpoint_path, latest_checkpoint_meta_path = _save_training_checkpoint(
+                args,
+                kind="latest",
+                params=state.params,
+                step=step,
+                parameter_state="post_update",
+                loss=train_loss_val,
+                s1_total_mae=train_s1_mae_val,
+                s1_total_mse=train_s1_mse_val,
+                s1_total_penalty=train_s1_penalty_val,
+                learning_rate=current_lr,
+                min_loss=min_loss,
+                min_loss_step=min_loss_step,
+            )
 
         if step == 1 or step % 10 == 0 or step == int(args.steps):
             eval_steps.append(step)
             eval_loss_history.append(train_loss_val)
             eval_s1_mae_history.append(train_s1_mae_val)
-            current_lr = float(lr_schedule(step - 1)) if lr_schedule is not None else float(args.learning_rate)
             logger.log(
                 "[train] "
                 f"step={step:4d}/{int(args.steps):4d} "
@@ -1606,6 +1974,58 @@ def train_functional(
         min_loss = final_loss_val
         min_loss_step = final_step
         best_params = state.params
+        best_checkpoint_path, best_checkpoint_meta_path = _save_training_checkpoint(
+            args,
+            kind="best",
+            params=best_params,
+            step=min_loss_step,
+            parameter_state="final",
+            loss=min_loss,
+            s1_total_mae=final_s1_mae,
+            s1_total_mse=final_s1_mse,
+            s1_total_penalty=final_s1_penalty,
+            learning_rate=(
+                float(lr_schedule(max(0, final_step - 1)))
+                if lr_schedule is not None
+                else float(args.learning_rate)
+            ),
+            min_loss=min_loss,
+            min_loss_step=min_loss_step,
+        )
+
+    final_lr = (
+        float(lr_schedule(max(0, final_step - 1)))
+        if lr_schedule is not None
+        else float(args.learning_rate)
+    )
+    final_checkpoint_path, final_checkpoint_meta_path = _save_training_checkpoint(
+        args,
+        kind="final",
+        params=state.params,
+        step=final_step,
+        parameter_state="final",
+        loss=final_loss_val,
+        s1_total_mae=final_s1_mae,
+        s1_total_mse=final_s1_mse,
+        s1_total_penalty=final_s1_penalty,
+        learning_rate=final_lr,
+        min_loss=min_loss,
+        min_loss_step=min_loss_step,
+    )
+    latest_checkpoint_path, latest_checkpoint_meta_path = _save_training_checkpoint(
+        args,
+        kind="latest",
+        params=state.params,
+        step=final_step,
+        parameter_state="final",
+        loss=final_loss_val,
+        s1_total_mae=final_s1_mae,
+        s1_total_mse=final_s1_mse,
+        s1_total_penalty=final_s1_penalty,
+        learning_rate=final_lr,
+        min_loss=min_loss,
+        min_loss_step=min_loss_step,
+    )
 
     logger.log(
         "[train] done "
@@ -1635,6 +2055,12 @@ def train_functional(
         "eval_steps": eval_steps,
         "eval_loss_history": eval_loss_history,
         "eval_s1_mae_history": eval_s1_mae_history,
+        "latest_checkpoint": str(latest_checkpoint_path),
+        "latest_checkpoint_meta": str(latest_checkpoint_meta_path),
+        "best_checkpoint": str(best_checkpoint_path),
+        "best_checkpoint_meta": str(best_checkpoint_meta_path),
+        "final_checkpoint": str(final_checkpoint_path),
+        "final_checkpoint_meta": str(final_checkpoint_meta_path),
     }
 
 
@@ -2286,56 +2712,17 @@ def save_training_artifacts(
     checkpoint_path, checkpoint_meta_path = save_params_checkpoint(
         checkpoint_path,
         params,
-        metadata={
-            "basis": str(args.basis),
-            "xc": str(args.xc),
-            "system_label": _system_label(args),
-            "atom1": str(getattr(args, "atom1", "H")),
-            "atom2": str(getattr(args, "atom2", "H")),
-            "charge": int(getattr(args, "charge", 0)),
-            "spin": int(getattr(args, "spin", 0)),
-            "external_s1_total_csv": (
-                None
-                if getattr(args, "external_s1_total_csv", None) is None
-                else str(args.external_s1_total_csv)
-            ),
-            "external_s1_total_column": str(
-                getattr(args, "external_s1_total_column", "")
-            ),
-            "external_reference_label": _reference_label(args),
-            "training_mode": str(args.training_mode),
-            "reference_scf_backend": str(args.reference_scf_backend),
-            "objective": _objective_name(args),
-            "objective_kind": _resolved_objective_kind(args),
-            "include_hfx_channel": bool(args.include_hfx_channel),
-            "response_hf_mode": str(args.response_hf_mode),
-            "include_pt2_channel": bool(args.include_pt2_channel),
-            "pt2_channel_mode": (
-                str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None
-            ),
-            "response_pt2_mode": (
-                str(args.response_pt2_mode) if bool(args.include_pt2_channel) else None
-            ),
-            "s1_weight": float(args.s1_weight),
-            "energy_mse_weight": float(args.energy_mse_weight),
-            "energy_mae_weight": float(args.energy_mae_weight),
-            "density_constraint_weight": float(args.density_constraint_weight),
-            "s1_use_tda": bool(args.s1_use_tda),
-            "eval_use_tda": bool(eval_use_tda),
-            "scf_warm_start": bool(args.scf_warm_start),
-            "scf_warm_start_update_interval": int(args.scf_warm_start_update_interval),
-            "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
-            "scf_gradient_mode": str(args.scf_gradient_mode),
-            "scf_implicit_diff_max_iter": int(args.scf_implicit_diff_max_iter),
-            "scf_implicit_diff_clip": float(args.scf_implicit_diff_clip),
-            "scf_implicit_diff_tolerance": float(args.scf_implicit_diff_tolerance),
-            "scf_implicit_diff_regularization": float(args.scf_implicit_diff_regularization),
-            "steps": int(args.steps),
-            "learning_rate": float(args.learning_rate),
-            "hidden_dims": [int(value) for value in args.hidden_dims],
-            "train_r_values_angstrom": [float(value) for value in train_r_values],
-            "dense_points": int(args.dense_points),
-        },
+        metadata=_training_checkpoint_metadata(
+            args,
+            checkpoint_kind="best_compat",
+            parameter_state="best",
+            step=int(training.get("min_loss_step", 0)),
+            train_r_values=train_r_values,
+            eval_use_tda=eval_use_tda,
+            loss=float(training.get("min_loss", float("nan"))),
+            min_loss=float(training.get("min_loss", float("nan"))),
+            min_loss_step=int(training.get("min_loss_step", 0)),
+        ),
     )
     return training_png, training_history_csv, checkpoint_path, checkpoint_meta_path
 
@@ -2430,6 +2817,12 @@ def write_summary(
         "train_r_values_angstrom": [float(value) for value in train_r_values],
         "checkpoint": str(checkpoint_path),
         "checkpoint_meta": str(checkpoint_meta_path) if checkpoint_meta_path is not None else None,
+        "best_checkpoint": training.get("best_checkpoint"),
+        "best_checkpoint_meta": training.get("best_checkpoint_meta"),
+        "latest_checkpoint": training.get("latest_checkpoint"),
+        "latest_checkpoint_meta": training.get("latest_checkpoint_meta"),
+        "final_checkpoint": training.get("final_checkpoint"),
+        "final_checkpoint_meta": training.get("final_checkpoint_meta"),
     }
 
     with path.open("w", encoding="utf-8") as handle:
@@ -2457,7 +2850,8 @@ def main() -> None:
         f"basis={args.basis}, xc={args.xc}, "
         f"R=[{args.r_min},{args.r_max}], train_points={args.train_points}, "
         f"dense_points={args.dense_points}, steps={args.steps}, "
-        f"lr={args.learning_rate}, training_mode={args.training_mode}, "
+        f"lr={args.learning_rate}, checkpoint_every={int(args.checkpoint_every)}, "
+        f"training_mode={args.training_mode}, "
         f"objective={_objective_name(args)}, include_pt2_channel={bool(args.include_pt2_channel)}, "
         f"include_hfx_channel={bool(args.include_hfx_channel)}, "
         f"response_hf_mode={str(args.response_hf_mode)}, "

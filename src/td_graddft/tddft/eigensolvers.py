@@ -113,9 +113,11 @@ def _davidson_lowest_symmetric(
     max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
     max_subspace: int | None = None,
     collapse_subspace: int | None = None,
+    initial_guess_count: int | None = None,
+    max_trial_vectors: int | None = None,
     positive_eig_threshold: float | None = None,
-    preconditioner_floor: float = 1e-6,
-    preconditioner_level_shift: float = 1e-3,
+    preconditioner_floor: float = 1e-8,
+    preconditioner_level_shift: float = 0.0,
     orth_eps: float = 1e-10,
 ) -> tuple[Array, Array, Array]:
     """Approximate the lowest eigenpairs of a Hermitian matrix with Davidson."""
@@ -141,7 +143,16 @@ def _davidson_lowest_symmetric(
     else:
         collapse_subspace = min(dim, max(int(collapse_subspace), nroots))
 
-    guess_dim = min(dim, max_subspace, nroots)
+    if initial_guess_count is None:
+        guess_count = nroots
+    else:
+        guess_count = max(nroots, int(initial_guess_count))
+    if max_trial_vectors is None:
+        trial_count = nroots
+    else:
+        trial_count = max(nroots, int(max_trial_vectors))
+    trial_count = min(max_subspace, trial_count)
+    guess_dim = min(dim, max_subspace, guess_count)
     guess_idx = jnp.argsort(diag)[:guess_dim]
     guess_basis = jnp.eye(dim, dtype=dtype)[:, guess_idx]
     guess_basis, _ = jnp.linalg.qr(guess_basis, mode="reduced")
@@ -382,9 +393,12 @@ def _davidson_lowest_symmetric(
             sub_eigvecs = sub_eigvecs[:, order]
             root_valid = root_valid[order]
 
-            theta = sub_eigvals[:nroots]
-            coeff = sub_eigvecs[:, :nroots]
-            selected_valid = root_valid[:nroots]
+            candidate_theta = sub_eigvals[:trial_count]
+            candidate_coeff = sub_eigvecs[:, :trial_count]
+            candidate_valid = root_valid[:trial_count]
+            theta = candidate_theta[:nroots]
+            coeff = candidate_coeff[:, :nroots]
+            selected_valid = candidate_valid[:nroots]
             vecs = _matmul(basis_it, coeff)
             avecs = _matmul(abasis_it, coeff)
             residuals = avecs - vecs * theta[None, :]
@@ -403,28 +417,35 @@ def _davidson_lowest_symmetric(
             best_vecs_next = jnp.where(improve_best, vecs, best_vecs_it)
             best_residual_next = jnp.where(improve_best, max_residual, best_residual_it)
 
+            candidate_vecs = _matmul(basis_it, candidate_coeff)
+            candidate_avecs = _matmul(abasis_it, candidate_coeff)
+            candidate_residuals = (
+                candidate_avecs - candidate_vecs * candidate_theta[None, :]
+            )
+            candidate_residual_norms = jnp.linalg.norm(candidate_residuals, axis=0)
+
             def _correction_body(root_idx: int, carry):
                 new_cols_cur, new_mask_cur, new_count_cur = carry
                 root_residual_norm = jax.lax.dynamic_index_in_dim(
-                    residual_norms,
+                    candidate_residual_norms,
                     root_idx,
                     axis=0,
                     keepdims=False,
                 )
                 root_theta = jax.lax.dynamic_index_in_dim(
-                    theta,
+                    candidate_theta,
                     root_idx,
                     axis=0,
                     keepdims=False,
                 )
                 root_residual = jax.lax.dynamic_index_in_dim(
-                    residuals,
+                    candidate_residuals,
                     root_idx,
                     axis=1,
                     keepdims=False,
                 )
                 root_is_valid = jax.lax.dynamic_index_in_dim(
-                    selected_valid,
+                    candidate_valid,
                     root_idx,
                     axis=0,
                     keepdims=False,
@@ -464,12 +485,12 @@ def _davidson_lowest_symmetric(
                     (new_cols_cur, new_mask_cur, new_count_cur),
                 )
 
-            init_new_cols = jnp.zeros((dim, nroots), dtype=dtype)
-            init_new_mask = jnp.zeros((nroots,), dtype=bool)
+            init_new_cols = jnp.zeros((dim, trial_count), dtype=dtype)
+            init_new_mask = jnp.zeros((trial_count,), dtype=bool)
             init_new_count = jnp.asarray(0, dtype=index_dtype)
             expand_cols, expand_mask, expand_count = jax.lax.fori_loop(
                 0,
-                nroots,
+                trial_count,
                 _correction_body,
                 (init_new_cols, init_new_mask, init_new_count),
             )
@@ -565,9 +586,11 @@ def implicit_differential_davidson_lowest_symmetric(
     max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
     max_subspace: int | None = None,
     collapse_subspace: int | None = None,
+    initial_guess_count: int | None = None,
+    max_trial_vectors: int | None = None,
     positive_eig_threshold: float | None = None,
-    preconditioner_floor: float = 1e-6,
-    preconditioner_level_shift: float = 1e-3,
+    preconditioner_floor: float = 1e-8,
+    preconditioner_level_shift: float = 0.0,
     orth_eps: float = 1e-10,
 ) -> tuple[Array, Array, Array]:
     """Return Davidson roots with implicit eigenvalue differentiation.
@@ -595,6 +618,8 @@ def implicit_differential_davidson_lowest_symmetric(
         max_iter=max_iter,
         max_subspace=max_subspace,
         collapse_subspace=collapse_subspace,
+        initial_guess_count=initial_guess_count,
+        max_trial_vectors=max_trial_vectors,
         positive_eig_threshold=positive_eig_threshold,
         preconditioner_floor=preconditioner_floor,
         preconditioner_level_shift=preconditioner_level_shift,

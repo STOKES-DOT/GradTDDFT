@@ -1129,7 +1129,7 @@ def test_s1_only_loss_skips_ground_state_total_energy_assembly(monkeypatch):
 
 def test_s1_only_loss_solves_three_roots_but_uses_first(monkeypatch):
     molecule = _make_toy_molecule()
-    calls: list[tuple[int, bool]] = []
+    calls: list[tuple[int, bool, object]] = []
 
     def fake_solve_excited_states(
         params,
@@ -1138,9 +1138,10 @@ def test_s1_only_loss_solves_three_roots_but_uses_first(monkeypatch):
         *,
         nstates: int,
         use_tda: bool,
+        response_kernel_options=None,
     ):
         del params, functional, molecule_arg
-        calls.append((int(nstates), bool(use_tda)))
+        calls.append((int(nstates), bool(use_tda), response_kernel_options))
         return SimpleNamespace(excitation_energies=jnp.asarray([0.25, 0.50, 0.75]))
 
     monkeypatch.setattr(
@@ -1168,10 +1169,66 @@ def test_s1_only_loss_solves_three_roots_but_uses_first(monkeypatch):
         training_config=cfg,
     )
 
-    assert calls == [(3, True)]
+    assert len(calls) == 1
+    assert calls[0][0:2] == (3, True)
+    assert calls[0][2].two_electron_mode == "auto"
     assert jnp.isfinite(loss)
     assert metrics["s1_predicted"][0] == 0.25
     assert metrics["s1_penalty"][0] > 0.0
+
+
+def test_excited_state_loss_passes_response_kernel_options(monkeypatch):
+    molecule = _make_toy_molecule()
+    seen_options = []
+
+    def fake_solve_excited_states(
+        params,
+        functional,
+        molecule_arg,
+        *,
+        nstates: int,
+        use_tda: bool,
+        response_kernel_options=None,
+    ):
+        del params, functional, molecule_arg, nstates, use_tda
+        seen_options.append(response_kernel_options)
+        return SimpleNamespace(excitation_energies=jnp.asarray([0.25, 0.50, 0.75]))
+
+    monkeypatch.setattr(
+        training_targets,
+        "_solve_excited_states",
+        fake_solve_excited_states,
+    )
+
+    constrained = GroundStateDatum(
+        molecule=molecule,
+        target_total_energy=jnp.array(2.125),
+        target_s1_energy=jnp.asarray(0.35),
+        s1_constraint_weight=0.5,
+    )
+    cfg = GroundStateTrainingConfig(
+        energy_mse_weight=0.0,
+        energy_mae_weight=0.0,
+        s1_constraint_use_tda=True,
+        response_two_electron_mode="ris",
+        response_ris_theta=0.25,
+        response_ris_j_fit="sp",
+        response_ris_k_fit="s",
+        response_ris_aux_chunk_size=128,
+    )
+
+    loss, _ = ground_state_mse_loss(
+        {},
+        object(),
+        constrained,
+        training_config=cfg,
+    )
+
+    assert jnp.isfinite(loss)
+    assert seen_options
+    assert seen_options[0].two_electron_mode == "ris"
+    assert seen_options[0].ris_theta == pytest.approx(0.25)
+    assert seen_options[0].ris_aux_chunk_size == 128
 
 
 def test_s1_only_loss_skips_oscillator_strength_assembly(monkeypatch):

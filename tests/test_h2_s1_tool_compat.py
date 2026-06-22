@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -137,8 +138,69 @@ def test_h2_s1_tool_defaults_to_legacy_s1_only_tda_objective():
     args = module.parse_args([])
 
     assert args.objective == "auto"
+    assert args.checkpoint_every == 10
     assert module._resolved_objective_kind(args) == "s1_only"
     assert module._objective_name(args) == "s1_only_tda"
+
+
+def test_h2_s1_training_checkpoint_writes_metadata_atomically(tmp_path):
+    module = _load_tool_module(
+        "tools/h2_s1_tda_train5_dense100_vs_fci.py",
+        "h2_s1_tda_train5_dense100_vs_fci_test_checkpoint",
+    )
+    args = module.parse_args(
+        [
+            "--outdir",
+            str(tmp_path),
+            "--train-r-values",
+            "0.8",
+            "1.0",
+            "--checkpoint-every",
+            "7",
+            "--include-hfx-channel",
+            "--no-include-pt2-channel",
+        ]
+    )
+    params = {"dense": {"kernel": np.asarray([1.0, 2.0], dtype=np.float64)}}
+
+    checkpoint_path, meta_path = module._save_training_checkpoint(
+        args,
+        kind="best",
+        params=params,
+        step=3,
+        parameter_state="pre_update",
+        loss=0.12,
+        s1_total_mae=0.04,
+        s1_total_mse=0.002,
+        s1_total_penalty=0.042,
+        learning_rate=5e-5,
+        min_loss=0.12,
+        min_loss_step=3,
+    )
+    module._save_training_checkpoint(
+        args,
+        kind="best",
+        params=params,
+        step=4,
+        parameter_state="pre_update",
+        loss=0.08,
+        min_loss=0.08,
+        min_loss_step=4,
+    )
+
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert checkpoint_path == tmp_path / "neural_xc_params_best.msgpack"
+    assert checkpoint_path.exists()
+    assert metadata["checkpoint_kind"] == "best"
+    assert metadata["parameter_state"] == "pre_update"
+    assert metadata["step"] == 4
+    assert metadata["loss"] == 0.08
+    assert metadata["min_loss_step"] == 4
+    assert metadata["checkpoint_every"] == 7
+    assert metadata["include_hfx_channel"] is True
+    assert metadata["include_pt2_channel"] is False
+    assert metadata["train_r_values_angstrom"] == [0.8, 1.0]
+    assert not any(tmp_path.glob("*.tmp"))
 
 
 def test_h2_s1_tool_exposes_hfx_channel_controls():

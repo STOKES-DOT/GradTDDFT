@@ -189,6 +189,24 @@ def _toy_hfx_nu_cache():
     return nu
 
 
+def _three_grid_hfx_nu_cache():
+    return jnp.asarray(
+        [
+            [
+                [[0.7, 0.2], [0.2, 0.5]],
+                [[0.4, -0.1], [-0.1, 0.6]],
+                [[0.3, 0.0], [0.0, 0.2]],
+            ],
+            [
+                [[0.2, 0.1], [0.1, 0.4]],
+                [[0.1, 0.0], [0.0, 0.3]],
+                [[0.5, -0.2], [-0.2, 0.6]],
+            ],
+        ],
+        dtype=jnp.float64,
+    )
+
+
 def _toy_hfx_local_and_fxx(molecule, nu):
     ao = jnp.asarray(molecule.ao)
     dm_a = jnp.asarray(molecule.rdm1[0])
@@ -226,6 +244,44 @@ def test_chunked_hfx_nu_matches_dense_hf_grid_contribution():
         assert jnp.allclose(chunked_part, dense_part)
 
 
+def _hdf5_hfx_nu_api(tmp_path, dense_nu, *, chunk_size=1):
+    h5py = pytest.importorskip("h5py")
+    path = tmp_path / "hfx_nu.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("hfx_nu", data=np.asarray(dense_nu))
+    return ChunkedHFXNu.from_hdf5_dataset(path, "hfx_nu", chunk_size=chunk_size)
+
+
+def test_hdf5_hfx_nu_matches_dense_scf_grid_contribution(tmp_path):
+    dense_molecule = _make_toy_molecule()
+    dense_nu = _toy_hfx_nu_cache()
+    dense_molecule.hfx_local = None
+    dense_molecule.hfx_nu = dense_nu
+
+    hdf5_molecule = _make_toy_molecule()
+    hdf5_molecule.hfx_local = None
+    hdf5_molecule.hfx_nu = None
+    hdf5_molecule.hfx_nu_api = _hdf5_hfx_nu_api(tmp_path, dense_nu, chunk_size=1)
+
+    functional = make_neural_xc_functional(
+        semilocal_xc=("gga_x_pbe", "gga_c_pbe"),
+        hidden_dims=(8,),
+    )
+    features = restricted_grid_features(dense_molecule)
+
+    dense = functional._restricted_hfx_grid_contribution_components_no_fxx(
+        dense_molecule,
+        features=features,
+    )
+    hdf5 = functional._restricted_hfx_grid_contribution_components_no_fxx(
+        hdf5_molecule,
+        features=features,
+    )
+
+    for dense_part, hdf5_part in zip(dense, hdf5, strict=True):
+        assert jnp.allclose(hdf5_part, dense_part)
+
+
 def test_init_from_molecule_uses_cached_hfx_local_without_reading_chunked_nu():
     class RaisingChunkedNu:
         shape = (1, 2, 2, 2)
@@ -253,7 +309,7 @@ def test_init_from_molecule_uses_cached_hfx_local_without_reading_chunked_nu():
 
     params = functional.init_from_molecule(jax.random.PRNGKey(226), molecule)
 
-    assert jax.tree_util.tree_leaves(params)
+    assert isinstance(params, dict)
 
 
 def test_semilocal_only_functional_omits_hfx_channels_and_fraction():
@@ -449,7 +505,154 @@ def test_chunked_hfx_nu_matches_dense_hfx_fock_contraction():
     assert jnp.allclose(chunked_fock, dense_fock)
 
 
-def test_scf_direct_hfx_precontracts_nu_once_for_feature_and_fock(monkeypatch):
+def test_hfx_fock_contraction_prefers_current_nu_over_stale_cached_fxx():
+    dense_molecule = _make_toy_molecule()
+    dense_nu = _toy_hfx_nu_cache()
+    dense_molecule.hfx_nu = dense_nu
+
+    chunked_molecule = _make_toy_molecule()
+    chunked_molecule.hfx_nu = None
+    chunked_molecule.hfx_nu_api = ChunkedHFXNu.from_dense(dense_nu, chunk_size=1)
+    chunked_molecule.hfx_fxx = jnp.full((1, 2, 2), 99.0, dtype=dense_nu.dtype)
+
+    functional = make_neural_xc_functional(
+        semilocal_xc=("gga_x_pbe", "gga_c_pbe"),
+        hidden_dims=(8,),
+    )
+    grad_a = jnp.asarray([[0.2], [0.4]], dtype=dense_nu.dtype)
+    grad_b = jnp.asarray([[0.3], [0.1]], dtype=dense_nu.dtype)
+
+    dense_fock, dense_used = functional._contract_hfx_feature_gradients_to_restricted_fock(
+        dense_molecule,
+        grad_a,
+        grad_b,
+    )
+    chunked_fock, chunked_used = functional._contract_hfx_feature_gradients_to_restricted_fock(
+        chunked_molecule,
+        grad_a,
+        grad_b,
+    )
+
+    assert dense_used is True
+    assert chunked_used is True
+    assert jnp.allclose(chunked_fock, dense_fock)
+
+
+def test_chunked_hfx_fock_gradient_avoids_remat_transpose():
+    molecule = _make_toy_molecule()
+    dense_nu = _toy_hfx_nu_cache()
+    molecule.hfx_nu = None
+    molecule.hfx_nu_api = ChunkedHFXNu.from_dense(dense_nu, chunk_size=1)
+    functional = make_neural_xc_functional(
+        semilocal_xc=("gga_x_pbe", "gga_c_pbe"),
+        hidden_dims=(8,),
+    )
+
+    def loss(grad_values):
+        hfx_fock, used = functional._contract_hfx_feature_gradients_to_restricted_fock(
+            molecule,
+            grad_values[:, None],
+            grad_values[:, None],
+        )
+        return jnp.sum(jnp.where(used, hfx_fock, 0.0) ** 2)
+
+    jaxpr_text = str(
+        jax.make_jaxpr(jax.grad(loss))(jnp.asarray([0.2, 0.4], dtype=dense_nu.dtype))
+    )
+
+    assert "remat" not in jaxpr_text
+
+
+def test_chunked_hfx_fock_gradient_matches_dense_path():
+    dense_nu = _toy_hfx_nu_cache()
+    dense_molecule = _make_toy_molecule()
+    dense_molecule.hfx_nu = dense_nu
+    chunked_molecule = _make_toy_molecule()
+    chunked_molecule.hfx_nu = None
+    chunked_molecule.hfx_nu_api = ChunkedHFXNu.from_dense(dense_nu, chunk_size=1)
+    functional = make_neural_xc_functional(
+        semilocal_xc=("gga_x_pbe", "gga_c_pbe"),
+        hidden_dims=(8,),
+    )
+
+    def loss(molecule, grad_values):
+        hfx_fock, used = functional._contract_hfx_feature_gradients_to_restricted_fock(
+            molecule,
+            grad_values[:, None],
+            grad_values[:, None],
+        )
+        return jnp.sum(jnp.where(used, hfx_fock, 0.0) ** 2)
+
+    grad_values = jnp.asarray([0.2, 0.4], dtype=dense_nu.dtype)
+    dense_grad = jax.grad(lambda values: loss(dense_molecule, values))(grad_values)
+    chunked_grad = jax.grad(lambda values: loss(chunked_molecule, values))(grad_values)
+
+    assert jnp.allclose(chunked_grad, dense_grad)
+
+
+def test_hdf5_hfx_fock_gradient_matches_dense_path(tmp_path):
+    dense_nu = _toy_hfx_nu_cache()
+    dense_molecule = _make_toy_molecule()
+    dense_molecule.hfx_nu = dense_nu
+    hdf5_molecule = _make_toy_molecule()
+    hdf5_molecule.hfx_nu = None
+    hdf5_molecule.hfx_nu_api = _hdf5_hfx_nu_api(tmp_path, dense_nu, chunk_size=1)
+    functional = make_neural_xc_functional(
+        semilocal_xc=("gga_x_pbe", "gga_c_pbe"),
+        hidden_dims=(8,),
+    )
+
+    def loss(molecule, grad_values):
+        hfx_fock, used = functional._contract_hfx_feature_gradients_to_restricted_fock(
+            molecule,
+            grad_values[:, None],
+            grad_values[:, None],
+        )
+        return jnp.sum(jnp.where(used, hfx_fock, 0.0) ** 2)
+
+    grad_values = jnp.asarray([0.2, 0.4], dtype=dense_nu.dtype)
+    dense_grad = jax.grad(lambda values: loss(dense_molecule, values))(grad_values)
+    hdf5_grad = jax.grad(lambda values: loss(hdf5_molecule, values))(grad_values)
+
+    assert jnp.allclose(hdf5_grad, dense_grad)
+
+
+def test_hdf5_scf_direct_hfx_reused_fxx_matches_dense(tmp_path):
+    dense_nu = _toy_hfx_nu_cache()
+    dense_molecule = _make_toy_molecule()
+    dense_molecule.hfx_local = None
+    dense_molecule.hfx_nu = dense_nu
+
+    hdf5_molecule = _make_toy_molecule()
+    hdf5_molecule.hfx_local = None
+    hdf5_molecule.hfx_nu = None
+    hdf5_molecule.hfx_nu_api = _hdf5_hfx_nu_api(tmp_path, dense_nu, chunk_size=1)
+
+    functional = NeuralXCFunctional(
+        model=_HFParametricConstantChannelModel(),
+        semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
+        include_hfx_channel=True,
+        input_feature_mode="canonical",
+        hf_input_mode="spin_resolved",
+        response_hf_mode="approx",
+        hfx_channels=1,
+        name="toy_hdf5_scf_reused_fxx",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(245), dense_molecule)
+
+    dense_components = functional.scf_potential_components_and_alpha(params, dense_molecule)
+    hdf5_components = functional.scf_potential_components_and_alpha(params, hdf5_molecule)
+
+    for idx, (dense_part, hdf5_part) in enumerate(
+        zip(dense_components, hdf5_components, strict=True)
+    ):
+        if idx == 4:
+            assert hdf5_part == dense_part
+        else:
+            assert jnp.allclose(hdf5_part, dense_part, atol=1e-8)
+
+
+def test_scf_direct_hfx_reuses_precontracted_fxx_without_second_chunk_read(monkeypatch):
     count = {"padded": 0}
     original_projection_chunk = neural_xc_projection.hfx_nu_grid_chunk_padded
     original_binding_chunk = neural_xc_binding.hfx_nu_grid_chunk_padded
@@ -473,7 +676,6 @@ def test_scf_direct_hfx_precontracts_nu_once_for_feature_and_fock(monkeypatch):
         count_binding_chunk,
     )
     molecule = _make_toy_molecule()
-    molecule.hfx_local = molecule.hfx_local[:, :, :1]
     functional = NeuralXCFunctional(
         model=_HFParametricConstantChannelModel(),
         semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
@@ -481,7 +683,7 @@ def test_scf_direct_hfx_precontracts_nu_once_for_feature_and_fock(monkeypatch):
         input_feature_mode="canonical",
         hf_input_mode="spin_resolved",
         response_hf_mode="approx",
-        hfx_channels=1,
+        hfx_channels=2,
         name="toy_scf_precontract_once",
     )
     params = functional.init_from_molecule(jax.random.PRNGKey(246), molecule)
@@ -2803,35 +3005,262 @@ def test_scf_energy_callback_matches_refreshed_hfx_basis_with_explicit_hfx_fock(
     assert jnp.all(jnp.isfinite(vxc_matrix))
 
 
-def test_scf_potential_components_read_chunked_hfx_nu_for_basis_and_fock():
+def test_restricted_xc_fock_terms_use_neural_xc_direct_callback(monkeypatch):
     molecule = _make_three_grid_pt2_toy_molecule()
     molecule.rep_tensor = jnp.zeros_like(molecule.rep_tensor)
-    dense_nu = jnp.asarray(
-        [
-            [
-                [[0.7, 0.2], [0.2, 0.5]],
-                [[0.4, -0.1], [-0.1, 0.6]],
-                [[0.3, 0.0], [0.0, 0.2]],
-            ],
-            [
-                [[0.2, 0.1], [0.1, 0.4]],
-                [[0.1, 0.0], [0.0, 0.3]],
-                [[0.5, -0.2], [-0.2, 0.6]],
-            ],
-        ],
-        dtype=jnp.float64,
+    molecule.hfx_nu = _three_grid_hfx_nu_cache()
+    molecule.hfx_local = jnp.zeros((2, 3, 2), dtype=jnp.float64)
+    functional = NeuralXCFunctional(
+        model=_HFResponsiveChannelModel(),
+        semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
+        include_hfx_channel=True,
+        input_feature_mode="canonical",
+        hf_input_mode="spin_resolved",
+        hfx_channels=2,
+        name="hf_direct_scf_terms",
     )
+    params = functional.init_from_molecule(jax.random.PRNGKey(231), molecule)
+    molecule.hfx_local = None
+
+    def fail_fallback(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("SCF should use neural-xc direct fock terms")
+
+    monkeypatch.setattr(
+        scf_differentiable,
+        "xc_energy_and_potential_from_density",
+        fail_fallback,
+    )
+    vxc_matrix, alpha, hfx_fock, xc_energy = scf_differentiable._restricted_xc_fock_terms(
+        params=params,
+        functional=functional,
+        molecule=molecule,
+        weights=molecule.grid.weights,
+        functional_dtype=jnp.float64,
+        vxc_clip=20.0,
+    )
+
+    assert jnp.all(jnp.isfinite(vxc_matrix))
+    assert jnp.all(jnp.isfinite(hfx_fock))
+    assert jnp.isfinite(alpha)
+    assert jnp.isfinite(xc_energy)
+
+
+def test_direct_scf_fock_terms_do_not_materialize_hfx_fxx(monkeypatch):
+    molecule = _make_three_grid_pt2_toy_molecule()
+    molecule.rep_tensor = jnp.zeros_like(molecule.rep_tensor)
+    dense_nu = _three_grid_hfx_nu_cache()
 
     class CountingChunkedNu:
         def __init__(self):
             self.shape = tuple(dense_nu.shape)
-            self.padded_calls = 0
+            self.chunk_size = 1
+            self.reads = 0
 
         def grid_chunk(self, start, stop):
             return dense_nu[:, int(start) : int(stop)]
 
         def grid_chunk_padded(self, start, chunk_size):
-            self.padded_calls += 1
+            self.reads += 1
+            indices = jnp.asarray(start, dtype=jnp.int32) + jnp.arange(int(chunk_size))
+            chunk = jnp.take(dense_nu, indices, axis=1, mode="clip")
+            valid = indices < int(dense_nu.shape[1])
+            return jnp.where(
+                valid.reshape((1, int(chunk_size), 1, 1)),
+                chunk,
+                jnp.zeros_like(chunk),
+            )
+
+    api = CountingChunkedNu()
+    molecule.hfx_nu = None
+    molecule.hfx_nu_api = api
+    molecule.hfx_local = jnp.zeros((2, 3, 2), dtype=jnp.float64)
+    functional = NeuralXCFunctional(
+        model=_HFResponsiveChannelModel(),
+        semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
+        include_hfx_channel=True,
+        input_feature_mode="canonical",
+        hf_input_mode="spin_resolved",
+        hfx_channels=2,
+        name="hf_direct_no_full_fxx",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(232), molecule)
+    molecule.hfx_local = None
+
+    def fail_full_hfx(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("SCF direct HFX path should not materialize full hfx_fxx")
+
+    monkeypatch.setattr(
+        neural_xc_projection.NeuralXCProjectionMixin,
+        "_restricted_hfx_grid_contribution_components_and_fxx",
+        fail_full_hfx,
+    )
+
+    vxc_matrix, alpha, hfx_fock, xc_energy = functional.scf_xc_fock_terms(
+        params,
+        molecule,
+        weights=molecule.grid.weights,
+        functional_dtype=jnp.float64,
+        vxc_clip=20.0,
+    )
+
+    assert api.reads > 0
+    assert jnp.all(jnp.isfinite(vxc_matrix))
+    assert jnp.all(jnp.isfinite(hfx_fock))
+    assert jnp.isfinite(alpha)
+    assert jnp.isfinite(xc_energy)
+
+
+def test_scf_energy_callback_does_not_materialize_hfx_fxx(monkeypatch):
+    molecule = _make_three_grid_pt2_toy_molecule()
+    molecule.rep_tensor = jnp.zeros_like(molecule.rep_tensor)
+    dense_nu = _three_grid_hfx_nu_cache()
+    molecule.hfx_nu = None
+    molecule.hfx_nu_api = ChunkedHFXNu.from_dense(dense_nu, chunk_size=1)
+    molecule.hfx_local = jnp.zeros((2, 3, 2), dtype=jnp.float64)
+    functional = NeuralXCFunctional(
+        model=_HFResponsiveChannelModel(),
+        semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
+        include_hfx_channel=True,
+        input_feature_mode="canonical",
+        hf_input_mode="spin_resolved",
+        hfx_channels=2,
+        name="hf_energy_no_full_fxx",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(234), molecule)
+    molecule.hfx_local = None
+
+    def fail_full_hfx(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("SCF energy callback should not materialize full hfx_fxx")
+
+    monkeypatch.setattr(
+        neural_xc_projection.NeuralXCProjectionMixin,
+        "_restricted_hfx_grid_contribution_components_and_fxx",
+        fail_full_hfx,
+    )
+    energy, alpha = functional.scf_xc_energy_and_alpha_for_density(
+        params,
+        molecule,
+        molecule.rdm1.sum(axis=0),
+    )
+
+    assert jnp.isfinite(energy)
+    assert jnp.isfinite(alpha)
+
+
+def test_init_from_molecule_with_hfx_nu_api_does_not_materialize_hfx_fxx(monkeypatch):
+    molecule = _make_three_grid_pt2_toy_molecule()
+    molecule.rep_tensor = jnp.zeros_like(molecule.rep_tensor)
+    dense_nu = _three_grid_hfx_nu_cache()
+    molecule.hfx_local = None
+    molecule.hfx_nu = None
+    molecule.hfx_nu_api = ChunkedHFXNu.from_dense(dense_nu, chunk_size=1)
+    functional = NeuralXCFunctional(
+        model=_HFResponsiveChannelModel(),
+        semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
+        include_hfx_channel=True,
+        input_feature_mode="canonical",
+        hf_input_mode="spin_resolved",
+        hfx_channels=2,
+        name="hf_init_no_full_fxx",
+    )
+
+    def fail_full_hfx(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("init_from_molecule should not materialize full hfx_fxx")
+
+    monkeypatch.setattr(
+        neural_xc_projection.NeuralXCProjectionMixin,
+        "_restricted_hfx_grid_contribution_components_and_fxx",
+        fail_full_hfx,
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(235), molecule)
+
+    assert isinstance(params, dict)
+
+
+def test_projected_hf_components_with_hfx_nu_api_do_not_materialize_hfx_fxx(monkeypatch):
+    molecule = _make_three_grid_pt2_toy_molecule()
+    molecule.rep_tensor = jnp.zeros_like(molecule.rep_tensor)
+    molecule.hfx_local = None
+    molecule.hfx_nu = None
+    molecule.hfx_nu_api = ChunkedHFXNu.from_dense(_three_grid_hfx_nu_cache(), chunk_size=1)
+    functional = NeuralXCFunctional(
+        model=_HFResponsiveChannelModel(),
+        semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
+        include_hfx_channel=True,
+        input_feature_mode="canonical",
+        hf_input_mode="spin_resolved",
+        hfx_channels=2,
+        name="hf_projected_no_full_fxx",
+    )
+
+    def fail_full_hfx(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("projected HF features should not materialize full hfx_fxx")
+
+    monkeypatch.setattr(
+        neural_xc_projection.NeuralXCProjectionMixin,
+        "_restricted_hfx_grid_contribution_components_and_fxx",
+        fail_full_hfx,
+    )
+    hf_total, hf_a, hf_b = functional.projected_hf_grid_contribution_components(molecule)
+
+    assert jnp.all(jnp.isfinite(hf_total))
+    assert jnp.all(jnp.isfinite(hf_a))
+    assert jnp.all(jnp.isfinite(hf_b))
+
+
+def test_bind_to_molecule_with_hfx_nu_api_does_not_materialize_hfx_fxx(monkeypatch):
+    molecule = _make_three_grid_pt2_toy_molecule()
+    molecule.rep_tensor = jnp.zeros_like(molecule.rep_tensor)
+    molecule.hfx_local = None
+    molecule.hfx_nu = None
+    molecule.hfx_nu_api = ChunkedHFXNu.from_dense(_three_grid_hfx_nu_cache(), chunk_size=1)
+    functional = NeuralXCFunctional(
+        model=_HFResponsiveChannelModel(),
+        semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
+        include_hfx_channel=True,
+        input_feature_mode="canonical",
+        hf_input_mode="spin_resolved",
+        hfx_channels=2,
+        name="hf_bind_no_full_fxx",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(236), molecule)
+
+    def fail_full_hfx(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("generic binding should not materialize full hfx_fxx")
+
+    monkeypatch.setattr(
+        neural_xc_projection.NeuralXCProjectionMixin,
+        "_restricted_hfx_grid_contribution_components_and_fxx",
+        fail_full_hfx,
+    )
+    bound = functional.bind_to_molecule(params, molecule)
+
+    assert jnp.all(jnp.isfinite(bound.energy_density(molecule.rdm1.sum(axis=0))))
+    assert jnp.all(jnp.isfinite(bound.grid_response_tensor(molecule)))
+
+
+def test_scf_potential_components_reuse_chunked_hfx_fxx_for_basis_and_fock():
+    molecule = _make_three_grid_pt2_toy_molecule()
+    molecule.rep_tensor = jnp.zeros_like(molecule.rep_tensor)
+    dense_nu = _three_grid_hfx_nu_cache()
+
+    class CountingChunkedNu:
+        def __init__(self):
+            self.shape = tuple(dense_nu.shape)
+            self.chunk_size = 1
+            self.padded_chunk_sizes = []
+
+        def grid_chunk(self, start, stop):
+            return dense_nu[:, int(start) : int(stop)]
+
+        def grid_chunk_padded(self, start, chunk_size):
+            self.padded_chunk_sizes.append(int(chunk_size))
             indices = jnp.asarray(start, dtype=jnp.int32) + jnp.arange(
                 int(chunk_size),
                 dtype=jnp.int32,
@@ -2859,7 +3288,7 @@ def test_scf_potential_components_read_chunked_hfx_nu_for_basis_and_fock():
     )
     params = functional.init_from_molecule(jax.random.PRNGKey(230), molecule)
     molecule.hfx_local = None
-    api.padded_calls = 0
+    api.padded_chunk_sizes = []
     molecule_at_density = functional.scf_molecule_with_density(
         molecule,
         molecule.rdm1.sum(axis=0),
@@ -2871,7 +3300,7 @@ def test_scf_potential_components_read_chunked_hfx_nu_for_basis_and_fock():
         molecule_at_density,
     )
 
-    assert api.padded_calls == 1
+    assert api.padded_chunk_sizes == [1]
 
 
 def test_scf_callbacks_use_current_hfx_basis_when_nu_is_available():

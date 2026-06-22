@@ -372,6 +372,49 @@ def test_hdf5_cache_can_read_restricted_molecule_on_host(tmp_path):
     assert isinstance(loaded.hfx_nu, np.ndarray)
 
 
+def test_hdf5_cache_roundtrips_restricted_response_df_factors(tmp_path):
+    h5py = pytest.importorskip("h5py")
+    from td_graddft.data.hdf5_cache import (
+        read_restricted_molecule,
+        write_restricted_molecule,
+    )
+    from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule
+
+    response_j = np.arange(2 * 3 * 3, dtype=np.float64).reshape(2, 3, 3)
+    response_k = np.arange(1 * 3 * 3, dtype=np.float64).reshape(1, 3, 3)
+    molecule = RestrictedMolecule(
+        ao=np.ones((2, 3)),
+        grid=QuadratureGrid(weights=np.ones((2,)), coords=np.ones((2, 3))),
+        dipole_integrals=np.ones((3, 3, 3)),
+        rep_tensor=np.zeros((0, 0, 0, 0)),
+        mo_coeff=np.ones((2, 3, 3)),
+        mo_occ=np.ones((2, 3)),
+        mo_energy=np.ones((2, 3)),
+        rdm1=np.ones((2, 3, 3)),
+        h1e=np.ones((3, 3)),
+        nuclear_repulsion=1.0,
+        nocc=1,
+        response_df_factors_j=response_j,
+        response_df_factors_k=response_k,
+        response_df_metadata={
+            "response_df_mode": "ris",
+            "ris_theta": 0.2,
+            "ris_j_fit": "sp",
+            "ris_k_fit": "s",
+        },
+    )
+    path = tmp_path / "refs.h5"
+    with h5py.File(path, "w") as handle:
+        write_restricted_molecule(handle.create_group("molecule"), molecule)
+    with h5py.File(path, "r") as handle:
+        loaded = read_restricted_molecule(handle["molecule"], array_backend="host")
+
+    assert np.allclose(loaded.response_df_factors_j, response_j)
+    assert np.allclose(loaded.response_df_factors_k, response_k)
+    assert loaded.response_df_metadata["response_df_mode"] == "ris"
+    assert loaded.response_df_metadata["ris_j_fit"] == "sp"
+
+
 def test_hdf5_cache_can_read_restricted_hfx_nu_as_chunked_api(tmp_path):
     h5py = pytest.importorskip("h5py")
     from td_graddft.data.hdf5_cache import (

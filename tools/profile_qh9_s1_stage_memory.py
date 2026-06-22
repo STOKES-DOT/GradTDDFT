@@ -205,6 +205,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--reference-jk-backend", choices=("full", "df"), default="full")
     p.add_argument("--learning-rate", type=float, default=3e-4)
     p.add_argument("--hidden-dims", type=int, nargs="+", default=(64, 64))
+    p.add_argument("--scf-hfx-grid-block-size", type=int, default=1024)
+    p.add_argument("--s1-weight", type=float, default=1.0)
+    p.add_argument("--energy-mse-weight", type=float, default=0.0)
+    p.add_argument("--energy-mae-weight", type=float, default=0.0)
+    p.add_argument("--density-constraint-weight", type=float, default=0.0)
     p.add_argument("--training-mode", choices=("fixed_density", "self_consistent"), default="self_consistent")
     p.add_argument("--scf-gradient-mode", choices=("unrolled", "implicit_commutator"), default="implicit_commutator")
     p.add_argument("--gpu-id", default=None)
@@ -237,12 +242,22 @@ def _make_train_args(args: argparse.Namespace) -> argparse.Namespace:
         str(args.reference_jk_backend),
         "--learning-rate",
         str(args.learning_rate),
+        "--s1-weight",
+        str(args.s1_weight),
+        "--energy-mse-weight",
+        str(args.energy_mse_weight),
+        "--energy-mae-weight",
+        str(args.energy_mae_weight),
+        "--density-constraint-weight",
+        str(args.density_constraint_weight),
         "--training-mode",
         str(args.training_mode),
         "--scf-gradient-mode",
         str(args.scf_gradient_mode),
         "--hidden-dims",
         *[str(dim) for dim in args.hidden_dims],
+        "--scf-hfx-grid-block-size",
+        str(args.scf_hfx_grid_block_size),
         "--include-hfx-channel" if bool(args.include_hfx_channel) else "--no-include-hfx-channel",
         "--response-hf-mode",
         str(args.response_hf_mode),
