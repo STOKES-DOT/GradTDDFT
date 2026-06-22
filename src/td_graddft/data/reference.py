@@ -6,6 +6,7 @@ import numpy as np
 import jax.numpy as jnp
 
 from td_graddft.df import true_df_factors_from_libcint_mol
+from td_graddft.data.ris_auxbasis import minimal_ris_auxbasis_for_mol
 from td_graddft.scf.features import (
     _charge_center,
 )
@@ -16,6 +17,7 @@ from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule, Unrestr
 ArrayBackend = Literal["jax", "host"]
 HFXNuStorage = Literal["auto", "dense", "chunked"]
 ReferenceJKBackend = Literal["full", "df"]
+ResponseDFMode = Literal["none", "df", "ris"]
 
 
 def _backend_array(value: Any, *, array_backend: ArrayBackend) -> Any:
@@ -58,6 +60,54 @@ def _use_chunked_hfx_nu(mol: Any, storage: HFXNuStorage) -> bool:
     raise ValueError(f"Unsupported hfx_nu_storage={storage!r}.")
 
 
+def _build_response_df_factors(
+    mol: Any,
+    *,
+    response_df_mode: ResponseDFMode,
+    response_ris_theta: float,
+    response_ris_j_fit: str,
+    response_ris_k_fit: str,
+    existing_df_factors: np.ndarray | None = None,
+) -> tuple[np.ndarray | None, np.ndarray | None, dict[str, Any] | None]:
+    mode = str(response_df_mode).lower()
+    if mode == "none":
+        return None, None, None
+    if mode == "df":
+        factors = (
+            np.asarray(existing_df_factors)
+            if existing_df_factors is not None
+            else np.asarray(true_df_factors_from_libcint_mol(mol))
+        )
+        return factors, factors, {"response_df_mode": "df"}
+    if mode == "ris":
+        auxbasis_j = minimal_ris_auxbasis_for_mol(
+            mol,
+            theta=float(response_ris_theta),
+            fitting_basis=str(response_ris_j_fit),
+        )
+        factors_j = np.asarray(true_df_factors_from_libcint_mol(mol, auxbasis=auxbasis_j))
+        if str(response_ris_k_fit).lower() == str(response_ris_j_fit).lower():
+            factors_k = factors_j
+        else:
+            auxbasis_k = minimal_ris_auxbasis_for_mol(
+                mol,
+                theta=float(response_ris_theta),
+                fitting_basis=str(response_ris_k_fit),
+            )
+            factors_k = np.asarray(true_df_factors_from_libcint_mol(mol, auxbasis=auxbasis_k))
+        return (
+            factors_j,
+            factors_k,
+            {
+                "response_df_mode": "ris",
+                "ris_theta": float(response_ris_theta),
+                "ris_j_fit": str(response_ris_j_fit).lower(),
+                "ris_k_fit": str(response_ris_k_fit).lower(),
+            },
+        )
+    raise ValueError("response_df_mode must be one of {'none', 'df', 'ris'}.")
+
+
 def restricted_reference_from_pyscf(
     mf: Any,
     *,
@@ -69,6 +119,10 @@ def restricted_reference_from_pyscf(
     array_backend: ArrayBackend = "jax",
     hfx_nu_storage: HFXNuStorage = "auto",
     jk_backend: ReferenceJKBackend = "full",
+    response_df_mode: ResponseDFMode = "none",
+    response_ris_theta: float = 0.2,
+    response_ris_j_fit: Literal["s", "sp", "spd"] = "sp",
+    response_ris_k_fit: Literal["s", "sp", "spd"] = "s",
 ) -> RestrictedMolecule:
     """Convert a restricted PySCF SCF/DFT object to a TD-GradDFT-ready reference."""
 
@@ -105,6 +159,16 @@ def restricted_reference_from_pyscf(
         integral_dtype = eri_pair_matrix_np.dtype
     else:
         raise ValueError("jk_backend must be one of {'full', 'df'}.")
+    response_df_factors_j_np, response_df_factors_k_np, response_df_metadata = (
+        _build_response_df_factors(
+            mf.mol,
+            response_df_mode=response_df_mode,
+            response_ris_theta=response_ris_theta,
+            response_ris_j_fit=response_ris_j_fit,
+            response_ris_k_fit=response_ris_k_fit,
+            existing_df_factors=df_factors_np,
+        )
+    )
     with mf.mol.with_common_orig(_charge_center(mf.mol)):
         dipole_integrals_np = np.asarray(mf.mol.intor_symmetric("int1e_r", comp=3))
 
@@ -182,6 +246,16 @@ def restricted_reference_from_pyscf(
         if df_factors_np is None
         else _backend_array(df_factors_np, array_backend=array_backend)
     )
+    response_df_factors_j = (
+        None
+        if response_df_factors_j_np is None
+        else _backend_array(response_df_factors_j_np, array_backend=array_backend)
+    )
+    response_df_factors_k = (
+        None
+        if response_df_factors_k_np is None
+        else _backend_array(response_df_factors_k_np, array_backend=array_backend)
+    )
 
     return RestrictedMolecule(
         ao=ao,
@@ -227,6 +301,9 @@ def restricted_reference_from_pyscf(
         hfx_nu_api=hfx_nu_api,
         pt2_local=pt2_local,
         df_factors=df_factors,
+        response_df_factors_j=response_df_factors_j,
+        response_df_factors_k=response_df_factors_k,
+        response_df_metadata=response_df_metadata,
         eri_pair_matrix=eri_pair_matrix,
         eri_ovov=None,
         eri_ovvo=None,

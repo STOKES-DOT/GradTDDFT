@@ -20,6 +20,10 @@ from ..scf import (
 from ..data.integrals import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix
 from ..scf.rks import _vxc_matrix_from_grid_potential
 from ..spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
+from ..tddft.response_options import (
+    ResponseKernelOptions,
+    normalize_response_kernel_options,
+)
 from .config import (
     ExcitedStateDatum,
     ExcitedStateTrainingConfig,
@@ -28,6 +32,20 @@ from .config import (
 )
 
 _S1_SOLVER_NSTATES = 3
+
+
+def _response_kernel_options_from_excited_config(
+    config: ExcitedStateTrainingConfig,
+) -> ResponseKernelOptions:
+    return normalize_response_kernel_options(
+        {
+            "two_electron_mode": config.response_two_electron_mode,
+            "ris_theta": config.response_ris_theta,
+            "ris_j_fit": config.response_ris_j_fit,
+            "ris_k_fit": config.response_ris_k_fit,
+            "ris_aux_chunk_size": config.response_ris_aux_chunk_size,
+        }
+    )
 
 
 def _as_dataset(data: GroundStateDatum | Sequence[GroundStateDatum]) -> list[GroundStateDatum]:
@@ -901,12 +919,12 @@ def _freeze_functional_for_fractional_path(
             preserve_network=False,
         )
         return functional, fixed_params
-    binder = getattr(functional, "bind_to_molecule", None)
-    if callable(binder):
-        return _FrozenFunctionalAdapter(binder(params, molecule)), params
     scf_binder = getattr(functional, "bind_to_molecule_for_scf", None)
     if callable(scf_binder):
         return _FrozenFunctionalAdapter(scf_binder(params, molecule)), params
+    binder = getattr(functional, "bind_to_molecule", None)
+    if callable(binder):
+        return _FrozenFunctionalAdapter(binder(params, molecule)), params
     return functional, params
 
 
@@ -2650,6 +2668,7 @@ def ground_state_mse_loss(
     cfg = GroundStateTrainingConfig() if training_config is None else training_config
     core_cfg = cfg.ground_state_core_config()
     excited_cfg = cfg.excited_state_training_config()
+    response_kernel_options = _response_kernel_options_from_excited_config(excited_cfg)
     if _can_use_batched_self_consistent_ground_state_path(dataset, cfg, predictor):
         return _ground_state_mse_loss_batched_self_consistent(
             params,
@@ -2670,7 +2689,7 @@ def ground_state_mse_loss(
             core_cfg,
             excited_datum,
         )
-        excited_state_cache: dict[tuple[int, bool], dict[str, Any]] = {}
+        excited_state_cache: dict[tuple[int, bool, ResponseKernelOptions], dict[str, Any]] = {}
         scf_info_for_datum = None
 
         def _get_excited_state_observables(
@@ -2679,7 +2698,7 @@ def ground_state_mse_loss(
             *,
             need_strengths: bool = False,
         ) -> tuple[Array, Array]:
-            key = (int(requested_nstates), bool(use_tda))
+            key = (int(requested_nstates), bool(use_tda), response_kernel_options)
             cached_entry = excited_state_cache.get(key)
             if cached_entry is None:
                 result = _solve_excited_states(
@@ -2688,6 +2707,7 @@ def ground_state_mse_loss(
                     eval_molecule,
                     nstates=requested_nstates,
                     use_tda=use_tda,
+                    response_kernel_options=response_kernel_options,
                 )
                 cached_entry = {
                     "result": result,
@@ -3059,6 +3079,7 @@ def _build_excited_state_solver(
     molecule: Any,
     *,
     use_tda: bool,
+    response_kernel_options: ResponseKernelOptions | dict[str, Any] | None = None,
 ) -> Any:
     solver_cls = tdscf.TDA if bool(use_tda) else tdscf.TDDFT
     eigensolver = "davidson" if _tree_contains_jax_tracer(params) else "auto"
@@ -3067,6 +3088,7 @@ def _build_excited_state_solver(
         xc_functional=functional,
         xc_params=params,
         eigensolver=eigensolver,
+        response_kernel_options=response_kernel_options,
     )
 
 
@@ -3077,12 +3099,14 @@ def _solve_excited_states(
     *,
     nstates: int,
     use_tda: bool,
+    response_kernel_options: ResponseKernelOptions | dict[str, Any] | None = None,
 ) -> Any:
     solver = _build_excited_state_solver(
         params,
         functional,
         molecule,
         use_tda=use_tda,
+        response_kernel_options=response_kernel_options,
     )
     return solver.kernel(nstates=nstates)
 
@@ -3094,6 +3118,7 @@ def predict_excitation_energies(
     *,
     nstates: int = 1,
     use_tda: bool = False,
+    response_kernel_options: ResponseKernelOptions | dict[str, Any] | None = None,
 ) -> Array:
     """Use the trained ground-state XC functional for excited-state TDDFT."""
 
@@ -3103,6 +3128,7 @@ def predict_excitation_energies(
         molecule,
         nstates=nstates,
         use_tda=use_tda,
+        response_kernel_options=response_kernel_options,
     )
     return result.excitation_energies
 
@@ -3115,6 +3141,7 @@ def predict_oscillator_strengths(
     nstates: int = 1,
     use_tda: bool = True,
     occupation_tolerance: float = 1e-8,
+    response_kernel_options: ResponseKernelOptions | dict[str, Any] | None = None,
 ) -> Array:
     """Predict oscillator strengths for the lowest excited states."""
 
@@ -3124,6 +3151,7 @@ def predict_oscillator_strengths(
         molecule,
         nstates=nstates,
         use_tda=use_tda,
+        response_kernel_options=response_kernel_options,
     )
     return oscillator_strengths(
         molecule,
@@ -3142,6 +3170,7 @@ def predict_excitation_spectrum(
     use_tda: bool = True,
     eta_ev: float = 0.15,
     occupation_tolerance: float = 1e-8,
+    response_kernel_options: ResponseKernelOptions | dict[str, Any] | None = None,
 ) -> Array:
     """Predict a broadened absorption spectrum on a fixed energy grid."""
 
@@ -3151,6 +3180,7 @@ def predict_excitation_spectrum(
         molecule,
         nstates=nstates,
         use_tda=use_tda,
+        response_kernel_options=response_kernel_options,
     )
     energies_ev = jnp.asarray(result.excitation_energies) * HARTREE_TO_EV
     strengths = oscillator_strengths(

@@ -157,6 +157,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--reference-scf-conv-tol", type=float, default=1e-10)
     p.add_argument("--reference-jk-backend", choices=("full", "df"), default="full")
     p.add_argument(
+        "--response-df-mode",
+        choices=("none", "df", "ris"),
+        default="none",
+        help="Optional response-factor cache content generated with each reference molecule.",
+    )
+    p.add_argument(
+        "--response-two-electron-mode",
+        choices=("auto", "direct", "df", "ris"),
+        default="auto",
+        help="Two-electron backend used by the TDDFT/TDA response kernel during training.",
+    )
+    p.add_argument("--response-ris-theta", type=float, default=0.2)
+    p.add_argument("--response-ris-j-fit", choices=("s", "sp", "spd"), default="sp")
+    p.add_argument("--response-ris-k-fit", choices=("s", "sp", "spd"), default="s")
+    p.add_argument("--response-ris-aux-chunk-size", type=int, default=256)
+    p.add_argument(
         "--reference-cache",
         default="outputs/reference_cache/closed_shell_s1_references.h5",
         help=(
@@ -464,6 +480,10 @@ def _reference_cache_key(
         "xc": str(args.xc),
         "grids_level": int(args.grids_level),
         "reference_jk_backend": str(args.reference_jk_backend),
+        "response_df_mode": str(args.response_df_mode),
+        "response_ris_theta": float(args.response_ris_theta),
+        "response_ris_j_fit": str(args.response_ris_j_fit),
+        "response_ris_k_fit": str(args.response_ris_k_fit),
         "input_feature_mode": str(input_feature_mode),
         "include_hfx_channel": bool(args.include_hfx_channel),
         "include_pt2_channel": bool(args.include_pt2_channel),
@@ -746,6 +766,10 @@ def _prepare_references(
             compute_local_pt2_features=bool(args.include_pt2_channel),
             array_backend="host" if host_reference_cache else "jax",
             jk_backend=str(args.reference_jk_backend),
+            response_df_mode=str(args.response_df_mode),
+            response_ris_theta=float(args.response_ris_theta),
+            response_ris_j_fit=str(args.response_ris_j_fit),
+            response_ris_k_fit=str(args.response_ris_k_fit),
         )
         if host_reference_cache:
             reference = _host_cache_pytree(reference)
@@ -1280,6 +1304,11 @@ def _train(
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
         scf_implicit_diff_restart=int(args.scf_implicit_diff_restart),
+        response_two_electron_mode=str(args.response_two_electron_mode),
+        response_ris_theta=float(args.response_ris_theta),
+        response_ris_j_fit=str(args.response_ris_j_fit),
+        response_ris_k_fit=str(args.response_ris_k_fit),
+        response_ris_aux_chunk_size=int(args.response_ris_aux_chunk_size),
     )
     if int(args.lr_decay_every) > 0:
         transition_steps = _lr_transition_steps(args, train_size=len(train_dataset))
@@ -1636,6 +1665,9 @@ def main() -> None:
         f"response_hf_mode={args.response_hf_mode}, "
         f"include_pt2_channel={bool(args.include_pt2_channel)}, "
         f"pt2_channel_mode={args.pt2_channel_mode if bool(args.include_pt2_channel) else 'none'}, "
+        f"response_df_mode={args.response_df_mode}, "
+        f"response_two_electron_mode={args.response_two_electron_mode}, "
+        f"response_ris=theta:{float(args.response_ris_theta):.6g}/J:{args.response_ris_j_fit}/K:{args.response_ris_k_fit}, "
         f"stream_train={bool(args.stream_train)}, stream_update_mode={args.stream_update_mode}, "
         f"train={len(train_rows)}, validation={len(val_rows)}, test={len(test_rows)}"
     )

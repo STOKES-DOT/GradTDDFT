@@ -49,6 +49,8 @@ def solve_tda_from_operator(
     davidson_tol: float = PYSCF_TD_DAVIDSON_TOL,
     davidson_max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
     davidson_max_subspace: int | None = None,
+    davidson_initial_guess_count: int | None = None,
+    davidson_max_trial_vectors: int | None = None,
 ) -> TDAResult:
     nocc, nvir = delta_eps.shape
     dim = int(nocc * nvir)
@@ -62,6 +64,8 @@ def solve_tda_from_operator(
         tol=davidson_tol,
         max_iter=davidson_max_iter,
         max_subspace=davidson_max_subspace,
+        initial_guess_count=davidson_initial_guess_count,
+        max_trial_vectors=davidson_max_trial_vectors,
         positive_eig_threshold=excitation_threshold,
     )
     if not _is_traced_convergence_flag(converged) and not bool(converged):

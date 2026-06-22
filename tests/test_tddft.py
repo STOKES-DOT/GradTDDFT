@@ -403,6 +403,119 @@ def test_df_hybrid_response_uses_factorized_mo_action(monkeypatch):
     assert jnp.allclose(df_b, full_b, atol=1e-10)
 
 
+def test_explicit_ris_tda_uses_response_jk_factors_and_rejects_full_tddft():
+    nmo = 4
+    naux_j = 2
+    naux_k = 3
+    raw_j = jnp.arange(naux_j * nmo * nmo, dtype=jnp.float64).reshape(naux_j, nmo, nmo) / 41.0
+    raw_k = jnp.arange(naux_k * nmo * nmo, dtype=jnp.float64).reshape(naux_k, nmo, nmo) / 53.0
+    j_factors = 0.5 * (raw_j + jnp.swapaxes(raw_j, -1, -2))
+    k_factors = 0.5 * (raw_k + jnp.swapaxes(raw_k, -1, -2))
+    mo_coeff = jnp.stack([jnp.eye(nmo), jnp.eye(nmo)], axis=0)
+    mo_occ_single = jnp.array([1.0, 1.0, 0.0, 0.0])
+    mo_energy_single = jnp.array([-0.8, -0.2, 0.5, 1.1])
+    molecule = _ToyMolecule(
+        ao=jnp.eye(nmo),
+        ao_deriv1=jnp.stack(
+            [jnp.eye(nmo), jnp.zeros((nmo, nmo)), jnp.zeros((nmo, nmo)), jnp.zeros((nmo, nmo))]
+        ),
+        grid=_Grid(weights=jnp.ones((nmo,))),
+        rep_tensor=jnp.zeros((0, 0, 0, 0)),
+        mo_coeff=mo_coeff,
+        mo_occ=jnp.stack([mo_occ_single, mo_occ_single], axis=0),
+        mo_energy=jnp.stack([mo_energy_single, mo_energy_single], axis=0),
+        rdm1=jnp.stack([jnp.diag(mo_occ_single), jnp.diag(mo_occ_single)], axis=0),
+    )
+    molecule.nocc = 2
+    molecule.response_df_factors_j = j_factors
+    molecule.response_df_factors_k = k_factors
+    xc = _ToyAdiabaticFunctional(
+        name="hybrid_only",
+        energy_density_fn=lambda rho: jnp.zeros_like(rho),
+        exact_exchange_fraction=0.25,
+    )
+
+    orbo = mo_coeff[0][:, :2]
+    orbv = mo_coeff[0][:, 2:]
+    j_ov = jnp.einsum("Qpq,pi,qa->Qia", j_factors, orbo, orbv)
+    k_oo = jnp.einsum("Qpq,pi,qj->Qij", k_factors, orbo, orbo)
+    k_vv = jnp.einsum("Qpq,pa,qb->Qab", k_factors, orbv, orbv)
+    eri_ovov_j = jnp.einsum("Qia,Qjb->iajb", j_ov, j_ov)
+    eri_oovv_k = jnp.einsum("Qij,Qab->ijab", k_oo, k_vv)
+    delta_eps = mo_energy_single[2:][None, :] - mo_energy_single[:2, None]
+    expected_a = jnp.diag(delta_eps.reshape(-1)) + (
+        2.0 * eri_ovov_j - 0.25 * jnp.transpose(eri_oovv_k, (0, 2, 1, 3))
+    ).reshape(4, 4)
+
+    tda_vind, _, _ = build_restricted_tda_operator(
+        molecule,
+        xc,
+        response_kernel_options={"two_electron_mode": "ris"},
+    )
+    with pytest.raises(NotImplementedError, match="RIS.*full Casida"):
+        response_module.build_restricted_tdhf_operator(
+            molecule,
+            xc,
+            response_kernel_options={"two_electron_mode": "ris"},
+        )
+
+    assert jnp.allclose(_operator_matrix(tda_vind, 4), expected_a, atol=1e-10)
+
+
+def test_explicit_ris_backend_requires_response_factors_without_fallback():
+    molecule = _make_toy_molecule(_symmetric_rep_tensor(2))
+    molecule.nocc = 1
+    xc = _ToyAdiabaticFunctional(
+        name="lda",
+        energy_density_fn=lambda rho: jnp.zeros_like(rho),
+    )
+
+    with pytest.raises(ValueError, match="response_df_mode=.*ris"):
+        build_restricted_tda_operator(
+            molecule,
+            xc,
+            response_kernel_options={"two_electron_mode": "ris"},
+        )
+
+
+def test_explicit_df_backend_can_use_response_specific_df_factors():
+    nmo = 4
+    naux = 3
+    raw = jnp.arange(naux * nmo * nmo, dtype=jnp.float64).reshape(naux, nmo, nmo) / 37.0
+    factors = 0.5 * (raw + jnp.swapaxes(raw, -1, -2))
+    mo_coeff = jnp.stack([jnp.eye(nmo), jnp.eye(nmo)], axis=0)
+    mo_occ_single = jnp.array([1.0, 1.0, 0.0, 0.0])
+    mo_energy_single = jnp.array([-0.8, -0.2, 0.5, 1.1])
+    molecule = _ToyMolecule(
+        ao=jnp.eye(nmo),
+        ao_deriv1=jnp.stack(
+            [jnp.eye(nmo), jnp.zeros((nmo, nmo)), jnp.zeros((nmo, nmo)), jnp.zeros((nmo, nmo))]
+        ),
+        grid=_Grid(weights=jnp.ones((nmo,))),
+        rep_tensor=jnp.zeros((0, 0, 0, 0)),
+        mo_coeff=mo_coeff,
+        mo_occ=jnp.stack([mo_occ_single, mo_occ_single], axis=0),
+        mo_energy=jnp.stack([mo_energy_single, mo_energy_single], axis=0),
+        rdm1=jnp.stack([jnp.diag(mo_occ_single), jnp.diag(mo_occ_single)], axis=0),
+    )
+    molecule.nocc = 2
+    molecule.response_df_factors_j = factors
+    molecule.response_df_factors_k = factors
+    xc = _ToyAdiabaticFunctional(
+        name="hybrid_only",
+        energy_density_fn=lambda rho: jnp.zeros_like(rho),
+        exact_exchange_fraction=0.25,
+    )
+
+    tda_vind, _, _ = build_restricted_tda_operator(
+        molecule,
+        xc,
+        response_kernel_options={"two_electron_mode": "df"},
+    )
+
+    assert jnp.all(jnp.isfinite(_operator_matrix(tda_vind, 4)))
+
+
 def test_restricted_operator_ignores_stale_response_eri_cache():
     nmo = 4
     rep_tensor = jnp.arange(nmo**4, dtype=jnp.float64).reshape(nmo, nmo, nmo, nmo) / 100.0

@@ -24,6 +24,7 @@ class QuadratureGrid:
         "runtime_scf_backend",
         "runtime_scf_options",
         "hfx_nu_api",
+        "response_df_metadata",
     )
 )
 @dataclass(frozen=True)
@@ -57,6 +58,9 @@ class RestrictedMolecule:
     neural_xc_grid_payload: Any | None = None
     scf_initial_density: jnp.ndarray | None = None
     df_factors: jnp.ndarray | None = None
+    response_df_factors_j: jnp.ndarray | None = None
+    response_df_factors_k: jnp.ndarray | None = None
+    response_df_metadata: Any | None = None
     eri_pair_matrix: jnp.ndarray | None = None
     eri_ovov: jnp.ndarray | None = None
     eri_ovvo: jnp.ndarray | None = None

@@ -65,7 +65,18 @@ def _replace_molecule(molecule: Any, **updates: Any) -> Any:
         updates = dict(updates)
         updates["neural_xc_grid_payload"] = None
     if is_dataclass(molecule):
-        return replace(molecule, **updates)
+        molecule_fields = {field.name for field in fields(molecule)}
+        replace_updates = {
+            key: value for key, value in updates.items() if key in molecule_fields
+        }
+        molecule_out = replace(molecule, **replace_updates)
+        for key, value in updates.items():
+            if key not in molecule_fields:
+                setattr(molecule_out, key, value)
+        for key in ("hfx_nu_api",):
+            if key not in updates and hasattr(molecule, key) and not hasattr(molecule_out, key):
+                setattr(molecule_out, key, getattr(molecule, key))
+        return molecule_out
     molecule_out = copy.copy(molecule)
     for key, value in updates.items():
         setattr(molecule_out, key, value)

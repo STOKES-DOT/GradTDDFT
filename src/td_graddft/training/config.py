@@ -335,6 +335,11 @@ class ExcitedStateTrainingConfig:
     spectrum_constraint_eta_ev: float = 0.15
     spectrum_mse_weight: float = 0.0
     spectrum_mae_weight: float = 1.0
+    response_two_electron_mode: Literal["auto", "direct", "df", "ris"] = "auto"
+    response_ris_theta: float = 0.2
+    response_ris_j_fit: Literal["s", "sp", "spd"] = "sp"
+    response_ris_k_fit: Literal["s", "sp", "spd"] = "s"
+    response_ris_aux_chunk_size: int = 256
 
 
 @dataclass(frozen=True)
@@ -367,6 +372,11 @@ class GroundStateTrainingConfig:
     spectrum_constraint_eta_ev: float = 0.15
     spectrum_mse_weight: float = 0.0
     spectrum_mae_weight: float = 1.0
+    response_two_electron_mode: Literal["auto", "direct", "df", "ris"] = "auto"
+    response_ris_theta: float = 0.2
+    response_ris_j_fit: Literal["s", "sp", "spd"] = "sp"
+    response_ris_k_fit: Literal["s", "sp", "spd"] = "s"
+    response_ris_aux_chunk_size: int = 256
     occupation_tolerance: float = 1e-8
     dm21_scf_gap_floor: float = 1e-3
     scf_max_cycle: int = 12
@@ -429,6 +439,11 @@ class GroundStateTrainingConfig:
             spectrum_constraint_eta_ev=extension.spectrum_constraint_eta_ev,
             spectrum_mse_weight=extension.spectrum_mse_weight,
             spectrum_mae_weight=extension.spectrum_mae_weight,
+            response_two_electron_mode=extension.response_two_electron_mode,
+            response_ris_theta=extension.response_ris_theta,
+            response_ris_j_fit=extension.response_ris_j_fit,
+            response_ris_k_fit=extension.response_ris_k_fit,
+            response_ris_aux_chunk_size=extension.response_ris_aux_chunk_size,
             occupation_tolerance=core.occupation_tolerance,
             dm21_scf_gap_floor=core.dm21_scf_gap_floor,
             scf_max_cycle=core.scf_max_cycle,
@@ -511,4 +526,9 @@ class GroundStateTrainingConfig:
             spectrum_constraint_eta_ev=self.spectrum_constraint_eta_ev,
             spectrum_mse_weight=self.spectrum_mse_weight,
             spectrum_mae_weight=self.spectrum_mae_weight,
+            response_two_electron_mode=self.response_two_electron_mode,
+            response_ris_theta=self.response_ris_theta,
+            response_ris_j_fit=self.response_ris_j_fit,
+            response_ris_k_fit=self.response_ris_k_fit,
+            response_ris_aux_chunk_size=self.response_ris_aux_chunk_size,
         )

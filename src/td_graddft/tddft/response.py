@@ -19,6 +19,11 @@ from ._utils import (
     _resolve_xc_functional,
     _restricted_orbital_data,
 )
+from .lowrank_response import build_restricted_lowrank_mo_response_action
+from .response_options import (
+    ResponseKernelOptions,
+    normalize_response_kernel_options,
+)
 
 
 _RESPONSE_FEATURE_COUNTS = {
@@ -689,56 +694,15 @@ def _restricted_df_mo_response_action(
     include_exchange: bool,
     dtype: Any,
 ) -> Callable[..., Array]:
-    alpha = jnp.asarray(hybrid_fraction, dtype=dtype)
-    factors = jnp.asarray(df_factors, dtype=dtype)
-    orbo = jnp.asarray(orbo, dtype=dtype)
-    orbv = jnp.asarray(orbv, dtype=dtype)
-    b_ov = jnp.einsum("Qpq,pi,qa->Qia", factors, orbo, orbv, precision=Precision.HIGHEST)
-    b_vo = jnp.einsum("Qpq,pa,qi->Qai", factors, orbv, orbo, precision=Precision.HIGHEST)
-    if include_exchange:
-        b_oo = jnp.einsum("Qpq,pi,qj->Qij", factors, orbo, orbo, precision=Precision.HIGHEST)
-        b_vv = jnp.einsum("Qpq,pa,qb->Qab", factors, orbv, orbv, precision=Precision.HIGHEST)
-    else:
-        b_oo = None
-        b_vv = None
-    nocc = int(orbo.shape[1])
-    nvir = int(orbv.shape[1])
-
-    def action(values: Array, *, bottom_density: bool, bottom_projection: bool) -> Array:
-        original_shape = jnp.asarray(values).shape
-        x = jnp.asarray(values, dtype=dtype).reshape(-1, nocc, nvir)
-        density_factor = b_ov if bottom_density else b_vo
-        if bottom_density:
-            rho_aux = 2.0 * jnp.einsum("Qia,nia->nQ", density_factor, x, precision=Precision.HIGHEST)
-        else:
-            rho_aux = 2.0 * jnp.einsum("Qai,nia->nQ", density_factor, x, precision=Precision.HIGHEST)
-        if bottom_projection:
-            out = jnp.einsum("Qia,nQ->nia", b_ov, rho_aux, precision=Precision.HIGHEST)
-        else:
-            out = jnp.einsum("Qai,nQ->nia", b_vo, rho_aux, precision=Precision.HIGHEST)
-
-        if include_exchange:
-            if bottom_density == bottom_projection:
-                assert b_oo is not None and b_vv is not None
-                k_out = 2.0 * jnp.einsum(
-                    "Qij,Qab,njb->nia",
-                    b_oo,
-                    b_vv,
-                    x,
-                    precision=Precision.HIGHEST,
-                )
-            else:
-                k_out = 2.0 * jnp.einsum(
-                    "Qaj,Qib,njb->nia",
-                    b_vo,
-                    b_ov,
-                    x,
-                    precision=Precision.HIGHEST,
-                )
-            out = out - 0.5 * alpha * k_out
-        return out.reshape(original_shape)
-
-    return action
+    return build_restricted_lowrank_mo_response_action(
+        df_factors,
+        df_factors,
+        orbo,
+        orbv,
+        hybrid_fraction,
+        include_exchange=include_exchange,
+        dtype=dtype,
+    )
 
 
 def _restricted_ao_response_action(
@@ -747,10 +711,17 @@ def _restricted_ao_response_action(
     *,
     include_exchange: bool,
     dtype: Any,
+    two_electron_mode: str = "auto",
 ) -> Callable[[Array], Array]:
     alpha = jnp.asarray(hybrid_fraction, dtype=dtype)
     df_factors = getattr(molecule, "df_factors", None)
-    if df_factors is not None and int(jnp.asarray(df_factors).size) > 0:
+    mode = str(two_electron_mode).lower()
+    if mode == "df" and (df_factors is None or int(jnp.asarray(df_factors).size) == 0):
+        raise ValueError(
+            'response_two_electron_mode="df" requires molecule.df_factors. '
+            'Build the reference with response_df_mode="df" or jk_backend="df".'
+        )
+    if mode in {"auto", "df"} and df_factors is not None and int(jnp.asarray(df_factors).size) > 0:
         source = jnp.asarray(df_factors, dtype=dtype)
         jk_fn = lambda density: _jk_from_df_factors(source, density)
         j_fn = lambda density: _j_from_df_factors(source, density)
@@ -764,8 +735,9 @@ def _restricted_ao_response_action(
             rep_tensor = getattr(molecule, "rep_tensor", None)
             if rep_tensor is None or int(jnp.asarray(rep_tensor).size) == 0:
                 raise ValueError(
-                    "The molecule must provide rep_tensor, df_factors, or eri_pair_matrix "
-                    "for the AO response action."
+                    "The molecule must provide rep_tensor or eri_pair_matrix for the AO "
+                    "response action. response_two_electron_mode=\"df\" requires "
+                    "df_factors."
                 )
             source = jnp.asarray(rep_tensor, dtype=dtype)
             jk_fn = lambda density: _jk_from_full_eri(source, density)
@@ -782,6 +754,96 @@ def _restricted_ao_response_action(
     return action
 
 
+def _unused_ao_response_action(_density: Array) -> Array:
+    raise RuntimeError("AO response action is unavailable for the selected low-rank backend.")
+
+
+def _require_nonempty_factor(value: Any, *, name: str, mode_hint: str) -> Array:
+    if value is None or int(jnp.asarray(value).size) == 0:
+        raise ValueError(f"{name} is required. Build the reference with {mode_hint}.")
+    return value
+
+
+def _restricted_lowrank_response_action_for_options(
+    molecule: Any,
+    orbo: Array,
+    orbv: Array,
+    hybrid_fraction: Any,
+    *,
+    response_kernel_options: ResponseKernelOptions,
+    include_exchange: bool,
+    need_b_terms: bool,
+    dtype: Any,
+) -> Callable[..., Array] | None:
+    mode = response_kernel_options.two_electron_mode
+    if mode == "direct":
+        return None
+
+    df_factors = getattr(molecule, "df_factors", None)
+    if mode == "auto":
+        if df_factors is None or int(jnp.asarray(df_factors).size) == 0:
+            return None
+        return _restricted_df_mo_response_action(
+            df_factors,
+            orbo,
+            orbv,
+            hybrid_fraction,
+            include_exchange=include_exchange,
+            dtype=dtype,
+        )
+
+    if mode == "df":
+        response_j = getattr(molecule, "response_df_factors_j", None)
+        response_k = getattr(molecule, "response_df_factors_k", None)
+        if response_j is None or int(jnp.asarray(response_j).size) == 0:
+            response_j = _require_nonempty_factor(
+                df_factors,
+                name="molecule.df_factors or molecule.response_df_factors_j",
+                mode_hint='response_df_mode="df" or jk_backend="df"',
+            )
+        if response_k is None or int(jnp.asarray(response_k).size) == 0:
+            response_k = response_j
+        return build_restricted_lowrank_mo_response_action(
+            response_j,
+            response_k,
+            orbo,
+            orbv,
+            hybrid_fraction,
+            include_exchange=include_exchange,
+            dtype=dtype,
+        )
+
+    if mode == "ris":
+        if need_b_terms:
+            raise NotImplementedError(
+                "RIS response_two_electron_mode is currently implemented for restricted "
+                "TDA only; full Casida TDDFT still requires the RIS (ib|ja) B-term path."
+            )
+        j_factors = _require_nonempty_factor(
+            getattr(molecule, "response_df_factors_j", None),
+            name="molecule.response_df_factors_j",
+            mode_hint='response_df_mode="ris"',
+        )
+        k_factors = None
+        if include_exchange:
+            k_factors = _require_nonempty_factor(
+                getattr(molecule, "response_df_factors_k", None),
+                name="molecule.response_df_factors_k",
+                mode_hint='response_df_mode="ris"',
+            )
+        return build_restricted_lowrank_mo_response_action(
+            j_factors,
+            k_factors,
+            orbo,
+            orbv,
+            hybrid_fraction,
+            include_exchange=include_exchange,
+            dtype=dtype,
+        )
+
+    raise ValueError(f"Unsupported response two-electron mode {mode!r}.")
+
+
 def _build_restricted_response_operator_data(
     molecule: Any,
     xc_functional: Any | None = None,
@@ -789,7 +851,9 @@ def _build_restricted_response_operator_data(
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
     need_b_terms: bool = True,
+    response_kernel_options: ResponseKernelOptions | dict[str, Any] | None = None,
 ) -> _RestrictedResponseOperatorData:
+    response_options = normalize_response_kernel_options(response_kernel_options)
     resolved_xc = _resolve_xc_functional(molecule, xc_functional, xc_params)
     _raise_if_strict_local_hf_response(resolved_xc)
     weights = jnp.asarray(molecule.grid.weights)
@@ -897,23 +961,27 @@ def _build_restricted_response_operator_data(
                 nonlocal_xc_b_action_fn = pair_nonlocal_b_action
 
     response_dtype = jnp.result_type(delta_eps, weights)
-    ao_response_action_fn = _restricted_ao_response_action(
+    include_exchange = _needs_exchange_terms(hybrid_fraction)
+    ao_mo_response_action_fn = _restricted_lowrank_response_action_for_options(
         molecule,
+        orbo,
+        orbv,
         hybrid_fraction,
-        include_exchange=_needs_exchange_terms(hybrid_fraction),
+        response_kernel_options=response_options,
+        include_exchange=include_exchange,
+        need_b_terms=need_b_terms,
         dtype=response_dtype,
     )
-    df_factors = getattr(molecule, "df_factors", None)
-    ao_mo_response_action_fn = None
-    if df_factors is not None and int(jnp.asarray(df_factors).size) > 0:
-        ao_mo_response_action_fn = _restricted_df_mo_response_action(
-            df_factors,
-            orbo,
-            orbv,
+    if ao_mo_response_action_fn is None:
+        ao_response_action_fn = _restricted_ao_response_action(
+            molecule,
             hybrid_fraction,
-            include_exchange=_needs_exchange_terms(hybrid_fraction),
+            include_exchange=include_exchange,
             dtype=response_dtype,
+            two_electron_mode=response_options.two_electron_mode,
         )
+    else:
+        ao_response_action_fn = _unused_ao_response_action
 
     return _RestrictedResponseOperatorData(
         delta_eps=delta_eps,
@@ -1011,6 +1079,7 @@ def build_restricted_tda_operator(
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
+    response_kernel_options: ResponseKernelOptions | dict[str, Any] | None = None,
 ):
     data = _build_restricted_response_operator_data(
         molecule,
@@ -1018,6 +1087,7 @@ def build_restricted_tda_operator(
         xc_params=xc_params,
         occupation_tolerance=occupation_tolerance,
         need_b_terms=False,
+        response_kernel_options=response_kernel_options,
     )
     delta_eps = data.delta_eps
     nocc, nvir = delta_eps.shape
@@ -1038,12 +1108,14 @@ def build_restricted_tdhf_operator(
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
+    response_kernel_options: ResponseKernelOptions | dict[str, Any] | None = None,
 ):
     data = _build_restricted_response_operator_data(
         molecule,
         xc_functional,
         xc_params=xc_params,
         occupation_tolerance=occupation_tolerance,
+        response_kernel_options=response_kernel_options,
     )
     delta_eps = data.delta_eps
     nocc, nvir = delta_eps.shape
@@ -1068,12 +1140,14 @@ def gen_tda_vind(
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
+    response_kernel_options: ResponseKernelOptions | dict[str, Any] | None = None,
 ):
     vind, _, _ = build_restricted_tda_operator(
         molecule,
         xc_functional,
         xc_params=xc_params,
         occupation_tolerance=occupation_tolerance,
+        response_kernel_options=response_kernel_options,
     )
     return vind
 
@@ -1084,10 +1158,12 @@ def gen_tdhf_vind(
     *,
     xc_params: Any | None = None,
     occupation_tolerance: float = 1e-8,
+    response_kernel_options: ResponseKernelOptions | dict[str, Any] | None = None,
 ):
     return build_restricted_tdhf_operator(
         molecule,
         xc_functional,
         xc_params=xc_params,
         occupation_tolerance=occupation_tolerance,
+        response_kernel_options=response_kernel_options,
     )

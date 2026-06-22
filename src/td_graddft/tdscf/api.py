@@ -75,6 +75,8 @@ class _BaseTD:
     davidson_tol: float
     davidson_max_iter: int
     davidson_max_subspace: int | None
+    davidson_initial_guess_count: int | None
+    davidson_max_trial_vectors: int | None
 
     def __init__(
         self,
@@ -90,6 +92,9 @@ class _BaseTD:
         davidson_tol: float = PYSCF_TD_DAVIDSON_TOL,
         davidson_max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
         davidson_max_subspace: int | None = None,
+        davidson_initial_guess_count: int | None = None,
+        davidson_max_trial_vectors: int | None = None,
+        response_kernel_options: Any | None = None,
         **kwargs: Any,
     ) -> None:
         if mf_or_molecule is None and "mf_or_reference" in kwargs:
@@ -108,6 +113,9 @@ class _BaseTD:
         self.davidson_tol = davidson_tol
         self.davidson_max_iter = davidson_max_iter
         self.davidson_max_subspace = davidson_max_subspace
+        self.davidson_initial_guess_count = davidson_initial_guess_count
+        self.davidson_max_trial_vectors = davidson_max_trial_vectors
+        self.response_kernel_options = response_kernel_options
 
         self.result: Any | None = None
         self.e: Any | None = None
@@ -154,6 +162,9 @@ class _BaseTD:
                 "davidson_tol": self.davidson_tol,
                 "davidson_max_iter": self.davidson_max_iter,
                 "davidson_max_subspace": self.davidson_max_subspace,
+                "davidson_initial_guess_count": self.davidson_initial_guess_count,
+                "davidson_max_trial_vectors": self.davidson_max_trial_vectors,
+                "response_kernel_options": self.response_kernel_options,
             }
         )
         return kwargs

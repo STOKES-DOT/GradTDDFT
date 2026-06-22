@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import jax.numpy as jnp
@@ -29,6 +30,8 @@ _ARRAY_FIELDS = (
     "pt2_local",
     "scf_initial_density",
     "df_factors",
+    "response_df_factors_j",
+    "response_df_factors_k",
     "eri_pair_matrix",
     "eri_ovov",
     "eri_ovvo",
@@ -125,6 +128,8 @@ def write_restricted_molecule(group: Any, molecule: RestrictedMolecule) -> None:
         group.attrs["scf_converged"] = bool(molecule.scf_converged)
     if molecule.runtime_scf_backend is not None:
         group.attrs["runtime_scf_backend"] = str(molecule.runtime_scf_backend)
+    if molecule.response_df_metadata is not None:
+        group.attrs["response_df_metadata"] = json.dumps(molecule.response_df_metadata)
 
     grid_group = group.require_group("grid")
     _write_array(grid_group, "weights", molecule.grid.weights)
@@ -218,6 +223,11 @@ def read_restricted_molecule(
         runtime_scf_backend=(
             str(group.attrs["runtime_scf_backend"])
             if "runtime_scf_backend" in group.attrs
+            else None
+        ),
+        response_df_metadata=(
+            json.loads(str(group.attrs["response_df_metadata"]))
+            if "response_df_metadata" in group.attrs
             else None
         ),
         hfx_nu_api=hfx_nu_api,

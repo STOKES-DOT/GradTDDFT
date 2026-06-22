@@ -29,6 +29,7 @@ from .defaults import (
 from .inputs import (
     assemble_basis_channels,
     build_coefficient_inputs,
+    has_hfx_nu_source,
     resolve_canonical_hfx_feature_channels,
 )
 from .projection import NeuralXCProjectionMixin
@@ -194,7 +195,7 @@ class AssemblyMixin:
             hf_projected_b = hfx_b[:, 0] if hfx_b.ndim > features.rho.ndim else hfx_b
             hf_projected = hf_projected_a + hf_projected_b
         else:
-            hf_projected, hf_projected_a, hf_projected_b = self.projected_hf_grid_contribution_components(
+            hf_projected, hf_projected_a, hf_projected_b = self._hf_projected_components_for_inputs(
                 molecule,
                 features=features,
             )
@@ -209,6 +210,7 @@ class AssemblyMixin:
             and self.input_feature_mode == "canonical"
             and self.strict_feature_alignment
             and getattr(molecule, "hfx_local", None) is None
+            and not has_hfx_nu_source(molecule)
         ):
             hf_spin_inputs = None
         inputs = self.coefficient_inputs(
@@ -287,7 +289,7 @@ class AssemblyMixin:
             semilocal_channels,
         )
         if self._uses_hfx_channel():
-            hf_projected, _, _ = self.projected_hf_grid_contribution_components(
+            hf_projected, _, _ = self._hf_projected_components_for_inputs(
                 molecule,
                 features=features,
             )
@@ -328,7 +330,7 @@ class AssemblyMixin:
             hf_projected_a = hf_projected
             hf_projected_b = hf_projected
         elif hf_energy_density is None:
-            hf_projected, hf_projected_a, hf_projected_b = self.projected_hf_grid_contribution_components(
+            hf_projected, hf_projected_a, hf_projected_b = self._hf_projected_components_for_inputs(
                 molecule,
                 features=features,
             )
@@ -405,6 +407,17 @@ class AssemblyMixin:
             hfx_channels=self.hfx_channels,
             strict_feature_alignment=self.strict_feature_alignment,
         )
+
+    def _hf_projected_components_for_inputs(
+        self,
+        molecule: Any,
+        *,
+        features: RestrictedFeatureBundle,
+    ) -> tuple[Array, Array, Array]:
+        no_fxx = getattr(self, "_restricted_hfx_grid_contribution_components_no_fxx", None)
+        if callable(no_fxx):
+            return no_fxx(molecule, features=features)
+        return self.projected_hf_grid_contribution_components(molecule, features=features)
 
     def coefficient_inputs(
         self,
