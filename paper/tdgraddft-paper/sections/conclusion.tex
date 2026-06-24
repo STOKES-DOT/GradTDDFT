@@ -1,0 +1,15 @@
+\section{Conclusions}
+\label{sec:conclusions}
+
+We introduced GradTDDFT, a differentiable TDDFT framework for
+training neural XC functionals with excited-state observables. The
+framework combines PySCF molecular data with JAX
+implementations of SCF, functional evaluation, response-kernel
+construction, and TDA/Casida observables.
+
+GradTDDFT connects neural functional parameters to ground-state
+energies, excitation energies, and oscillator strengths in one
+computational graph. This
+provides a practical platform for testing neural functionals beyond
+ground-state fitting, including scalar hybrid exchange response and
+CIS(D)-type PT2 corrections in excited-state calculations.

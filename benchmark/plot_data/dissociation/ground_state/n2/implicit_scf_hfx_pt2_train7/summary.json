@@ -1,0 +1,18 @@
+{
+  "energy_mae_ev": 0.00954291044024817,
+  "energy_max_abs_err_ev": 0.05573714049857713,
+  "energy_rmse_ev": 0.015674343840694684,
+  "max_abs_err_r_angstrom": 2.1,
+  "n_points": 35,
+  "prediction_csv": "/home/yjiao/TD-GradDFT/outputs/n2_mrccca_ground_all35_eval_hfx_pt2_h128_def2tzvp_grid2_train7_split_20260618_162530/n2_ccsdt_ground_predictions.csv",
+  "prediction_curve_png": "/home/yjiao/TD-GradDFT/outputs/n2_mrccca_ground_all35_eval_hfx_pt2_h128_def2tzvp_grid2_train7_split_20260618_162530/n2_ccsdt_ground_curve_all35_train_points.png",
+  "train_r_values_angstrom": [
+    0.8,
+    1.1,
+    1.6,
+    2.0,
+    2.2,
+    2.5,
+    3.0
+  ]
+}

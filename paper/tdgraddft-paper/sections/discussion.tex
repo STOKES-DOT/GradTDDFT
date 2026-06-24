@@ -1,0 +1,74 @@
+\section{Discussion}
+\label{sec:discussion}
+
+GradTDDFT is designed to make the response kernel part of the
+trainable computational object rather than an after-the-fact
+diagnostic. This distinction is important for neural
+exchange-correlation functionals because excitation energies depend
+not only on the converged KS orbitals and eigenvalue gaps, but also
+on the derivative structure of the learned energy density. The
+energy-consistent local response construction therefore enforces
+consistency among the neural XC energy, the XC potential, and the
+local $f_{\rm xc}$ kernel.
+This consistency is a central requirement when the same functional is
+used in both SCF optimization and TDDFT response.
+
+The evaluation first separates numerical correctness from model
+capability. Matched PySCF calculations test whether the
+differentiable implementation reproduces conventional TDA and full
+TDDFT in the non-neural limit. After this check, the model-capability
+benchmarks separate sources of error that are often mixed in
+neural-functional studies. H$_2$, H$_2^+$, and N$_2$ ground-state
+dissociation curves test whether the learned functional remains
+stable inside an SCF loop across equilibrium and stretched
+geometries. H$_2$ and H$_2^+$ first excited-state dissociation curves
+then test whether the same functional gives compatible ground-state
+surfaces and response kernels. The 50-molecule QM9
+ground- and excited-state training set tests whether the
+differentiable SCF--TDDFT training graph transfers from controlled
+bond scans to chemically diverse small organic molecules under
+separate total-energy and vertical-excitation objectives. This
+separation is necessary because a low energy error, a stable SCF
+solution, and an accurate excitation spectrum are related but not
+equivalent requirements.
+
+This is also why the present training protocol keeps ground-state and
+excited-state supervision separate. A joint loss is mathematically
+straightforward in a differentiable SCF--TDDFT graph, but it is not a
+robust practical objective for the current neural functional. The
+ground-state loss primarily drives the self-consistent density,
+orbital energies, and total-energy surface, whereas the excited-state
+loss drives the response kernel, excitation energies, oscillator
+strengths, and state ordering. When both are optimized at the same
+time, their gradients can compete: updates that improve the
+ground-state surface may degrade the response kernel, and updates that
+fit a target excitation can destabilize the SCF fixed point or damage
+the ground-state energy landscape. In our training design, separating
+the objectives makes these failure modes observable rather than hiding
+them inside an unstable multi-target optimization.
+
+The nonlocal channels define a separate theoretical boundary. For
+semilocal channels, automatic differentiation of the local energy
+density gives a direct route to a consistent response kernel. For the
+HF channel, the current excited-state path uses the learned local
+exchange field to define a scalar hybrid fraction and then applies the
+ordinary exact-exchange response matrix. For the MP2/PT2 channel, the
+response problem remains a singles TDA/Casida problem and the learned
+correlation coefficient scales a root-specific CIS(D)-type doubles
+correction. This separation is useful for charge-transfer states,
+double-excitation character, and open-shell systems where the chosen
+excited-state correction can change the qualitative state ordering.
+
+Several extensions remain natural next steps. A future direct
+orbital-Hessian treatment of the MP2/PT2 channel would provide a more
+direct connection between dynamical correlation descriptors and
+excited-state response. A
+JAX-native integral path would reduce the separation between the fixed
+molecular data layer and the differentiable SCF layer, although
+efficient production use still requires optimized J/K construction
+and memory management. General unrestricted differentiable SCF would
+broaden the training targets to radicals, charged species, and
+spin-polarized response calculations. Larger basis sets
+and larger molecules will further test whether the response-kernel
+construction remains practical when the orbital and quadrature spaces
+grow.

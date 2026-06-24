@@ -1,0 +1,22 @@
+{
+  "basis": "def2-svp",
+  "dense_curve_csv": "/home/yjiao/TD-GradDFT/outputs/remote_h2plus_ground_hfx_fixed_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_133509/h2plus_ground_dense_curve.csv",
+  "dense_energy_mae_ev": 0.013203388295728489,
+  "density_constraint_weight": 0.0,
+  "elapsed_s": 54.61737544600328,
+  "figure_png": "/home/yjiao/TD-GradDFT/outputs/remote_h2plus_ground_hfx_fixed_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_133509/h2plus_ground_training_and_curve.png",
+  "final_energy_mae_ev": 0.005746622711900533,
+  "final_loss": 0.0002112929098508556,
+  "grid_level": 2,
+  "integral_backend": "gpu",
+  "learning_rate": 0.001,
+  "lr_decay_every": 200,
+  "lr_decay_factor": 0.5,
+  "min_loss": 0.00020928465256256918,
+  "min_loss_step": 1982,
+  "reference_points_csv": "/home/yjiao/TD-GradDFT/outputs/remote_h2plus_ground_hfx_fixed_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_133509/h2plus_reference_points.csv",
+  "steps": 2000,
+  "system": "H2+",
+  "training_history_csv": "/home/yjiao/TD-GradDFT/outputs/remote_h2plus_ground_hfx_fixed_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_133509/training_history.csv",
+  "visualization_manifest": "/home/yjiao/TD-GradDFT/outputs/remote_h2plus_ground_hfx_fixed_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_133509/visualization_manifest.json"
+}

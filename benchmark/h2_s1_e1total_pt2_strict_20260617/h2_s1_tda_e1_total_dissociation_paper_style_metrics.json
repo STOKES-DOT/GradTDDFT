@@ -1,0 +1,25 @@
+{
+  "system": "H2",
+  "state": "S1",
+  "spectroscopic_state": "B 1Sigma_u+",
+  "quantity": "S1 total energy E1(R)",
+  "solver": "tda",
+  "basis": "def2-svp",
+  "objective": "s1_only_tda",
+  "response_hf_mode": "approx",
+  "response_pt2_mode": "strict",
+  "pt2_channel_mode": "local_exact",
+  "dense_mae_ev_from_csv": 0.03594603407758683,
+  "summary_s1_total_mae_ev": 0.03594603407758683,
+  "dense_max_abs_error_ev_from_csv": 0.20798755695846075,
+  "dense_max_abs_error_r_angstrom": 0.7393939393939394,
+  "summary_s1_total_max_ev": 0.20798755695846075,
+  "delta_e_unit": "meV",
+  "chemical_accuracy_band_mev": 43.3641153087705,
+  "source_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_s1_e1total_pt2_strict_20260617/h2_s1_tda_dense_curve.csv",
+  "outputs": {
+    "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_s1_e1total_pt2_strict_20260617": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_s1_e1total_pt2_strict_20260617/h2_s1_tda_e1_total_dissociation_paper_style.pdf",
+    "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2_s1_tda_e1_total_dissociation_paper_style.pdf",
+    "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper_review/tdgraddft-paper/figures": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper_review/tdgraddft-paper/figures/h2_s1_tda_e1_total_dissociation_paper_style.pdf"
+  }
+}

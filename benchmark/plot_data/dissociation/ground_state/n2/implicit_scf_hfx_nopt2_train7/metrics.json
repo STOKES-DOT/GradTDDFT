@@ -1,0 +1,37 @@
+{
+  "system": "N2",
+  "state": "ground",
+  "spectroscopic_state": "X 1Sigma_g+",
+  "quantity": "ground-state total energy E0(R)",
+  "reference_label": "MR-ccCA reference from CSV",
+  "model_label": "Neural HFX/no-PT2",
+  "n_points": 35,
+  "train_r_values_angstrom": [
+    0.8,
+    1.1,
+    1.6,
+    2.0,
+    2.2,
+    2.5,
+    3.0
+  ],
+  "dense_mae_ev_from_csv": 0.24372646274298085,
+  "summary_energy_mae_ev": 0.24372646274298085,
+  "dense_rmse_ev_from_csv": 0.307789640329251,
+  "summary_energy_rmse_ev": 0.30778964032925094,
+  "dense_max_abs_error_ev_from_csv": 0.8439817367598325,
+  "dense_max_abs_error_r_angstrom": 3.0,
+  "summary_energy_max_abs_err_ev": 0.8439817367598325,
+  "summary_max_abs_err_r_angstrom": 3.0,
+  "delta_e_unit": "meV",
+  "chemical_accuracy_band_mev": 43.3641153087705,
+  "source_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_n2_nopt2_train7_all35_eval/n2_ccsdt_ground_predictions.csv",
+  "outputs": {
+    "png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_n2_nopt2_train7_all35_eval/n2_ground_hfx_nopt2_dissociation_paper_style.png",
+    "pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_n2_nopt2_train7_all35_eval/n2_ground_hfx_nopt2_dissociation_paper_style.pdf",
+    "svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_n2_nopt2_train7_all35_eval/n2_ground_hfx_nopt2_dissociation_paper_style.svg",
+    "paper_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/n2_ground_hfx_nopt2_dissociation_paper_style.png",
+    "paper_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/n2_ground_hfx_nopt2_dissociation_paper_style.pdf",
+    "paper_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/n2_ground_hfx_nopt2_dissociation_paper_style.svg"
+  }
+}

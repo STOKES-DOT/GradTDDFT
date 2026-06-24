@@ -1,0 +1,99 @@
+\section{Introduction}
+
+Time-dependent density functional theory (TDDFT) within the
+linear-response formalism of Casida\cite{Casida1995} is one of
+the standard approaches for computing molecular excitation
+energies and oscillator strengths. Its cost is often compatible
+with chemical screening studies, but its accuracy is controlled
+by the ground-state exchange-correlation (XC) functional and by
+the associated response kernel. Conventional semilocal and hybrid
+functionals therefore inherit known limitations for
+charge-transfer excitations, Rydberg states, static correlation,
+and double-excitation character. These failures are not merely
+post-processing errors: the same density functional determines
+the SCF density, orbital energy gaps, the XC potential, and the
+kernel entering the TDDFT response matrices.
+
+Neural network XC functionals offer a route to learn more flexible
+functional forms, including nonlocal XC structure, from accurate
+reference data.\cite{GLOBE,Schmidt2019NonlocalXCML}
+For excited states, however, fitting ground-state energies alone is
+not enough: a functional used in TDDFT must also produce stable
+self-consistent densities, useful frontier orbital gaps, and a
+response kernel consistent with the learned XC energy. A recent
+overview of differentiable DFT emphasizes that this changes the
+role of the KS equations: the functional is not only evaluated inside
+a self-consistent DFT calculation, but trained through the
+differentiable SCF map, with gradients from observables propagated
+back to the model parameters while the governing electronic-structure
+equations remain in the loop.\cite{vonStrachwitz2026DifferentiableDFT}
+For TDDFT, the corresponding differentiable program must extend
+beyond the ground-state SCF fixed point to include response-kernel
+construction, TDA/Casida eigenvalue problems, excitation energies,
+oscillator strengths, and spectrum-level objectives. Differentiable
+training is therefore important because it can place losses on the
+quantities actually used to judge excited-state predictions, rather
+than only on pre-response ground-state energies.
+This differentiable view also changes how the XC
+derivatives are implemented. In conventional DFT codes, the XC
+potential $v_{\rm xc}=\delta E_{\rm xc}/\delta\rho$ and the
+TDDFT kernel $f_{\rm xc}=\delta^2E_{\rm xc}/\delta\rho\,\delta\rho'$
+are usually derived analytically for each functional form and then
+encoded as separate routines. GradTDDFT instead treats the local XC
+energy density as the primary differentiable object and obtains these
+first- and second-order derivatives by automatic differentiation,
+so the SCF potential and the response kernel remain tied to the same
+energy expression.\cite{Ekstrom2010ADResponse}
+
+This idea is part of a broader movement toward differentiable
+scientific codes. At the level of methods and software, D4FT and
+DQC expose differentiable DFT workflows,\cite{D4FT,DQC} PySCFAD
+differentiates PySCF-style mean-field and post-mean-field
+calculations,\cite{PySCFAD} GradDFT focuses on machine-learning
+enhanced ground-state density functionals,\cite{GradDFT} and jax-xc
+translates conventional Libxc functional forms into JAX-compatible
+energy-density routines.\cite{JAXXC} Differentiable semiempirical
+models provide a complementary low-cost route: dxtb implements
+differentiable extended tight-binding, and related semiempirical
+formulations have reported ground- and excited-state
+gradients.\cite{DXTB,Athavale2026DifferentiableSemiempirical}
+At the level of molecular and materials applications, JAX-MD provides
+differentiable simulation primitives for molecular systems,\cite{JAXMD}
+JAX-based DFT workflows have been developed for crystalline systems
+and direct solid-state optimization,\cite{JRystal,JRystalDirectOptimization}
+plane-wave AD-DFPT has been applied to materials design, error
+control, and parameter learning,\cite{Schmitz2025ADDFPT} and
+orbital-free DFT has used automatic differentiation to obtain
+functional potentials and higher-order material properties directly
+from energy expressions.\cite{Tan2023OFDFTAD} These developments
+demonstrate that automatic differentiation can turn molecular
+simulation and electronic-structure calculations into trainable
+numerical programs.
+The missing piece for excited states is an end-to-end differentiable
+TDDFT formulation in which the neural XC energy, SCF potential,
+response kernel, and excited-state observables belong to the same
+differentiable computational graph.
+
+We present GradTDDFT to address this gap. The framework keeps PySCF
+as the source of molecular construction, basis information, grids, and
+integrals, while expressing the SCF, XC, TDDFT response, and training
+logic in JAX. GradTDDFT separates fixed molecular data from the
+differentiable KS-SCF and linear-response layers, giving a continuous
+map from neural XC parameters to self-consistent densities, orbital
+rotations, TDA/Casida matrices, excitation energies, oscillator
+strengths, and excited-state objectives. The response eigenproblem is
+solved by a Davidson iteration in the forward pass and differentiated
+using the implicit eigensolver strategy of Lei Wang and
+co-workers,\cite{Xie2020DominantEigensolverAD} so gradients are reconstructed
+from the converged Ritz pairs rather than from the full iterative solver
+history. The neural
+functional is written as a coefficient-basis family in which local
+density descriptors generate mixing fields over semilocal, HF, and
+optional MP2/PT2 channels. For semilocal channels, the XC energy,
+potential, and local $f_{\rm xc}$ tensor are obtained from the same
+energy-density expression. The HF channel supplies a scalar hybrid
+exchange response, while the MP2/PT2 channel supplies a
+root-specific second-order correction after the TDA/Casida singles
+problem is solved. This design provides separate ground-state and
+excited-state training protocols within the same differentiable
+implementation.

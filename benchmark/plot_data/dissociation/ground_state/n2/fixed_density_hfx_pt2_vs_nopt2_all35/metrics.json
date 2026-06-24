@@ -1,0 +1,35 @@
+{
+  "system": "N2",
+  "state": "ground",
+  "spectroscopic_state": "X 1Sigma_g+",
+  "training_mode": "fixed_density",
+  "cases": {
+    "pt2": {
+      "model_label": "Neural HFX+PT2",
+      "dense_mae_ev_from_csv": 0.025226513289822925,
+      "dense_rmse_ev_from_csv": 0.03071801994259879,
+      "dense_max_abs_error_ev_from_csv": 0.05720028071290384,
+      "dense_max_abs_error_r_angstrom": 1.75,
+      "source_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_n2_fixed_density_all35_20260623/n2_fixed_hfx_pt2_all35/n2_ccsdt_ground_predictions.csv"
+    },
+    "nopt2": {
+      "model_label": "Neural HFX/no-PT2",
+      "dense_mae_ev_from_csv": 0.1942293082950426,
+      "dense_rmse_ev_from_csv": 0.2285743529503246,
+      "dense_max_abs_error_ev_from_csv": 0.5032775343865046,
+      "dense_max_abs_error_r_angstrom": 2.7,
+      "source_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_n2_fixed_density_all35_20260623/n2_fixed_hfx_nopt2_all35/n2_ccsdt_ground_predictions.csv"
+    }
+  },
+  "outputs": {
+    "run_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_n2_fixed_density_all35_20260623/n2_fixed_density_hfx_pt2_nopt2_dissociation_paper_style.pdf",
+    "run_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_n2_fixed_density_all35_20260623/n2_fixed_density_hfx_pt2_nopt2_dissociation_paper_style.png",
+    "run_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_n2_fixed_density_all35_20260623/n2_fixed_density_hfx_pt2_nopt2_dissociation_paper_style.svg",
+    "paper_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/n2_fixed_density_hfx_pt2_nopt2_dissociation_paper_style.pdf",
+    "paper_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/n2_fixed_density_hfx_pt2_nopt2_dissociation_paper_style.png",
+    "paper_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/n2_fixed_density_hfx_pt2_nopt2_dissociation_paper_style.svg",
+    "paper_review_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper_review/tdgraddft-paper/figures/n2_fixed_density_hfx_pt2_nopt2_dissociation_paper_style.pdf",
+    "paper_review_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper_review/tdgraddft-paper/figures/n2_fixed_density_hfx_pt2_nopt2_dissociation_paper_style.png",
+    "paper_review_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper_review/tdgraddft-paper/figures/n2_fixed_density_hfx_pt2_nopt2_dissociation_paper_style.svg"
+  }
+}
