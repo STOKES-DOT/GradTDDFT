@@ -1,0 +1,19 @@
+\begin{table}[t]
+\centering
+\caption{Summary of excitation-energy and oscillator-strength agreement for the PBE/def2-SVP restricted-singlet validation set. Mean absolute errors are computed over the first five states for each molecule and solver.}
+\label{tab:ad-kernel-excitation-oscillator}
+\begin{tabular}{lcccc}
+\toprule
+& \multicolumn{2}{c}{TDA} & \multicolumn{2}{c}{Full TDDFT} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Molecule & MAE$(\Omega)$ / eV & MAE$(f)$ & MAE$(\Omega)$ / eV & MAE$(f)$ \\
+\midrule
+H$_2$O & $1.31\times 10^{-11}$ & $8.37\times 10^{-9}$ & $2.97\times 10^{-11}$ & $1.76\times 10^{-8}$ \\
+CO & $3.62\times 10^{-13}$ & $7.22\times 10^{-9}$ & $6.84\times 10^{-12}$ & $2.82\times 10^{-8}$ \\
+N$_2$ & $5.86\times 10^{-14}$ & $1.86\times 10^{-22}$ & $3.72\times 10^{-13}$ & $3.26\times 10^{-22}$ \\
+C$_2$H$_4$ & $1.09\times 10^{-11}$ & $3.13\times 10^{-9}$ & $1.72\times 10^{-13}$ & $9.22\times 10^{-10}$ \\
+CH$_2$O & $1.97\times 10^{-12}$ & $8.04\times 10^{-10}$ & $8.25\times 10^{-13}$ & $3.11\times 10^{-10}$ \\
+C$_6$H$_6$ & $2.87\times 10^{-10}$ & $5.89\times 10^{-12}$ & $6.98\times 10^{-11}$ & $1.29\times 10^{-7}$ \\
+\bottomrule
+\end{tabular}
+\end{table}

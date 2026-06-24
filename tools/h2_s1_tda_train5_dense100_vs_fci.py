@@ -259,6 +259,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Build dense references only after training, reducing peak pre-train memory.",
     )
     p.add_argument(
+        "--dense-eval-start-index",
+        type=int,
+        default=1,
+        help=(
+            "One-based inclusive dense-curve index to start evaluating. This is "
+            "useful for chunked inference runs that avoid long-lived JAX/LLVM "
+            "compile caches."
+        ),
+    )
+    p.add_argument(
+        "--dense-eval-end-index",
+        type=int,
+        default=None,
+        help=(
+            "One-based inclusive dense-curve index to stop evaluating. Defaults "
+            "to the final dense point."
+        ),
+    )
+    p.add_argument(
+        "--skip-eval-oscillator-strengths",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Skip oscillator strengths during dense-curve evaluation. This avoids "
+            "a second TDDFT solve per geometry when only S0/S1 energies are needed."
+        ),
+    )
+    p.add_argument(
         "--init-checkpoint",
         default=None,
         help="Optional Flax msgpack checkpoint used to initialize the Neural_xc params.",
@@ -348,6 +376,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="+",
         default=list(_DEFAULT_SEMILOCAL_XC),
         help="Neural_xc semilocal basis channels.",
+    )
+    p.add_argument(
+        "--allow-experimental-jax-xc",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Allow jax-xc components that are marked experimental, such as "
+            "meta-GGA channels requiring tau features."
+        ),
     )
     p.add_argument(
         "--s1-weight",
@@ -543,6 +580,20 @@ def _metric_mean(metrics: dict[str, Any], key: str, default: float = float("nan"
     if int(arr.size) <= 0:
         return default
     return float(jnp.mean(arr))
+
+
+def _append_rows_csv(path: Path, rows: list[dict[str, float]]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists() and path.stat().st_size > 0
+    fieldnames = list(rows[0].keys())
+    with path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if not exists:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def _s1_total_supervision_penalty(metrics: dict[str, Any]) -> float:
@@ -816,6 +867,7 @@ def _make_s1_functional(args: argparse.Namespace) -> Any:
         pt2_channel_mode=str(args.pt2_channel_mode),
         response_hf_mode=str(args.response_hf_mode),
         response_pt2_mode=str(args.response_pt2_mode),
+        allow_experimental_jax_xc=bool(args.allow_experimental_jax_xc),
         name=f"neural_xc_h2_s1_tda_{str(args.training_mode)}",
     )
 
@@ -2072,6 +2124,11 @@ def evaluate_dense_curve_tda(
     training_config: GroundStateTrainingConfig,
     logger: RunLogger,
     use_tda: bool,
+    start_index: int = 1,
+    total_points: int | None = None,
+    partial_dense_csv: Path | None = None,
+    partial_excited_csv: Path | None = None,
+    skip_oscillator_strengths: bool = False,
 ) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
     rows: list[dict[str, float]] = []
     excited_rows: list[dict[str, float]] = []
@@ -2079,8 +2136,10 @@ def evaluate_dense_curve_tda(
         functional,
         training_config=training_config,
     )
+    total_points = len(dense_points) if total_points is None else int(total_points)
     t0 = time.perf_counter()
-    for idx, point in enumerate(dense_points, start=1):
+    for chunk_idx, point in enumerate(dense_points, start=1):
+        dense_idx = int(start_index) + chunk_idx - 1
         predicted_energy_h_arr, predicted_molecule = predictor(params, point.molecule)
         predicted_energy_h = float(predicted_energy_h_arr)
         predicted_density = np.asarray(predicted_molecule.density(), dtype=np.float64).sum(axis=-1)
@@ -2102,20 +2161,23 @@ def evaluate_dense_curve_tda(
             ),
             dtype=np.float64,
         )
-        predicted_strengths = np.asarray(
-            predict_oscillator_strengths(
-                params,
-                functional,
-                predicted_molecule,
-                nstates=1,
-                use_tda=bool(use_tda),
-            ),
-            dtype=np.float64,
-        )
         pred_gap = float(predicted_s1[0]) if predicted_s1.size > 0 else float("nan")
-        pred_strength = (
-            float(predicted_strengths[0]) if predicted_strengths.size > 0 else float("nan")
-        )
+        if bool(skip_oscillator_strengths):
+            pred_strength = float("nan")
+        else:
+            predicted_strengths = np.asarray(
+                predict_oscillator_strengths(
+                    params,
+                    functional,
+                    predicted_molecule,
+                    nstates=1,
+                    use_tda=bool(use_tda),
+                ),
+                dtype=np.float64,
+            )
+            pred_strength = (
+                float(predicted_strengths[0]) if predicted_strengths.size > 0 else float("nan")
+            )
         fci_gap = (
             float(point.fci_excitation_energies_h[0])
             if int(np.asarray(point.fci_excitation_energies_h).size) > 0
@@ -2123,54 +2185,62 @@ def evaluate_dense_curve_tda(
         )
         fci_total = _reference_s1_total_energy_h(point) if np.isfinite(fci_gap) else float("nan")
         pred_total = float(predicted_energy_h + pred_gap) if np.isfinite(pred_gap) else float("nan")
-        rows.append(
-            {
-                "r_angstrom": float(point.r_angstrom),
-                "fci_energy_h": float(point.fci_energy_h),
-                "exact_energy_h": float(point.fci_energy_h),
-                "predicted_energy_h": predicted_energy_h,
-                "energy_abs_err_ev": abs(predicted_energy_h - point.fci_energy_h) * HARTREE_TO_EV,
-                "fci_s1_total_energy_h": fci_total,
-                "exact_s1_total_energy_h": fci_total,
-                "predicted_s1_total_energy_h": pred_total,
-                "s1_total_abs_err_ev": abs(pred_total - fci_total) * HARTREE_TO_EV,
-                "fci_s1_h": fci_gap,
-                "exact_s1_h": fci_gap,
-                "predicted_s1_h": pred_gap,
-                "s1_gap_abs_err_ev": abs(pred_gap - fci_gap) * HARTREE_TO_EV,
-                "predicted_s1_oscillator_strength": pred_strength,
-                "fci_electron_count": float(point.fci_electron_count),
-                "exact_electron_count": float(point.fci_electron_count),
-                "predicted_electron_count": predicted_electron_count,
-                "electron_count_abs_err": abs(predicted_electron_count - point.fci_electron_count),
-                "density_l1": density_l1,
-                "density_l2": density_l2,
-                "density_linf": density_linf,
-                "predicted_dm_trace": float(np.trace(predicted_dm_total)),
-            }
-        )
+        row = {
+            "dense_index": dense_idx,
+            "r_angstrom": float(point.r_angstrom),
+            "fci_energy_h": float(point.fci_energy_h),
+            "exact_energy_h": float(point.fci_energy_h),
+            "predicted_energy_h": predicted_energy_h,
+            "energy_abs_err_ev": abs(predicted_energy_h - point.fci_energy_h) * HARTREE_TO_EV,
+            "fci_s1_total_energy_h": fci_total,
+            "exact_s1_total_energy_h": fci_total,
+            "predicted_s1_total_energy_h": pred_total,
+            "s1_total_abs_err_ev": abs(pred_total - fci_total) * HARTREE_TO_EV,
+            "fci_s1_h": fci_gap,
+            "exact_s1_h": fci_gap,
+            "predicted_s1_h": pred_gap,
+            "s1_gap_abs_err_ev": abs(pred_gap - fci_gap) * HARTREE_TO_EV,
+            "predicted_s1_oscillator_strength": pred_strength,
+            "fci_electron_count": float(point.fci_electron_count),
+            "exact_electron_count": float(point.fci_electron_count),
+            "predicted_electron_count": predicted_electron_count,
+            "electron_count_abs_err": abs(predicted_electron_count - point.fci_electron_count),
+            "density_l1": density_l1,
+            "density_l2": density_l2,
+            "density_linf": density_linf,
+            "predicted_dm_trace": float(np.trace(predicted_dm_total)),
+        }
+        rows.append(row)
+        if partial_dense_csv is not None:
+            _append_rows_csv(partial_dense_csv, [row])
         solver_name = "tda" if bool(use_tda) else "casida"
         solver_label = "TDA" if bool(use_tda) else "Casida"
         if np.isfinite(fci_gap) and np.isfinite(pred_gap):
-            excited_rows.append(
-                {
-                    "r_angstrom": float(point.r_angstrom),
-                    "solver": solver_name,
-                    "state_index": 1,
-                    "fci_total_energy_h": fci_total,
-                    "exact_total_energy_h": fci_total,
-                    "predicted_total_energy_h": pred_total,
-                    "total_abs_err_ev": abs(pred_total - fci_total) * HARTREE_TO_EV,
-                    "fci_excitation_h": fci_gap,
-                    "exact_excitation_h": fci_gap,
-                    "predicted_excitation_h": pred_gap,
-                    "gap_abs_err_ev": abs(pred_gap - fci_gap) * HARTREE_TO_EV,
-                    "predicted_oscillator_strength": pred_strength,
-                }
-            )
-        if idx == 1 or idx % max(1, len(dense_points) // 10) == 0 or idx == len(dense_points):
+            excited_row = {
+                "dense_index": dense_idx,
+                "r_angstrom": float(point.r_angstrom),
+                "solver": solver_name,
+                "state_index": 1,
+                "fci_total_energy_h": fci_total,
+                "exact_total_energy_h": fci_total,
+                "predicted_total_energy_h": pred_total,
+                "total_abs_err_ev": abs(pred_total - fci_total) * HARTREE_TO_EV,
+                "fci_excitation_h": fci_gap,
+                "exact_excitation_h": fci_gap,
+                "predicted_excitation_h": pred_gap,
+                "gap_abs_err_ev": abs(pred_gap - fci_gap) * HARTREE_TO_EV,
+                "predicted_oscillator_strength": pred_strength,
+            }
+            excited_rows.append(excited_row)
+            if partial_excited_csv is not None:
+                _append_rows_csv(partial_excited_csv, [excited_row])
+        if (
+            chunk_idx == 1
+            or chunk_idx % max(1, len(dense_points) // 10) == 0
+            or chunk_idx == len(dense_points)
+        ):
             logger.log(
-                f"[eval] {idx:3d}/{len(dense_points):3d} "
+                f"[eval] {dense_idx:3d}/{total_points:3d} "
                 f"R={point.r_angstrom:.4f} A "
                 f"E0_pred={predicted_energy_h:.10f} Eh "
                 f"S1_total_err={abs(pred_total - fci_total) * HARTREE_TO_EV:.6e} eV "
@@ -2797,6 +2867,15 @@ def write_summary(
         "eval_use_tda": eval_use_tda,
         "evaluation_solver": evaluation_solver,
         "dense_points": int(args.dense_points),
+        "dense_eval_start_index": int(getattr(args, "dense_eval_start_index", 1)),
+        "dense_eval_end_index": (
+            None
+            if getattr(args, "dense_eval_end_index", None) is None
+            else int(args.dense_eval_end_index)
+        ),
+        "skip_eval_oscillator_strengths": bool(
+            getattr(args, "skip_eval_oscillator_strengths", False)
+        ),
         "steps": int(args.steps),
         "final_loss": float(training["final_loss"]),
         "min_loss": float(training["min_loss"]),
@@ -2967,16 +3046,37 @@ def main() -> None:
             )
 
     eval_solver_label = "TDA" if eval_use_tda else "Casida"
-    logger.log(
-        f"Evaluating dense {int(args.dense_points)}-point {eval_solver_label} S1 curve..."
+    dense_total_points = len(dense_points)
+    dense_eval_start = max(1, int(args.dense_eval_start_index))
+    dense_eval_end = (
+        dense_total_points
+        if args.dense_eval_end_index is None
+        else min(dense_total_points, int(args.dense_eval_end_index))
     )
+    if dense_eval_start > dense_eval_end:
+        raise ValueError(
+            "dense eval slice is empty: "
+            f"start={dense_eval_start}, end={dense_eval_end}, total={dense_total_points}"
+        )
+    dense_eval_points = dense_points[dense_eval_start - 1 : dense_eval_end]
+    logger.log(
+        f"Evaluating dense {dense_eval_start}-{dense_eval_end}/{dense_total_points} "
+        f"{eval_solver_label} S1 curve..."
+    )
+    dense_partial_csv = outdir / "h2_s1_tda_dense_curve_partial.csv"
+    excited_partial_csv = outdir / "h2_s1_tda_excited_curve_partial.csv"
     dense_rows, excited_rows = evaluate_dense_curve_tda(
-        dense_points,
+        dense_eval_points,
         params=params,
         functional=functional,
         training_config=gs_training,
         logger=logger,
         use_tda=eval_use_tda,
+        start_index=dense_eval_start,
+        total_points=dense_total_points,
+        partial_dense_csv=dense_partial_csv,
+        partial_excited_csv=excited_partial_csv,
+        skip_oscillator_strengths=bool(args.skip_eval_oscillator_strengths),
     )
 
     dense_csv = outdir / "h2_s1_tda_dense_curve.csv"
@@ -3068,6 +3168,12 @@ def main() -> None:
             "dense_curve_csv": str(dense_csv),
             "excited_csv": str(excited_csv),
             "excited_curve_csv": str(excited_csv),
+            "dense_partial_csv": str(dense_partial_csv),
+            "excited_partial_csv": str(excited_partial_csv),
+            "dense_eval_start_index": int(dense_eval_start),
+            "dense_eval_end_index": int(dense_eval_end),
+            "dense_eval_total_points": int(dense_total_points),
+            "skip_eval_oscillator_strengths": bool(args.skip_eval_oscillator_strengths),
             "reference_points_csv": str(reference_points_csv),
             "curve_png": str(curve_png),
             "figure_png": str(curve_png),
@@ -3091,6 +3197,8 @@ def main() -> None:
             "data_files": [
                 str(dense_csv),
                 str(excited_csv),
+                str(dense_partial_csv),
+                str(excited_partial_csv),
                 str(reference_points_csv),
                 str(training_history_csv),
             ],

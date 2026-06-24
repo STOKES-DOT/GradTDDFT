@@ -1,0 +1,9 @@
+{
+  "command": "benchmark/pyscf_correctness/scan_pyscf_tddft_functional_support.py --output-dir benchmark/pyscf_correctness/runs/remote_pyscf_tddft_functional_support_alias_common_20260528 --smoke-source aliases-and-common --timeout-s 15",
+  "platform": "Linux-4.18.0-348.el8.x86_64-x86_64-with-glibc2.28",
+  "pyscf_version": "2.13.0",
+  "python": "3.11.15 (main, Mar 11 2026, 17:20:07) [GCC 14.3.0]",
+  "timestamp_utc": "2026-05-28T03:39:22+00:00",
+  "xc_alias_count": 70,
+  "xc_codes_count": 981
+}

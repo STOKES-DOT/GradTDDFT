@@ -1,0 +1,48 @@
+{
+  "system": "H2",
+  "state": "S1",
+  "spectroscopic_state": "B 1Sigma_u+",
+  "quantity": "S1 total energy E1(R)",
+  "basis": "def2-tzvp",
+  "xc": "b3lyp",
+  "solver": "TDA",
+  "reference": "FCI",
+  "n_points": 100,
+  "train_r_values_angstrom": [
+    0.4,
+    0.74,
+    1.1,
+    1.6,
+    2.2,
+    3.5,
+    6.0
+  ],
+  "cases": {
+    "pt2": {
+      "model_label": "Neural TDA+PT2",
+      "dense_mae_ev_from_csv": 0.018219733439706984,
+      "dense_rmse_ev_from_csv": 0.025193218635475856,
+      "dense_max_abs_error_ev_from_csv": 0.05564822195302468,
+      "dense_max_abs_error_r_angstrom": 3.341414141414141,
+      "source_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_pt2_vs_nopt2_dense100_comparison_20260624/h2_pt2_vs_nopt2_dense100_comparison.csv",
+      "visualization_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_pt2_vs_nopt2_dense100_comparison_20260624/h2_pt2_s1_tda_e1_total_dissociation_paper_style_visualization_data.csv"
+    },
+    "no_pt2": {
+      "model_label": "Neural TDA/no-PT2",
+      "dense_mae_ev_from_csv": 0.0701193994357698,
+      "dense_rmse_ev_from_csv": 0.0961744959417611,
+      "dense_max_abs_error_ev_from_csv": 0.1993103859026345,
+      "dense_max_abs_error_r_angstrom": 4.133333333333333,
+      "source_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_pt2_vs_nopt2_dense100_comparison_20260624/h2_pt2_vs_nopt2_dense100_comparison.csv",
+      "visualization_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_pt2_vs_nopt2_dense100_comparison_20260624/h2_nopt2_s1_tda_e1_total_dissociation_paper_style_visualization_data.csv"
+    }
+  },
+  "outputs": {
+    "run_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_pt2_vs_nopt2_dense100_comparison_20260624/h2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.pdf",
+    "run_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_pt2_vs_nopt2_dense100_comparison_20260624/h2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.png",
+    "run_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_pt2_vs_nopt2_dense100_comparison_20260624/h2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.svg",
+    "paper_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.pdf",
+    "paper_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.png",
+    "paper_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.svg"
+  }
+}

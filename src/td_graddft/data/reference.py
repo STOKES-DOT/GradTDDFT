@@ -10,7 +10,11 @@ from td_graddft.data.ris_auxbasis import minimal_ris_auxbasis_for_mol
 from td_graddft.scf.features import (
     _charge_center,
 )
-from td_graddft.neural_xc.inputs import ChunkedHFXNu, _local_hfx_features_from_dm
+from td_graddft.neural_xc.inputs import (
+    ChunkedHFXNu,
+    _local_hfx_features_from_dm,
+    _local_pt2_feature_from_unrestricted_orbitals,
+)
 from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule, UnrestrictedMolecule
 
 
@@ -316,10 +320,12 @@ def unrestricted_reference_from_pyscf(
     *,
     compute_local_hfx_features: bool = False,
     compute_local_hfx_aux: bool = False,
+    compute_local_pt2_features: bool = False,
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
     hfx_chunk_size: int = 512,
     array_backend: ArrayBackend = "jax",
     hfx_nu_storage: HFXNuStorage = "dense",
+    jk_backend: ReferenceJKBackend = "full",
 ) -> UnrestrictedMolecule:
     """Convert an unrestricted PySCF SCF/DFT object to a TD-GradDFT-ready reference."""
 
@@ -356,13 +362,24 @@ def unrestricted_reference_from_pyscf(
 
     nocc_alpha = int(np.count_nonzero(mo_occ_np[0] > 1e-8))
     nocc_beta = int(np.count_nonzero(mo_occ_np[1] > 1e-8))
-    eri_pair_matrix_np = np.asarray(mf.mol.intor("int2e", aosym="s4"))
+    jk_backend_norm = str(jk_backend).lower()
+    if jk_backend_norm == "df":
+        df_factors_np = np.asarray(true_df_factors_from_libcint_mol(mf.mol))
+        eri_pair_matrix_np = None
+        integral_dtype = df_factors_np.dtype
+    elif jk_backend_norm == "full":
+        eri_pair_matrix_np = np.asarray(mf.mol.intor("int2e", aosym="s4"))
+        df_factors_np = None
+        integral_dtype = eri_pair_matrix_np.dtype
+    else:
+        raise ValueError("jk_backend must be one of {'full', 'df'}.")
     with mf.mol.with_common_orig(_charge_center(mf.mol)):
         dipole_integrals_np = np.asarray(mf.mol.intor_symmetric("int1e_r", comp=3))
 
     hfx_local = None
     hfx_nu = None
     hfx_nu_api = None
+    pt2_local = None
     if compute_local_hfx_features:
         use_chunked_hfx_nu = bool(compute_local_hfx_aux) and _use_chunked_hfx_nu(
             mf.mol,
@@ -391,6 +408,19 @@ def unrestricted_reference_from_pyscf(
                     chunk_size=int(hfx_chunk_size),
                 )
         hfx_local = _backend_array(hfx_local_np, array_backend=array_backend)
+    if compute_local_pt2_features:
+        pt2_local_jax = _local_pt2_feature_from_unrestricted_orbitals(
+            jnp.asarray(ao_np),
+            jnp.asarray(mo_coeff_np),
+            jnp.asarray(mo_occ_np),
+            jnp.asarray(mo_energy_np),
+            rep_tensor=jnp.zeros((0, 0, 0, 0), dtype=integral_dtype),
+            eri_pair_matrix=(
+                None if eri_pair_matrix_np is None else jnp.asarray(eri_pair_matrix_np)
+            ),
+            df_factors=None if df_factors_np is None else jnp.asarray(df_factors_np),
+        )
+        pt2_local = _backend_array(pt2_local_jax, array_backend=array_backend)
 
     return UnrestrictedMolecule(
         ao=_backend_array(ao_np, array_backend=array_backend),
@@ -399,7 +429,12 @@ def unrestricted_reference_from_pyscf(
             coords=_backend_array(mf.grids.coords, array_backend=array_backend),
         ),
         dipole_integrals=_backend_array(dipole_integrals_np, array_backend=array_backend),
-        rep_tensor=_backend_array(eri_pair_matrix_np, array_backend=array_backend),
+        rep_tensor=_backend_array(
+            np.zeros((0, 0, 0, 0), dtype=integral_dtype)
+            if eri_pair_matrix_np is None
+            else eri_pair_matrix_np,
+            array_backend=array_backend,
+        ),
         mo_coeff=_backend_array(mo_coeff_np, array_backend=array_backend),
         mo_occ=_backend_array(mo_occ_np, array_backend=array_backend),
         mo_energy=_backend_array(mo_energy_np, array_backend=array_backend),
@@ -422,7 +457,12 @@ def unrestricted_reference_from_pyscf(
         hfx_local=hfx_local,
         hfx_nu=hfx_nu,
         hfx_nu_api=hfx_nu_api,
-        pt2_local=None,
+        pt2_local=pt2_local,
+        df_factors=(
+            None
+            if df_factors_np is None
+            else _backend_array(df_factors_np, array_backend=array_backend)
+        ),
     )
 
 

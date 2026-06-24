@@ -44,10 +44,13 @@ response tensor by automatic differentiation,
   f_{\rm xc}
   =
   \frac{\delta v_{\rm xc}}{\delta \rho}.
+  \label{eq:validation-xc-derivative-chain}
 \end{equation}
-The resulting tensor is contracted with quadrature weights and AO
-basis values, transformed to the occupied--virtual orbital basis, and
-inserted into the TDA or Casida response matrices. Matched PySCF
+The resulting tensor in
+Eq.~\eqref{eq:validation-xc-derivative-chain} is contracted with
+quadrature weights and AO basis values, transformed to the
+occupied--virtual orbital basis, and inserted into the TDA or Casida
+response matrices. Matched PySCF
 calculations provide independent references for the same geometry,
 functional, basis, grid, SCF solution, and response equations.
 
@@ -126,7 +129,7 @@ self-interaction, two-electron bond breaking, and stretched
 triple-bond near-degeneracy within a small set of scans.
 The ground-state curves are labeled by the corresponding
 diatomic spectroscopic terms, \(X\,{}^1\Sigma_g^+\) for H$_2$
-and N$_2$ and \(X\,{}^2\Sigma_g^+\) for H$_2^+\). The excited-state
+and N$_2$ and \(X\,{}^2\Sigma_g^+\) for H$_2^+$. The excited-state
 curves are labeled as H$_2$ \(B\,{}^1\Sigma_u^+\) and N$_2$
 \(A\,{}^1\Pi_g\); the latter follows the large-CAS state assignment
 used in the N$_2$ reference data.\cite{Hammami2026N2PEC}
@@ -227,8 +230,8 @@ lower subpanel shows the signed error
 \(\Delta E_1=E_{1,\rm model}-E_{1,\rm ref}\). Red diamonds denote the
 training geometries, and the gray band marks
 \(\pm 1\) kcal mol\(^{-1}\). The PT2-channel model gives a dense-curve
-mean absolute error of 35.9 meV and a maximum absolute error of
-208.0 meV, whereas the updated no-PT2 model gives corresponding
+mean absolute error of 18.2 meV and a maximum absolute error of
+55.6 meV, whereas the updated no-PT2 model gives corresponding
 errors of 70.1 meV and 199.3 meV.}
 \label{fig:h2-s1-tda-e1-total-pt2-nopt2-dissociation}
 \end{figure}
@@ -264,7 +267,7 @@ N$_2$ ground-state and first-excited-state dissociation curves? In
 this comparison, the MP2/PT2 channel is disabled, the local
 exact-exchange descriptor \(h_g\) remains active through
 \(c_x^\theta(\mathbf{z}_g)h_g\), and only the set of semi-local energy
-densities \(\{e_m^{\rm sl}\}\) in Eq.~\ref{eq:semilocal-channel} is
+densities \(\{e_m^{\rm sl}\}\) in Eq.~\eqref{eq:semilocal-channel} is
 changed. The neural architecture, optimizer, training geometries,
 quadrature grid, and implicit differentiation of the SCF--TDDFT
 workflow are kept fixed.
@@ -277,7 +280,7 @@ parent-functional mixing fractions. Because this benchmark uses the
 is included. The comparison therefore isolates how LDA, GGA, and
 meta-GGA semi-local priors interact with the learned local HFX channel
 in the coefficient-basis form of
-Eq.~\ref{eq:neural-hybrid-functional}.
+Eq.~\eqref{eq:neural-hybrid-functional}.
 
 \begin{table}[t]
 \centering
@@ -328,11 +331,12 @@ the calculation records the ground-state energy $E_0(R)$, the first
 excitation energy $\Omega_1(R)$, and the first excited-state energy
 \begin{equation}
   E_1(R)=E_0(R)+\Omega_1(R).
+  \label{eq:dissociation-e1-total}
 \end{equation}
-Reference curves are generated with a fixed basis, spin sector, and
-active space across the scan so that errors reflect the learned
-functional and response treatment rather than changing reference
-definitions.
+Reference curves for Eq.~\eqref{eq:dissociation-e1-total} are
+generated with a fixed basis, spin sector, and active space across
+the scan so that errors reflect the learned functional and response
+treatment rather than changing reference definitions.
 
 The comparison includes TDA, full TDDFT, and neural-XC TDDFT under
 the same orbital and response settings. Neural objectives are grouped

@@ -301,6 +301,7 @@ def read_unrestricted_molecule(
         hfx_nu_api=hfx_nu_api,
         pt2_local=kwargs.pop("pt2_local"),
         scf_initial_density=kwargs.pop("scf_initial_density"),
+        df_factors=kwargs.pop("df_factors"),
     )
 
 

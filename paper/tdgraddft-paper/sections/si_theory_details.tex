@@ -261,7 +261,7 @@ $K^{\rm xc,A}=K^{\rm xc,B}$; nonlocal channels may contribute
 different $A$ and $B$ matrices.
 
 The Tamm--Dancoff form (TDA) sets $\mathbf{B}=0$,
-reducing Eq.~\ref{eq:casida} to the Hermitian eigenvalue problem
+reducing Eq.~\eqref{eq:casida} to the Hermitian eigenvalue problem
 $\mathbf{A}\mathbf{X}_I = \Omega_I \mathbf{X}_I$.
 
 From the solution vectors, physical observables are computed:
@@ -285,7 +285,7 @@ response tensor and nonlocal channel coefficients depend explicitly
 on $\theta$. Second, the response problem is evaluated at the
 converged SCF density $\mathbf{D}^*_\theta$, whose derivative is
 handled by the implicit SCF adjoint in
-Eqs.~\ref{eq:implicit-adjoint}--\ref{eq:implicit-scf-gradient}.
+Eqs.~\eqref{eq:implicit-adjoint}--\eqref{eq:implicit-scf-gradient}.
 The TDDFT root derivative is then taken with respect to the response
 operator built at this converged state. The eigensolver derivative
 follows implicit differentiation of a converged dominant eigensolver,
@@ -554,7 +554,7 @@ density-weighted average of the learned local exchange field,
 \end{equation}
 The local HF descriptor $h_g$ remains part of the coefficient input,
 but it is held fixed inside the local Hessian. The orbital Hessian
-therefore uses Eq.~\ref{eq:hfkernel} with
+therefore uses Eq.~\eqref{eq:hfkernel} with
 $\alpha_\theta=\alpha_x^\theta$, rather than a separate response
 feature for the projected local HF field.
 
@@ -635,7 +635,7 @@ where
 \end{aligned}
   \label{eq:cisd-u-vector-si}
 \end{equation}
-The denominator in Eq.~\ref{eq:cisd-direct-si} is
+The denominator in Eq.~\eqref{eq:cisd-direct-si} is
 $D_{ij}^{ab}-\Omega_I^{\rm LR}$; the excitation energy shifts the
 doubles manifold relative to the singles state.
 
@@ -689,7 +689,7 @@ The total second-order root correction is
   \label{eq:cisd-total-si}
 \end{equation}
 and the learned double-hybrid scaling is applied only through
-$a_c^\theta$ in Eq.~\ref{eq:pt2-cisd-corrected-root-si}. This makes
+$a_c^\theta$ in Eq.~\eqref{eq:pt2-cisd-corrected-root-si}. This makes
 the semilocal/HF response kernel and the perturbative doubles
 correction separate mathematical objects while keeping both
 differentiable with respect to the neural functional parameters.
@@ -720,7 +720,7 @@ and
   \sum_g w_g e_{\rm xc}^{\theta}(g).
   \label{eq:totalexc}
 \end{equation}
-The channel densities in Eq.~\ref{eq:neural-eloc} are defined on
+The channel densities in Eq.~\eqref{eq:neural-eloc} are defined on
 the same quadrature grid. A semilocal channel has the general
 spin-resolved meta-GGA form
 \begin{equation}
@@ -792,7 +792,7 @@ In spin-orbital notation,
   \,d\mathbf{r}\,d\mathbf{r}'.
   \label{eq:hf-energy}
 \end{equation}
-The local descriptor used in Eq.~\ref{eq:neural-eloc} is the
+The local descriptor used in Eq.~\eqref{eq:neural-eloc} is the
 exchange-hole-gauge density
 \begin{equation}
   h_g
@@ -947,11 +947,11 @@ both a local coefficient and an effective scalar exchange fraction
        {\sum_g w_g\,\rho_g},
   \label{eq:alpha-eff}
 \end{equation}
-which enters Eq.~\ref{eq:hfkernel}. In the excited-state response,
+which enters Eq.~\eqref{eq:hfkernel}. In the excited-state response,
 the local HF descriptor field is treated as a fixed coefficient input
 for the local Hessian, and the nonlocal TDDFT response uses the
-scalar exchange fraction in Eq.~\ref{eq:alpha-eff}. The PT2 head
-defines the scalar coefficient in Eq.~\ref{eq:pt2-scalar-correlation-si}
+scalar exchange fraction in Eq.~\eqref{eq:alpha-eff}. The PT2 head
+defines the scalar coefficient in Eq.~\eqref{eq:pt2-scalar-correlation-si}
 for the CIS(D)-type excited-state correction.
 
 % ======================================================================
@@ -984,7 +984,7 @@ through total energies, densities, or both:
 where $E^\theta$ is the SCF total energy obtained with the neural
 functional and $\rho^\theta$ is the corresponding self-consistent
 density. Depending on the chosen differentiable mode in
-Eqs.~\ref{eq:fd-objective}--\ref{eq:implicit-scf-gradient}, the
+Eqs.~\eqref{eq:fd-objective}--\eqref{eq:implicit-scf-gradient}, the
 density may be fixed, propagated through a finite SCF trajectory, or
 treated as the solution of an implicit fixed-point problem.
 

@@ -1,0 +1,12 @@
+{"basis": "def2-svp", "event": "start", "grid_level": 0, "molecule": "water", "timestamp_utc": "2026-05-27T12:01:26+00:00", "xc": "b3lyp"}
+{"event": "finish", "fxc_ad_warm_mean_s": 0.009396368327240149, "molecule": "water", "status": "ok", "timestamp_utc": "2026-05-27T12:01:43+00:00"}
+{"basis": "def2-svp", "event": "start", "grid_level": 0, "molecule": "co", "timestamp_utc": "2026-05-27T12:01:43+00:00", "xc": "b3lyp"}
+{"event": "finish", "fxc_ad_warm_mean_s": 0.007311669178307056, "molecule": "co", "status": "ok", "timestamp_utc": "2026-05-27T12:02:00+00:00"}
+{"basis": "def2-svp", "event": "start", "grid_level": 0, "molecule": "n2", "timestamp_utc": "2026-05-27T12:02:00+00:00", "xc": "b3lyp"}
+{"event": "finish", "fxc_ad_warm_mean_s": 0.005313423462212086, "molecule": "n2", "status": "ok", "timestamp_utc": "2026-05-27T12:02:14+00:00"}
+{"basis": "def2-svp", "event": "start", "grid_level": 0, "molecule": "ethylene", "timestamp_utc": "2026-05-27T12:02:14+00:00", "xc": "b3lyp"}
+{"event": "finish", "fxc_ad_warm_mean_s": 0.01042226329445839, "molecule": "ethylene", "status": "ok", "timestamp_utc": "2026-05-27T12:02:31+00:00"}
+{"basis": "def2-svp", "event": "start", "grid_level": 0, "molecule": "formaldehyde", "timestamp_utc": "2026-05-27T12:02:31+00:00", "xc": "b3lyp"}
+{"event": "finish", "fxc_ad_warm_mean_s": 0.006911221891641617, "molecule": "formaldehyde", "status": "ok", "timestamp_utc": "2026-05-27T12:02:49+00:00"}
+{"basis": "def2-svp", "event": "start", "grid_level": 0, "molecule": "benzene", "timestamp_utc": "2026-05-27T12:02:49+00:00", "xc": "b3lyp"}
+{"event": "finish", "fxc_ad_warm_mean_s": 0.004726848254601161, "molecule": "benzene", "status": "ok", "timestamp_utc": "2026-05-27T12:03:08+00:00"}

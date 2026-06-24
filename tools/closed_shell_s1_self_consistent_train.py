@@ -893,34 +893,16 @@ def _write_prediction_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _plot_training_history(path: Path, training: dict[str, Any], *, title: str) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2))
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.2))
     steps = np.asarray(training["history_steps"], dtype=np.int64)
     loss = np.asarray(training["loss_history"], dtype=np.float64)
-    axes[0].plot(steps, np.maximum(loss, 1e-16), lw=1.6, label="pre-update train loss")
-    eval_steps = np.asarray(training["eval_steps"], dtype=np.int64)
-    train_eval_loss = np.asarray(training["eval_train_loss_history"], dtype=np.float64)
-    val_eval_loss = np.asarray(training["eval_val_loss_history"], dtype=np.float64)
-    train_eval_s1 = np.asarray(training["eval_train_s1_mae_history"], dtype=np.float64)
-    val_eval_s1 = np.asarray(training["eval_val_s1_mae_history"], dtype=np.float64)
-    axes[0].plot(eval_steps, np.maximum(train_eval_loss, 1e-16), "o-", ms=2.6, lw=1.0, label="train loss")
-    if val_eval_loss.size:
-        axes[0].plot(eval_steps, np.maximum(val_eval_loss, 1e-16), "o-", ms=2.6, lw=1.0, label="val loss")
-    axes[0].set_yscale("log")
-    axes[0].set_xlabel("Step")
-    axes[0].set_ylabel("Loss")
-    axes[0].set_title("Loss")
-    axes[0].grid(alpha=0.2)
-    axes[0].legend(frameon=False, fontsize=8)
-
-    axes[1].plot(eval_steps, np.maximum(train_eval_s1, 1e-16), "o-", ms=2.6, lw=1.0, label="train S1 MAE")
-    if val_eval_s1.size:
-        axes[1].plot(eval_steps, np.maximum(val_eval_s1, 1e-16), "o-", ms=2.6, lw=1.0, label="val S1 MAE")
-    axes[1].set_yscale("log")
-    axes[1].set_xlabel("Step")
-    axes[1].set_ylabel("S1 MAE (Eh)")
-    axes[1].set_title("Generalization")
-    axes[1].grid(alpha=0.2)
-    axes[1].legend(frameon=False, fontsize=8)
+    ax.plot(steps, np.maximum(loss, 1e-16), lw=1.6, label="train loss")
+    ax.set_yscale("log")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Loss")
+    ax.set_title("Training loss")
+    ax.grid(alpha=0.2)
+    ax.legend(frameon=False, fontsize=8)
     fig.suptitle(title)
     fig.tight_layout()
     fig.savefig(path, dpi=180)
@@ -933,8 +915,8 @@ def _write_training_history_csv(path: Path, training: dict[str, Any]) -> None:
         writer.writerow(
             [
                 "step",
-                "loss_pre_update",
-                "s1_mae_pre_update",
+                "train_loss",
+                "train_s1_mae",
                 "grad_norm",
                 "grad_abs_max",
                 "param_update_norm",

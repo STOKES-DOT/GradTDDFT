@@ -146,6 +146,7 @@ class UKSIntegralInputs:
     ao_deriv1: Array
     ao_laplacian: Array | None
     dipole_integrals: Array
+    df_factors: Array | None = None
     init_density_alpha: Array | None = None
     init_density_beta: Array | None = None
     init_mo_coeff_alpha: Array | None = None
@@ -167,6 +168,7 @@ class UKSIntegralInputs:
             "overlap": self.overlap,
             "hcore": self.hcore,
             "eri": self.eri,
+            "df_factors": self.df_factors,
             "nalpha": self.nalpha,
             "nbeta": self.nbeta,
             "nuclear_repulsion": self.nuclear_repulsion,
@@ -929,6 +931,7 @@ def _build_uks_inputs_from_cpu_backbone(
     *,
     atom: Any,
     basis: Any,
+    cfg: UKSConfig,
     xc_spec_resolved: str,
     unit: str,
     charge: int,
@@ -947,7 +950,9 @@ def _build_uks_inputs_from_cpu_backbone(
     libcint_grad_policy_mode: str,
     mol_kwargs: dict[str, Any],
 ) -> UKSIntegralInputs:
-    skip_cpu_eri = integral_backend_mode == "gpu"
+    use_df = cfg.jk_backend == "df"
+    skip_cpu_eri = integral_backend_mode == "gpu" or use_df
+    df_factors = None
     mol = None
     if isinstance(atom, MoleculeSpec):
         if not isinstance(basis, str):
@@ -982,10 +987,9 @@ def _build_uks_inputs_from_cpu_backbone(
                 RuntimeWarning,
                 stacklevel=2,
             )
-        eri = (
-            jnp.zeros((0, 0, 0, 0), dtype=hcore.dtype)
-            if skip_cpu_eri
-            else libcint_int2e_full_with_coords(
+        eri = jnp.zeros((0, 0, 0, 0), dtype=hcore.dtype)
+        if use_df:
+            eri_pair_matrix_for_df = libcint_int2e_s4_with_coords(
                 coords_bohr,
                 tuple(spec.symbols),
                 str(basis),
@@ -995,7 +999,23 @@ def _build_uks_inputs_from_cpu_backbone(
                 int(verbose),
                 libcint_grad_policy_mode,
             )
-        )
+            df_factors = eri_pair_matrix_to_df_factors_traceable(
+                eri_pair_matrix_for_df,
+                nao=basis_cart.nao,
+                tol=cfg.df_tol,
+                max_rank=cfg.df_max_rank,
+            )
+        elif not skip_cpu_eri:
+            eri = libcint_int2e_full_with_coords(
+                coords_bohr,
+                tuple(spec.symbols),
+                str(basis),
+                int(spec.charge),
+                int(spec.spin),
+                bool(cart),
+                int(verbose),
+                libcint_grad_policy_mode,
+            )
         nuclear_repulsion = spec.nuclear_repulsion
     else:
         spec = atom if isinstance(atom, MoleculeSpec) else parse_molecule_spec(atom, unit=unit, charge=charge, spin=spin)
@@ -1043,6 +1063,14 @@ def _build_uks_inputs_from_cpu_backbone(
                 geometry_grad_policy=libcint_grad_policy_mode,
                 loader=lambda: jnp.asarray(mol.intor(eri_name)),
         )
+        elif use_df:
+            df_factors = _cached_libcint_host_integral(
+                mol=mol,
+                integral_name="df_cholesky_eri",
+                geometry_anchor=geometry_anchor,
+                geometry_grad_policy=libcint_grad_policy_mode,
+                loader=lambda: true_df_factors_from_libcint_mol(mol),
+            )
         nuclear_repulsion = spec.nuclear_repulsion
 
     ao, ao_deriv1, ao_laplacian = _grid_ao_payload(
@@ -1073,6 +1101,7 @@ def _build_uks_inputs_from_cpu_backbone(
         overlap=overlap,
         hcore=hcore,
         eri=eri,
+        df_factors=df_factors,
         nalpha=nalpha,
         nbeta=nbeta,
         nuclear_repulsion=nuclear_repulsion,
@@ -1096,6 +1125,7 @@ def _build_uks_inputs_from_jax_backbone(
     *,
     atom: Any,
     basis: Any,
+    cfg: UKSConfig,
     xc_spec_resolved: str,
     unit: str,
     charge: int,
@@ -1133,7 +1163,16 @@ def _build_uks_inputs_from_jax_backbone(
             engine="jit",
             chunk_size=int(precompile_eri_chunk_size),
         )
-    eri = eri_tensor(basis_cart)
+    df_factors = None
+    eri = jnp.zeros((0, 0, 0, 0), dtype=hcore.dtype)
+    if cfg.jk_backend == "df":
+        df_factors = eri_to_df_factors_from_basis(
+            basis_cart,
+            tol=cfg.df_tol,
+            max_rank=cfg.df_max_rank,
+        )
+    else:
+        eri = eri_tensor(basis_cart)
     ao, ao_deriv1, ao_laplacian = _grid_ao_payload(
         basis_grid,
         needs_ao_laplacian=True,
@@ -1163,6 +1202,7 @@ def _build_uks_inputs_from_jax_backbone(
         overlap=overlap,
         hcore=hcore,
         eri=eri,
+        df_factors=df_factors,
         nalpha=nalpha,
         nbeta=nbeta,
         nuclear_repulsion=spec.nuclear_repulsion,
@@ -1320,7 +1360,7 @@ def build_uks_integral_inputs(
     if not bool(cart):
         raise NotImplementedError("build_uks_integral_inputs currently supports cart=True only.")
 
-    _, xc_spec_resolved = _resolve_uks_config(config, xc_spec)
+    cfg, xc_spec_resolved = _resolve_uks_config(config, xc_spec)
     integral_backend_mode, grid_ao_backend_mode, libcint_grad_policy_mode = _resolve_integral_input_modes(
         integral_backend=integral_backend,
         grid_ao_backend=grid_ao_backend,
@@ -1330,6 +1370,7 @@ def build_uks_integral_inputs(
         inputs = _build_uks_inputs_from_cpu_backbone(
             atom=atom,
             basis=basis,
+            cfg=cfg,
             xc_spec_resolved=xc_spec_resolved,
             unit=unit,
             charge=charge,
@@ -1348,7 +1389,7 @@ def build_uks_integral_inputs(
             libcint_grad_policy_mode=libcint_grad_policy_mode,
             mol_kwargs=dict(mol_kwargs),
         )
-        if integral_backend_mode == "gpu":
+        if integral_backend_mode == "gpu" and cfg.jk_backend == "full":
             inputs = replace(
                 inputs,
                 eri=_gpu4pyscf_eri_tensor(
@@ -1366,6 +1407,7 @@ def build_uks_integral_inputs(
     inputs = _build_uks_inputs_from_jax_backbone(
         atom=atom,
         basis=basis,
+        cfg=cfg,
         xc_spec_resolved=xc_spec_resolved,
         unit=unit,
         charge=charge,

@@ -1,0 +1,2 @@
+task_id,molecule,scf_type,charge,spin_2s,basis,xc,grid_level,response_solver,spin_channel,nstates,support_status
+benzene__RKS__b3lyp__def2-svp__0__tddft__singlet__6__f73e8519a1,benzene,RKS,0,0,def2-svp,b3lyp,0,tddft,singlet,6,graddft_supported

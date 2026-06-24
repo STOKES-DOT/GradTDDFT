@@ -101,6 +101,53 @@ def build_n2_atom(r_angstrom: float) -> str:
     return f"N 0.0 0.0 {-half:.10f}; N 0.0 0.0 {half:.10f}"
 
 
+def _xlsx_first_sheet_rows(path: Path):
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    ns = {
+        "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+        "rel": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        "pkgrel": "http://schemas.openxmlformats.org/package/2006/relationships",
+    }
+
+    def _text(node) -> str:
+        return "".join(text.text or "" for text in node.findall(".//main:t", ns))
+
+    with zipfile.ZipFile(path) as archive:
+        shared_strings: list[str] = []
+        if "xl/sharedStrings.xml" in archive.namelist():
+            shared_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+            shared_strings = [_text(item) for item in shared_root.findall("main:si", ns)]
+
+        sheet_path = "xl/worksheets/sheet1.xml"
+        if "xl/workbook.xml" in archive.namelist() and "xl/_rels/workbook.xml.rels" in archive.namelist():
+            workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+            first_sheet = workbook.find(".//main:sheets/main:sheet", ns)
+            rel_id = first_sheet.get(f"{{{ns['rel']}}}id") if first_sheet is not None else None
+            rels = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+            for rel in rels.findall("pkgrel:Relationship", ns):
+                if rel.get("Id") == rel_id:
+                    target = str(rel.get("Target"))
+                    sheet_path = "xl/" + target.lstrip("/") if not target.startswith("xl/") else target
+                    break
+
+        sheet = ET.fromstring(archive.read(sheet_path))
+        for row in sheet.findall(".//main:sheetData/main:row", ns):
+            values: list[str | None] = []
+            for cell in row.findall("main:c", ns):
+                value_node = cell.find("main:v", ns)
+                if value_node is None:
+                    inline = cell.find("main:is", ns)
+                    values.append(_text(inline) if inline is not None else None)
+                    continue
+                value = value_node.text
+                if cell.get("t") == "s" and value is not None:
+                    value = shared_strings[int(value)]
+                values.append(value)
+            yield tuple(values)
+
+
 def load_graddft_dissociation_targets(
     path: str | Path,
     *,
@@ -110,11 +157,14 @@ def load_graddft_dissociation_targets(
     if not source.exists():
         raise FileNotFoundError(f"GradDFT dissociation file not found: {source}")
     if source.suffix.lower() in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
-        from openpyxl import load_workbook
-
-        workbook = load_workbook(source, data_only=True, read_only=True)
-        sheet = workbook[workbook.sheetnames[0]]
-        raw_rows = sheet.iter_rows(values_only=True)
+        try:
+            from openpyxl import load_workbook
+        except ModuleNotFoundError:
+            raw_rows = _xlsx_first_sheet_rows(source)
+        else:
+            workbook = load_workbook(source, data_only=True, read_only=True)
+            sheet = workbook[workbook.sheetnames[0]]
+            raw_rows = sheet.iter_rows(values_only=True)
     else:
         handle = source.open(newline="", encoding="utf-8")
         reader = csv.reader(handle)
@@ -661,6 +711,7 @@ def build_functional_and_training_config(
         include_hfx_channel=bool(args.include_hfx_channel),
         pt2_channel_mode=str(args.pt2_channel_mode),
         response_pt2_mode="approx",
+        allow_experimental_jax_xc=bool(args.allow_experimental_jax_xc),
         name="neural_xc_n2_ccsdt_ground",
     )
     coefficient_prior = neural_xc.resolve_coefficient_prior_values(
@@ -678,7 +729,7 @@ def build_functional_and_training_config(
             )
     training_config = GroundStateTrainingConfig.from_parts(
         core=GroundStateCoreTrainingConfig(
-            mode="self_consistent",
+            mode=str(args.training_mode),
             energy_mse_weight=float(args.energy_mse_weight),
             energy_mae_weight=float(args.energy_mae_weight),
             energy_normalization=str(args.energy_normalization),
@@ -1536,6 +1587,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("scaled_projected", "local_exact"),
         default="local_exact",
     )
+    p.add_argument("--allow-experimental-jax-xc", action="store_true")
     p.add_argument("--semilocal-xc", nargs="+", default=list(_DEFAULT_SEMILOCAL_XC))
     p.add_argument("--energy-mse-weight", type=float, default=1.0)
     p.add_argument("--energy-mae-weight", type=float, default=0.0)
@@ -1543,6 +1595,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--energy-normalization",
         choices=("none", "per_electron", "per_atom"),
         default="none",
+    )
+    p.add_argument(
+        "--training-mode",
+        choices=("fixed_density", "self_consistent"),
+        default="self_consistent",
     )
     p.add_argument("--density-constraint-weight", type=float, default=0.0)
     p.add_argument("--density-matrix-constraint-weight", type=float, default=0.0)
@@ -1857,6 +1914,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         f"include_pt2_channel={bool(args.include_pt2_channel)} "
         f"include_hfx_channel={bool(args.include_hfx_channel)} "
         f"pt2_channel_mode={args.pt2_channel_mode if bool(args.include_pt2_channel) else 'none'} "
+        f"training_mode={args.training_mode} "
         f"density_constraint_weight={args.density_constraint_weight} "
         f"density_matrix_constraint_weight={args.density_matrix_constraint_weight} "
         f"reference_scf_device={args.reference_scf_device} "
@@ -2124,6 +2182,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "nelecas": int(args.nelecas) if uses_active_space else None,
             "train_r_values_angstrom": [float(value) for value in r_values],
             "steps": int(args.steps),
+            "training_mode": str(args.training_mode),
             "learning_rate": float(args.learning_rate),
             "lr_decay_every": int(args.lr_decay_every),
             "lr_decay_factor": float(args.lr_decay_factor),
@@ -2159,6 +2218,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "include_pt2_channel": bool(args.include_pt2_channel),
         "include_hfx_channel": bool(args.include_hfx_channel),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
+        "training_mode": str(args.training_mode),
         "density_constraint_weight": float(args.density_constraint_weight),
         "density_matrix_constraint_weight": float(args.density_matrix_constraint_weight),
         "reference_scf_device": str(args.reference_scf_device),

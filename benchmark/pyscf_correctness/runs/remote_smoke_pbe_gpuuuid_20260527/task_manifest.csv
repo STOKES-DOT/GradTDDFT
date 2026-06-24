@@ -1,0 +1,3 @@
+task_id,molecule,scf_type,charge,spin_2s,basis,xc,grid_level,response_solver,spin_channel,nstates,support_status
+water__RKS__pbe__def2-svp__0__tda__singlet__5__0560854ab7,water,RKS,0,0,def2-svp,pbe,0,tda,singlet,5,graddft_supported
+water__RKS__pbe__def2-svp__0__tddft__singlet__5__56a4c044ae,water,RKS,0,0,def2-svp,pbe,0,tddft,singlet,5,graddft_supported

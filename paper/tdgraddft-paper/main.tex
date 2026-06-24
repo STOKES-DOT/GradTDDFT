@@ -1,7 +1,17 @@
-\documentclass[aip,jcp,amsmath,amssymb,preprint]{revtex4-2}
+\documentclass[%
+ aip,
+ jmp,
+ amsmath,amssymb,
+ reprint, onecolumn
+]{revtex4-1}
 
-\usepackage[T1]{fontenc}
 \usepackage{graphicx}
+\usepackage{dcolumn}
+\usepackage{bm}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{mathptmx}
+\usepackage{etoolbox}
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage[version=4]{mhchem}
@@ -9,16 +19,27 @@
 \usetikzlibrary{arrows.meta,fit,positioning}
 \usepackage[colorlinks=true,citecolor=blue,linkcolor=blue]{hyperref}
 
+% AIP requests that the corresponding email be placed after the affiliations.
+\makeatletter
+\def\@email#1#2{%
+ \endgroup
+ \patchcmd{\titleblock@produce}
+  {\frontmatter@RRAPformat}
+  {\frontmatter@RRAPformat{\produce@RRAP{*#1\href{mailto:#2}{#2}}}\frontmatter@RRAPformat}
+  {}{}%
+}%
+\makeatother
+
 \begin{document}
 
-\author{Yuan Jiao}
-\email[]{jiaoyuan24@mails.ucas.ac.cn}
-\affiliation{School of Advanced Interdisciplinary Sciences,
- University of Chinese Academy of Sciences, Beijing, China}
-
-\title{GradTDDFT: A Differentiable Time-Dependent Density Functional
+\title[GradTDDFT]{GradTDDFT: A Differentiable Time-Dependent Density Functional
  Theory Framework for Training Neural Network
  Exchange-Correlation Functionals}
+
+\author{Yuan Jiao}
+\email{jiaoyuan24@mails.ucas.ac.cn}
+\affiliation{School of Advanced Interdisciplinary Sciences,
+ University of Chinese Academy of Sciences, Beijing, China}
 
 \date{\today}
 

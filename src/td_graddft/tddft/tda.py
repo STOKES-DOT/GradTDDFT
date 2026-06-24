@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import jax.numpy as jnp
-from jax import core as jax_core
 
 from .eigensolvers import PYSCF_TD_DAVIDSON_MAX_CYCLE
 from .eigensolvers import PYSCF_TD_DAVIDSON_TOL
@@ -11,10 +10,6 @@ from .eigensolvers import PYSCF_TD_POSITIVE_EIG_THRESHOLD
 from .eigensolvers import _davidson_search_nroots
 from .eigensolvers import implicit_differential_davidson_lowest_symmetric
 from .types import TDAResult
-
-
-def _is_traced_convergence_flag(value) -> bool:
-    return isinstance(value, jax_core.Tracer)
 
 
 def _finalize_tda_result(
@@ -25,6 +20,7 @@ def _finalize_tda_result(
     excitation_threshold: float,
     nocc: int,
     nvir: int,
+    converged=True,
 ) -> TDAResult:
     valid = eigvals > excitation_threshold
     order = jnp.argsort(jnp.where(valid, eigvals, jnp.inf))
@@ -36,6 +32,7 @@ def _finalize_tda_result(
     return TDAResult(
         excitation_energies=energies,
         amplitudes=amplitudes,
+        converged=converged,
     )
 
 
@@ -68,8 +65,6 @@ def solve_tda_from_operator(
         max_trial_vectors=davidson_max_trial_vectors,
         positive_eig_threshold=excitation_threshold,
     )
-    if not _is_traced_convergence_flag(converged) and not bool(converged):
-        raise RuntimeError("Davidson TDA solver did not converge.")
     return _finalize_tda_result(
         eigvals,
         eigvecs,
@@ -77,4 +72,5 @@ def solve_tda_from_operator(
         excitation_threshold=excitation_threshold,
         nocc=nocc,
         nvir=nvir,
+        converged=converged,
     )

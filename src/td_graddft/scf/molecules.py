@@ -112,6 +112,7 @@ class UnrestrictedMolecule:
     hfx_nu_api: Any | None = None
     pt2_local: jnp.ndarray | None = None
     scf_initial_density: jnp.ndarray | None = None
+    df_factors: jnp.ndarray | None = None
     runtime_scf_backend: str | None = None
     runtime_scf_options: Any | None = None
 

@@ -60,17 +60,19 @@ def test_davidson_search_nroots_matches_pyscf_requested_root_count():
     assert _davidson_search_nroots(20, 12) == 12
 
 
-def test_tda_rejects_roots_below_pyscf_positive_threshold():
+def test_tda_flags_roots_below_pyscf_positive_threshold_as_nonconverged():
     flat_a = np.diag(np.asarray([5.0e-4], dtype=np.float64))
     delta_eps = jnp.asarray([[5.0e-4]], dtype=jnp.float64)
 
-    with pytest.raises(RuntimeError, match="Davidson TDA solver did not converge"):
-        solve_tda_from_operator(
-            delta_eps,
-            _tda_vind(flat_a),
-            jnp.diag(jnp.asarray(flat_a)),
-            nstates=1,
-        )
+    result = solve_tda_from_operator(
+        delta_eps,
+        _tda_vind(flat_a),
+        jnp.diag(jnp.asarray(flat_a)),
+        nstates=1,
+    )
+
+    np.testing.assert_allclose(np.asarray(result.excitation_energies), np.asarray([0.0]))
+    assert not bool(np.asarray(result.converged))
 
 
 def test_operator_solvers_use_requested_root_count_by_default():
@@ -106,18 +108,20 @@ def test_operator_solvers_use_requested_root_count_by_default():
     np.testing.assert_allclose(np.asarray(casida.excitation_energies), np.asarray([2.0]))
 
 
-def test_restricted_casida_raises_when_davidson_does_not_converge():
+def test_restricted_casida_returns_nonconverged_ritz_result():
     flat_a = np.diag(np.asarray([0.8, 1.2, 1.6, 2.0], dtype=np.float64))
     flat_b = np.zeros_like(flat_a)
     delta_eps = jnp.asarray([[0.8, 1.2], [1.6, 2.0]], dtype=jnp.float64)
 
-    with pytest.raises(RuntimeError, match="Davidson TDDFT solver did not converge"):
-        solve_casida_from_tdhf_operator(
-            delta_eps,
-            _tdhf_vind(flat_a, flat_b),
-            nstates=1,
-            davidson_max_iter=0,
-        )
+    result = solve_casida_from_tdhf_operator(
+        delta_eps,
+        _tdhf_vind(flat_a, flat_b),
+        nstates=1,
+        davidson_max_iter=0,
+    )
+
+    np.testing.assert_allclose(np.asarray(result.excitation_energies), np.asarray([0.0]))
+    assert not bool(np.asarray(result.converged))
 
 
 def test_davidson_restart_matches_numpy_on_random_symmetric_matrix():

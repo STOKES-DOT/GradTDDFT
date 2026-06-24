@@ -187,7 +187,11 @@ class _BaseTD:
         self.e = result.excitation_energies
         self.e_ev = self.e * HARTREE_TO_EV
         self.xy = _xy_from_result(result)
-        self.converged = True
+        converged = getattr(result, "converged", True)
+        try:
+            self.converged = bool(converged)
+        except (TypeError, ValueError):
+            self.converged = converged
         return result
 
     def _require_result(self) -> Any:

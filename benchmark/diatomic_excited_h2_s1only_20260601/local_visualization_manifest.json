@@ -1,0 +1,32 @@
+{
+  "description": "Local visualization assets for completed H2 S1-only TDA bond-scan runs.",
+  "base_dir": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601",
+  "runs": [
+    {
+      "label": "H2 S1-only no PT2",
+      "run_dir": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_nopt2_lr1e4_decay400_20260601_1918",
+      "dense_curve_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_nopt2_lr1e4_decay400_20260601_1918/h2_s1_tda_dense_curve.csv",
+      "excited_curve_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_nopt2_lr1e4_decay400_20260601_1918/h2_s1_tda_excited_curve.csv",
+      "reference_points_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_nopt2_lr1e4_decay400_20260601_1918/h2_s1_reference_points.csv",
+      "training_history_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_nopt2_lr1e4_decay400_20260601_1918/training_history.csv",
+      "curve_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_nopt2_lr1e4_decay400_20260601_1918/h2_s1_tda_dense_curve.png",
+      "spectrum_sticks_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_nopt2_lr1e4_decay400_20260601_1918/h2_equilibrium_tda_spectrum_vs_fci_sticks.csv",
+      "spectrum_broadened_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_nopt2_lr1e4_decay400_20260601_1918/h2_equilibrium_tda_spectrum_vs_fci_broadened.csv",
+      "spectrum_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_nopt2_lr1e4_decay400_20260601_1918/h2_equilibrium_tda_spectrum_vs_fci.png",
+      "summary_json": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_nopt2_lr1e4_decay400_20260601_1918/summary.json"
+    },
+    {
+      "label": "H2 S1-only strict PT2",
+      "run_dir": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918",
+      "dense_curve_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_s1_tda_dense_curve.csv",
+      "excited_curve_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_s1_tda_excited_curve.csv",
+      "reference_points_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_s1_reference_points.csv",
+      "training_history_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/training_history.csv",
+      "curve_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_s1_tda_dense_curve.png",
+      "spectrum_sticks_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_equilibrium_tda_spectrum_vs_fci_sticks.csv",
+      "spectrum_broadened_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_equilibrium_tda_spectrum_vs_fci_broadened.csv",
+      "spectrum_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_equilibrium_tda_spectrum_vs_fci.png",
+      "summary_json": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/diatomic_excited_h2_s1only_20260601/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/summary.json"
+    }
+  ]
+}

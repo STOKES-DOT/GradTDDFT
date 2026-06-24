@@ -52,6 +52,9 @@ class UKSConfig:
     orthogonalization_eps: float = 1e-10
     density_floor: float = 1e-12
     potential_clip: float | None = None
+    jk_backend: Literal["full", "df"] = "full"
+    df_tol: float = 1e-10
+    df_max_rank: int | None = None
 
 
 @dataclass(frozen=True)
@@ -208,8 +211,34 @@ def _spin_jk_matrices(
     eri: Array,
     density_a: Array,
     density_b: Array,
+    df_factors: Array | None = None,
+    mo_coeff_a: Array | None = None,
+    mo_coeff_b: Array | None = None,
+    mo_occ_a: Array | None = None,
+    mo_occ_b: Array | None = None,
 ) -> tuple[Array, Array, Array, Array]:
     density_tot = density_a + density_b
+    if df_factors is not None:
+        factors = jnp.asarray(df_factors)
+        rho_aux = jnp.einsum("Qpq,pq->Q", factors, density_tot, precision=Precision.HIGHEST)
+        j_tot = jnp.einsum("Q,Qpq->pq", rho_aux, factors, precision=Precision.HIGHEST)
+
+        def _k_from_density_or_orbitals(density: Array, coeff: Array | None, occ: Array | None) -> Array:
+            if coeff is None or occ is None:
+                projected = jnp.matmul(factors, density, precision=Precision.HIGHEST)
+                k_mat = jnp.einsum("Qps,Qqs->pq", projected, factors, precision=Precision.HIGHEST)
+            else:
+                weighted = jnp.asarray(coeff, dtype=factors.dtype) * jnp.sqrt(
+                    jnp.maximum(jnp.asarray(occ, dtype=factors.dtype), 0.0)
+                )[None, :]
+                b_occ = jnp.einsum("Qpr,ri->Qpi", factors, weighted, precision=Precision.HIGHEST)
+                k_mat = jnp.einsum("Qpi,Qqi->pq", b_occ, b_occ, precision=Precision.HIGHEST)
+            return 0.5 * (k_mat + k_mat.T)
+
+        k_a = _k_from_density_or_orbitals(density_a, mo_coeff_a, mo_occ_a)
+        k_b = _k_from_density_or_orbitals(density_b, mo_coeff_b, mo_occ_b)
+        j_tot = 0.5 * (j_tot + j_tot.T)
+        return density_tot, j_tot, k_a, k_b
     j_tot, _ = _build_jk(eri, density_tot)
     _, k_a = _build_jk(eri, density_a)
     _, k_b = _build_jk(eri, density_b)
@@ -265,6 +294,7 @@ def _raw_fock_and_energy_for_state(
     weights: Array,
     h: Array,
     eri: Array,
+    df_factors: Array | None,
     enuc: Array,
     alpha: Array | None,
     cfg: UKSConfig,
@@ -279,7 +309,16 @@ def _raw_fock_and_energy_for_state(
     bound_xc: Any | None = None,
     molecule_template: Any | None = None,
 ) -> tuple[Array, Array, Array, Array]:
-    density_tot, j_tot, k_a, k_b = _spin_jk_matrices(eri, density_a, density_b)
+    density_tot, j_tot, k_a, k_b = _spin_jk_matrices(
+        eri,
+        density_a,
+        density_b,
+        df_factors=df_factors,
+        mo_coeff_a=mo_coeff_a,
+        mo_coeff_b=mo_coeff_b,
+        mo_occ_a=mo_occ_a,
+        mo_occ_b=mo_occ_b,
+    )
     extra_fock_a = extra_fock_b = jnp.zeros_like(h)
     include_hf_energy = bound_xc is None
     if bound_xc is None:
@@ -668,6 +707,7 @@ def run_uks_from_integrals(
     init_mo_occ_beta: Array | None = None,
     init_mo_energy_alpha: Array | None = None,
     init_mo_energy_beta: Array | None = None,
+    df_factors: Array | None = None,
     config: UKSConfig | None = None,
     bound_xc: Any | None = None,
     molecule_template: Any | None = None,
@@ -687,11 +727,14 @@ def run_uks_from_integrals(
     s = jnp.asarray(overlap)
     h = jnp.asarray(hcore)
     eri = jnp.asarray(eri)
+    df_factors_arr = None if df_factors is None else jnp.asarray(df_factors)
     ao = jnp.asarray(ao)
     ao_deriv1 = jnp.asarray(ao_deriv1)
     weights = jnp.asarray(grid_weights)
     enuc = jnp.asarray(nuclear_repulsion)
-    traceable_inputs = _contains_jax_tracer((s, h, eri, ao, ao_deriv1, weights, enuc))
+    if cfg.jk_backend == "df" and df_factors_arr is None:
+        raise ValueError("UKS jk_backend='df' requires df_factors.")
+    traceable_inputs = _contains_jax_tracer((s, h, eri, df_factors_arr, ao, ao_deriv1, weights, enuc))
     nao = int(s.shape[0])
     if nalpha < 0 or nalpha > nao or nbeta < 0 or nbeta > nao or (nalpha + nbeta) <= 0:
         raise ValueError("Invalid occupation counts for UKS.")
@@ -758,6 +801,7 @@ def run_uks_from_integrals(
             weights=weights,
             h=h,
             eri=eri,
+            df_factors=df_factors_arr if cfg.jk_backend == "df" else None,
             enuc=enuc,
             alpha=alpha,
             cfg=cfg,

@@ -1,0 +1,13 @@
+task_id,molecule,scf_type,charge,spin_2s,basis,xc,grid_level,response_solver,spin_channel,nstates,support_status
+water__RKS__b3lyp__def2-svp__0__tda__singlet__5__2910305ef3,water,RKS,0,0,def2-svp,b3lyp,0,tda,singlet,5,graddft_supported
+water__RKS__b3lyp__def2-svp__0__tddft__singlet__5__db722eb5e1,water,RKS,0,0,def2-svp,b3lyp,0,tddft,singlet,5,graddft_supported
+co__RKS__b3lyp__def2-svp__0__tda__singlet__5__5c2bc69c62,co,RKS,0,0,def2-svp,b3lyp,0,tda,singlet,5,graddft_supported
+co__RKS__b3lyp__def2-svp__0__tddft__singlet__5__41a2d81dec,co,RKS,0,0,def2-svp,b3lyp,0,tddft,singlet,5,graddft_supported
+n2__RKS__b3lyp__def2-svp__0__tda__singlet__5__997584bb47,n2,RKS,0,0,def2-svp,b3lyp,0,tda,singlet,5,graddft_supported
+n2__RKS__b3lyp__def2-svp__0__tddft__singlet__5__437f678bbc,n2,RKS,0,0,def2-svp,b3lyp,0,tddft,singlet,5,graddft_supported
+ethylene__RKS__b3lyp__def2-svp__0__tda__singlet__5__919490fad7,ethylene,RKS,0,0,def2-svp,b3lyp,0,tda,singlet,5,graddft_supported
+ethylene__RKS__b3lyp__def2-svp__0__tddft__singlet__5__95f17d9344,ethylene,RKS,0,0,def2-svp,b3lyp,0,tddft,singlet,5,graddft_supported
+formaldehyde__RKS__b3lyp__def2-svp__0__tda__singlet__5__e1645337ec,formaldehyde,RKS,0,0,def2-svp,b3lyp,0,tda,singlet,5,graddft_supported
+formaldehyde__RKS__b3lyp__def2-svp__0__tddft__singlet__5__2586db55d1,formaldehyde,RKS,0,0,def2-svp,b3lyp,0,tddft,singlet,5,graddft_supported
+benzene__RKS__b3lyp__def2-svp__0__tda__singlet__5__d2f0093852,benzene,RKS,0,0,def2-svp,b3lyp,0,tda,singlet,5,graddft_supported
+benzene__RKS__b3lyp__def2-svp__0__tddft__singlet__5__9f858a2ce9,benzene,RKS,0,0,def2-svp,b3lyp,0,tddft,singlet,5,graddft_supported

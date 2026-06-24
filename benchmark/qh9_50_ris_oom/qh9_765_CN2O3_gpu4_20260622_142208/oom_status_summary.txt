@@ -1,0 +1,14 @@
+status=completed_no_oom
+system=qh9_765_CN2O3
+heavy_atoms=6
+basis=def2-svp
+training_mode=self_consistent
+steps=1
+response_df_mode=ris
+response_two_electron_mode=ris
+reference_jk_backend=df
+gpu_uuid=GPU-7a6aac16-5c9b-e899-49ab-f43e10bcf2f5
+observed_gpu_memory_mb=823_to_1081_during_polling
+final_train_loss=8.711113780819368e-02
+final_train_s1_mae_h=8.061272618518592e-02
+elapsed_s=202.84

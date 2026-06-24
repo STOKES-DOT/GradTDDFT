@@ -1,0 +1,6 @@
+status=post_training_eval_failed_davidson_tda_not_converged
+training_steps_completed=3
+first_total_loss=1.267640000000e+02
+final_total_loss=1.231953000000e+02
+any_grad_nan=False
+any_grad_inf=False

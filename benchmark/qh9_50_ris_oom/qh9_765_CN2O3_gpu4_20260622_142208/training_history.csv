@@ -1,0 +1,3 @@
+step,loss_pre_update,s1_mae_pre_update,grad_norm,grad_abs_max,param_update_norm,nonfinite_grad_fraction,train_loss_reevaluated,train_s1_mae_reevaluated,val_loss_reevaluated,val_s1_mae_reevaluated
+0,nan,nan,nan,nan,nan,0.0,nan,nan,nan,nan
+1,0.08711113780819368,0.08061272618518592,0.05605532228946686,nan,0.0207525584846735,0.0,nan,nan,nan,nan

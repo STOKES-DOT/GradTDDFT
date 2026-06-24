@@ -1,0 +1,40 @@
+{
+  "molecule": "benzene",
+  "xc": "b3lyp",
+  "basis": "def2-svp",
+  "grids_level": 0,
+  "nstates": 3,
+  "pyscf_initial_guess_count": 4,
+  "ris_theta": 0.2,
+  "ris_j_fit": "sp",
+  "ris_k_fit": "s",
+  "davidson_tol": 1e-05,
+  "davidson_max_iter": 100,
+  "davidson_max_subspace": null,
+  "davidson_max_trial_vectors": 20,
+  "excitation_threshold": 0.001,
+  "jax_response_solver": "pyscf.tdscf.rhf.lr_eigh",
+  "results_csv": "benchmark/benzene_ris_vs_noris_pyscf_tda/benzene_b3lyp_def2svp_grid0_n3_gpu0_pyscf_lreigh_operator_20260622_145948/benzene_b3lyp_tda_ris_vs_noris_pyscf.csv",
+  "elapsed_s": {
+    "pyscf": 18.450331364001613,
+    "jax_noris_direct": 8.437434432969894,
+    "jax_ris": 2.623030218994245
+  },
+  "energies_ev": {
+    "pyscf": [
+      5.512799334546913,
+      6.481197236780699,
+      7.93830322079829
+    ],
+    "jax_noris_direct": [
+      5.51279907587165,
+      6.481197258565665,
+      7.938303161408833
+    ],
+    "jax_ris": [
+      5.305054450789661,
+      6.021557395924186,
+      7.610072876061479
+    ]
+  }
+}

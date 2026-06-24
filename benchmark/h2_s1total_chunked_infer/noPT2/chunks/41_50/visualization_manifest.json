@@ -1,0 +1,49 @@
+{
+  "description": "Data files needed to reproduce H2 bond-scan training visualizations.",
+  "figures": [
+    {
+      "data_files": [
+        "outputs/h2_s1total_tda_train5_dense100_chunked_infer_20260623_134451/nopt2/chunks/41_50/h2_s1_tda_dense_curve.csv",
+        "outputs/h2_s1total_tda_train5_dense100_chunked_infer_20260623_134451/nopt2/chunks/41_50/h2_s1_tda_excited_curve.csv",
+        "outputs/h2_s1total_tda_train5_dense100_chunked_infer_20260623_134451/nopt2/chunks/41_50/h2_s1_tda_dense_curve_partial.csv",
+        "outputs/h2_s1total_tda_train5_dense100_chunked_infer_20260623_134451/nopt2/chunks/41_50/h2_s1_tda_excited_curve_partial.csv",
+        "outputs/h2_s1total_tda_train5_dense100_chunked_infer_20260623_134451/nopt2/chunks/41_50/h2_s1_reference_points.csv",
+        "outputs/h2_s1total_tda_train5_dense100_chunked_infer_20260623_134451/nopt2/chunks/41_50/training_history.csv"
+      ],
+      "figure": "outputs/h2_s1total_tda_train5_dense100_chunked_infer_20260623_134451/nopt2/chunks/41_50/h2_s1_tda_dense_curve.png",
+      "x": "r_angstrom",
+      "y": [
+        "fci_energy_h",
+        "exact_energy_h",
+        "predicted_energy_h",
+        "fci_s1_total_energy_h",
+        "exact_s1_total_energy_h",
+        "predicted_s1_total_energy_h",
+        "fci_s1_h",
+        "exact_s1_h",
+        "predicted_s1_h",
+        "energy_abs_err_ev",
+        "s1_total_abs_err_ev",
+        "s1_gap_abs_err_ev",
+        "density_l2"
+      ]
+    },
+    {
+      "data_files": [
+        "outputs/h2_s1total_tda_train5_dense100_chunked_infer_20260623_134451/nopt2/chunks/41_50/training_history.csv"
+      ],
+      "figure": "outputs/h2_s1total_tda_train5_dense100_chunked_infer_20260623_134451/nopt2/chunks/41_50/training_loss.png",
+      "x": "step",
+      "y": [
+        "loss_pre_update",
+        "e1_total_penalty_pre_update",
+        "e1_total_mae_pre_update",
+        "e1_total_mse_pre_update",
+        "grad_norm",
+        "grad_abs_max",
+        "param_update_norm"
+      ]
+    }
+  ],
+  "paper_experiment": "Bond-Scan S0/S1 Benchmarks"
+}

@@ -439,6 +439,58 @@ def _df_factors_from_molecule(molecule: Any) -> Array | None:
     return factors
 
 
+def _unrestricted_coulomb_exchange_matrices(
+    rep_tensor: Array,
+    density_spin: Array,
+    df_factors: Array | None,
+    mo_coeff_spin: Array | None = None,
+    mo_occ_spin: Array | None = None,
+    with_k: bool = True,
+) -> tuple[Array, Array, Array]:
+    density_total = density_spin.sum(axis=0)
+    if df_factors is not None:
+        factors = jnp.asarray(df_factors)
+        rho_aux = jnp.einsum("Qpq,pq->Q", factors, density_total, precision=Precision.HIGHEST)
+        j_mat = jnp.einsum("Q,Qpq->pq", rho_aux, factors, precision=Precision.HIGHEST)
+        j_mat = 0.5 * (j_mat + j_mat.T)
+        if not bool(with_k):
+            zero_k = jnp.zeros_like(j_mat)
+            return j_mat, zero_k, zero_k
+
+        def _k_from_density_or_orbitals(idx: int) -> Array:
+            if mo_coeff_spin is None or mo_occ_spin is None:
+                projected = jnp.matmul(factors, density_spin[idx], precision=Precision.HIGHEST)
+                k_mat = jnp.einsum("Qps,Qqs->pq", projected, factors, precision=Precision.HIGHEST)
+            else:
+                weighted = jnp.asarray(mo_coeff_spin[idx], dtype=factors.dtype) * jnp.sqrt(
+                    jnp.maximum(jnp.asarray(mo_occ_spin[idx], dtype=factors.dtype), 0.0)
+                )[None, :]
+                b_occ = jnp.einsum("Qpr,ri->Qpi", factors, weighted, precision=Precision.HIGHEST)
+                k_mat = jnp.einsum("Qpi,Qqi->pq", b_occ, b_occ, precision=Precision.HIGHEST)
+            return 0.5 * (k_mat + k_mat.T)
+
+        k_alpha = _k_from_density_or_orbitals(0)
+        k_beta = _k_from_density_or_orbitals(1)
+        return j_mat, k_alpha, k_beta
+    j_mat, _ = _coulomb_exchange_matrices(rep_tensor, density_total)
+    if not bool(with_k):
+        zero_k = jnp.zeros_like(j_mat)
+        return j_mat, zero_k, zero_k
+    _, k_alpha = _coulomb_exchange_matrices(rep_tensor, density_spin[0])
+    _, k_beta = _coulomb_exchange_matrices(rep_tensor, density_spin[1])
+    return j_mat, k_alpha, k_beta
+
+
+def _functional_needs_unrestricted_exchange(functional: Any) -> bool:
+    uses_hfx_channel = getattr(functional, "_uses_hfx_channel", None)
+    if callable(uses_hfx_channel):
+        return bool(uses_hfx_channel())
+    include_hfx = getattr(functional, "include_hfx_channel", None)
+    if include_hfx is not None:
+        return bool(include_hfx)
+    return True
+
+
 def _scf_problem_arrays(molecule: Any) -> tuple[Array, Array, Array, Array, Array]:
     if getattr(molecule, "h1e", None) is None:
         raise AttributeError("Molecule-like object must define h1e for self-consistent mode.")
@@ -1249,7 +1301,7 @@ class DifferentiableSCF:
     ) -> tuple[Any, DifferentiableSCFInfo]:
         if _is_unrestricted_reference(molecule):
             if self.config.gradient_mode == "impl":
-                return self._full_scf_implicit_commutator_unrestricted(
+                return self._full_scf_implicit_fixed_point_unrestricted(
                     molecule,
                     xc_functional,
                     xc_params,
@@ -1311,6 +1363,8 @@ class DifferentiableSCF:
         xc_params: PyTree,
     ) -> tuple[Any, DifferentiableSCFInfo]:
         h1e, rep_tensor, ao, weights, overlap = _scf_problem_arrays(molecule)
+        df_factors = _df_factors_from_molecule(molecule)
+        with_exchange = _functional_needs_unrestricted_exchange(xc_functional)
 
         density_spin0 = _initial_density_matrix_spin(molecule)
         cached_initial_density = getattr(molecule, "scf_initial_density", None)
@@ -1346,9 +1400,14 @@ class DifferentiableSCF:
             molecule_iter = _replace_molecule(molecule, **updates)
 
             density_total = density_spin.sum(axis=0)
-            j_mat, _ = _coulomb_exchange_matrices(rep_tensor, density_total)
-            _, k_alpha = _coulomb_exchange_matrices(rep_tensor, density_spin[0])
-            _, k_beta = _coulomb_exchange_matrices(rep_tensor, density_spin[1])
+            j_mat, k_alpha, k_beta = _unrestricted_coulomb_exchange_matrices(
+                rep_tensor,
+                density_spin,
+                df_factors,
+                mo_coeff_spin=mo_coeff_ref_spin,
+                mo_occ_spin=mo_occ_spin_fixed,
+                with_k=with_exchange,
+            )
             (
                 vxc_rho_a,
                 vxc_rho_b,
@@ -1475,7 +1534,7 @@ class DifferentiableSCF:
             best_rms_density=best_rms,
         )
 
-    def _full_scf_implicit_commutator_unrestricted(
+    def _full_scf_implicit_fixed_point_unrestricted(
         self,
         molecule: Any,
         xc_functional: Any,
@@ -1498,12 +1557,19 @@ class DifferentiableSCF:
         mo_coeff_spin_ref, mo_occ_spin_fixed, mo_energy_spin_ref = _unrestricted_channel(
             forward_molecule
         )
+        mo_coeff_spin_ref = jax.lax.stop_gradient(mo_coeff_spin_ref)
+        mo_occ_spin_fixed = jax.lax.stop_gradient(mo_occ_spin_fixed)
+        mo_energy_spin_ref = jax.lax.stop_gradient(mo_energy_spin_ref)
 
         h1e, rep_tensor, _ao, weights, overlap = _scf_problem_arrays(molecule)
+        x = _orthogonalizer(overlap, self.config.orthogonalization_eps)
+        df_factors = _df_factors_from_molecule(molecule)
+        with_exchange = _functional_needs_unrestricted_exchange(xc_functional)
         fixed_point_args = None
         if _is_traceable_pytree(molecule):
             fixed_point_args = (
                 molecule,
+                x,
                 mo_coeff_spin_ref,
                 mo_occ_spin_fixed,
                 mo_energy_spin_ref,
@@ -1511,19 +1577,21 @@ class DifferentiableSCF:
 
         def _unrestricted_args(
             args: tuple[Any, ...] | None,
-        ) -> tuple[Any, Array, Array, Array, Array, Array, Array, Array]:
+        ) -> tuple[Any, Array, Array, Array | None, Array, Array, Array, Array, Array, Array]:
             if args is None:
                 return (
                     molecule,
                     h1e,
                     rep_tensor,
+                    df_factors,
                     weights,
                     overlap,
+                    x,
                     mo_coeff_spin_ref,
                     mo_occ_spin_fixed,
                     mo_energy_spin_ref,
                 )
-            molecule_arg, coeff_ref_arg, occ_fixed_arg, energy_ref_arg = args
+            molecule_arg, x_arg, coeff_ref_arg, occ_fixed_arg, energy_ref_arg = args
             h1e_arg, rep_tensor_arg, _ao_arg, weights_arg, overlap_arg = _scf_problem_arrays(
                 molecule_arg
             )
@@ -1531,14 +1599,16 @@ class DifferentiableSCF:
                 molecule_arg,
                 h1e_arg,
                 rep_tensor_arg,
+                _df_factors_from_molecule(molecule_arg),
                 weights_arg,
                 overlap_arg,
+                x_arg,
                 coeff_ref_arg,
                 occ_fixed_arg,
                 energy_ref_arg,
             )
 
-        def _raw_fock_from_density(
+        def _fock_from_density(
             density_spin: Array,
             params_local: PyTree,
             args: tuple[Any, ...] | None = fixed_point_args,
@@ -1547,8 +1617,10 @@ class DifferentiableSCF:
                 molecule_base,
                 h1e_local,
                 rep_tensor_local,
+                df_factors_local,
                 weights_local,
                 _overlap_local,
+                _x_local,
                 mo_coeff_ref_local,
                 mo_occ_fixed_local,
                 mo_energy_ref_local,
@@ -1561,10 +1633,12 @@ class DifferentiableSCF:
                 mo_energy=mo_energy_ref_local,
             )
             molecule_iter = _replace_molecule(molecule_base, **updates)
-            density_total = density_spin.sum(axis=0)
-            j_mat, _ = _coulomb_exchange_matrices(rep_tensor_local, density_total)
-            _, k_alpha = _coulomb_exchange_matrices(rep_tensor_local, density_spin[0])
-            _, k_beta = _coulomb_exchange_matrices(rep_tensor_local, density_spin[1])
+            j_mat, k_alpha, k_beta = _unrestricted_coulomb_exchange_matrices(
+                rep_tensor_local,
+                density_spin,
+                df_factors_local,
+                with_k=with_exchange,
+            )
             (
                 vxc_rho_a,
                 vxc_rho_b,
@@ -1631,39 +1705,48 @@ class DifferentiableSCF:
             )
             return fock_spin
 
-        def _residual(
+        def _density_from_fock(
+            fock_spin: Array,
+            args: tuple[Any, ...] | None,
+        ) -> tuple[Array, Array, Array]:
+            (
+                _molecule_base,
+                _h1e_local,
+                _rep_tensor_local,
+                _df_factors_local,
+                _weights_local,
+                _overlap_local,
+                x_local,
+                _mo_coeff_ref_local,
+                mo_occ_fixed_local,
+                _mo_energy_ref_local,
+            ) = _unrestricted_args(args)
+            mo_energy_new, mo_coeff_new = jax.vmap(
+                lambda fock: _diagonalize_fock(
+                    _safe_symmetric_matrix(fock),
+                    x_local,
+                    eigenvalue_jitter=self.config.eigenvalue_jitter,
+                )
+            )(fock_spin)
+            density_new = jax.vmap(_build_density_from_occ)(
+                jnp.nan_to_num(mo_coeff_new, nan=0.0, posinf=0.0, neginf=0.0),
+                mo_occ_fixed_local,
+            )
+            density_new = jnp.nan_to_num(density_new, nan=0.0, posinf=0.0, neginf=0.0)
+            return density_new, mo_coeff_new, mo_energy_new
+
+        def _fixed_point_density_impl(
             density_spin: Array,
             params_local: PyTree,
             args: tuple[Any, ...] | None = fixed_point_args,
         ) -> Array:
-            _molecule_base, _h1e_local, _rep_tensor_local, _weights_local, overlap_local, *_ = (
-                _unrestricted_args(args)
-            )
             density_spin = jnp.nan_to_num(density_spin, nan=0.0, posinf=0.0, neginf=0.0)
-            fock_spin = _raw_fock_from_density(density_spin, params_local, args)
-            residual_spin = jnp.stack(
-                [
-                    fock_spin[0] @ density_spin[0] @ overlap_local
-                    - overlap_local @ density_spin[0] @ fock_spin[0],
-                    fock_spin[1] @ density_spin[1] @ overlap_local
-                    - overlap_local @ density_spin[1] @ fock_spin[1],
-                ],
-                axis=0,
-            )
-            residual_spin = jnp.nan_to_num(
-                residual_spin,
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
-            )
-            residual_spin = jnp.clip(
-                residual_spin,
-                -self.config.implicit_diff_clip,
-                self.config.implicit_diff_clip,
-            )
-            return residual_spin
+            fock_spin = _fock_from_density(density_spin, params_local, args)
+            density_new, _mo_coeff_new, _mo_energy_new = _density_from_fock(fock_spin, args)
+            return density_new
 
         implicit_cfg = ImplicitFixedPointConfig(
+            solver_name="neumann",
             tolerance=float(self.config.implicit_diff_tolerance),
             max_iter=int(self.config.implicit_diff_max_iter),
             regularization=float(self.config.implicit_diff_regularization),
@@ -1671,29 +1754,37 @@ class DifferentiableSCF:
         )
 
         if fixed_point_args is None:
-            def _fixed_point_from_residual(
+            def _fixed_point_density(
                 density_spin: Array,
                 params_local: PyTree,
             ) -> Array:
-                return density_spin + _residual(density_spin, params_local)
+                return _fixed_point_density_impl(density_spin, params_local)
         else:
-            def _fixed_point_from_residual(
+            def _fixed_point_density(
                 density_spin: Array,
                 params_local: PyTree,
                 args: tuple[Any, ...],
             ) -> Array:
-                return density_spin + _residual(density_spin, params_local, args)
+                return _fixed_point_density_impl(density_spin, params_local, args)
 
         density_spin_implicit = implicit_fixed_point_solution(
             xc_params,
             solution=density_star_spin,
-            fixed_point=_fixed_point_from_residual,
+            fixed_point=_fixed_point_density,
             fixed_point_args=fixed_point_args,
             config=implicit_cfg,
+        )
+        fock_spin_implicit = _fock_from_density(density_spin_implicit, xc_params)
+        _density_spin_final, mo_coeff_spin_implicit, mo_energy_spin_implicit = _density_from_fock(
+            fock_spin_implicit,
+            None,
         )
         molecule_final = _replace_molecule(
             forward_molecule,
             rdm1=density_spin_implicit,
+            mo_coeff=mo_coeff_spin_implicit,
+            mo_occ=mo_occ_spin_fixed,
+            mo_energy=mo_energy_spin_implicit,
         )
         return molecule_final, replace(forward_info, mode="self_consistent_implicit")
 
