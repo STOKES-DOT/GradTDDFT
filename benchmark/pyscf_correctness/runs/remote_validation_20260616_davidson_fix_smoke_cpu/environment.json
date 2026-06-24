@@ -1,0 +1,43 @@
+{
+  "args": {
+    "bases": [
+      "def2-svp"
+    ],
+    "energy_tol_ev": 0.05,
+    "grid_level": 0,
+    "matrix_max_elements": 500000,
+    "max_tasks": null,
+    "molecules": [
+      "ethylene",
+      "water",
+      "co",
+      "n2"
+    ],
+    "nstates": 5,
+    "osc_tol": 0.05,
+    "outdir": "benchmark/pyscf_correctness/runs/remote_validation_20260616_davidson_fix_smoke_cpu",
+    "preset": "smoke",
+    "skip_existing": false,
+    "solvers": [
+      "tda",
+      "tddft"
+    ],
+    "spin_channels": [
+      "singlet"
+    ],
+    "write_manifest_only": false,
+    "xcs": [
+      "pbe"
+    ]
+  },
+  "jax_default_backend": "cpu",
+  "jax_devices": [
+    "cpu:0"
+  ],
+  "jax_platforms": "cpu",
+  "jax_version": "0.10.0",
+  "platform": "Linux-4.18.0-348.el8.x86_64-x86_64-with-glibc2.28",
+  "pyscf_version": "2.13.0",
+  "python": "3.11.15 (main, Mar 11 2026, 17:20:07) [GCC 14.3.0]",
+  "timestamp_utc": "2026-06-16T09:35:07+00:00"
+}

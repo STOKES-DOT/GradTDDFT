@@ -1,208 +1,265 @@
 \section{Implementation}
 \label{sec:implementation}
 
-The implementation follows the same design principle that underlies
-GradDFT\cite{GradDFT}: fixed electronic-structure inputs are separated
-from the differentiable program that evaluates energies,
-self-consistent fields, response matrices, and losses.
-For GradTDDFT the distinction is extended to excited-state response.
-Molecular preprocessing constructs the fixed numerical representation
-of a calculation, while the differentiable core operates on density
-matrices, orbital rotations, local density variables, and neural
-functional parameters.
-
 % ======================================================================
-\subsection{Molecular State and Fixed Data}
+\subsection{Training Data Flow and Standard Training Loop}
+\label{sec:implementation-training-flow}
 
-A GradTDDFT calculation begins from the same physical inputs as a
-conventional KS or TDDFT calculation: nuclear charges and coordinates,
-charge, spin, basis set, exchange-correlation functional, quadrature
-grid, and convergence settings. PySCF is used to construct the
-molecule, basis metadata, quadrature grid, AO values on grid points,
-one-electron integrals, and electron-repulsion data. These quantities
-are then treated as fixed arrays during the differentiable SCF and
-response calculation. This boundary keeps the integral and grid
-generation path aligned with PySCF reference calculations while
-placing the density-dependent part of the method inside JAX.
-
-The fixed molecular state contains the overlap matrix $S$, core
-Hamiltonian $h$, grid weights, AO values and derivatives, nuclear
-repulsion energy, and the selected representation of the two-electron
-integrals. GradTDDFT supports dense electron-repulsion tensors,
-density-fitted contractions, and direct J/K construction. The choice
-of J/K backend changes how Coulomb and exchange contractions are
-formed, but not the mathematical objects passed to the SCF or TDDFT
-layers.
-
-% ======================================================================
-\subsection{Differentiable SCF and TDDFT Execution}
-
-After molecular preprocessing, the SCF layer is evaluated entirely as
-a differentiable fixed-point computation. For a density matrix $P$,
-the implementation assembles
+GradTDDFT is implemented around the same predictor--loss--optimizer
+organization used in machine-learning-enhanced DFT workflows such as
+GradDFT,\cite{GradDFT} but the predictor is extended from ground-state
+DFT to TDDFT response.  A training example is represented as
 \begin{equation}
-  F[P;\theta]
+  \mathcal{D}_k
   =
-  h + J[P] + F_{\rm xc}[P;\theta] + F_{\rm nl}[P;\theta],
+  \left(
+    \mathcal{I}_k,
+    \mathbf{y}^{\rm gs}_k,
+    \mathbf{y}^{\rm es}_k,
+    w_k
+  \right),
+  \label{eq:implementation-datum}
 \end{equation}
-where $J[P]$ is the Coulomb contribution, $F_{\rm xc}$ is the
-semilocal or neural XC potential, and $F_{\rm nl}$ denotes optional
-nonlocal HF and MP2/PT2-channel contributions. The SCF map diagonalizes
-the generalized eigenvalue problem, updates occupations and density,
-and repeats this operation until the selected convergence criteria are
-satisfied. The converged state stores orbitals, orbital energies,
-occupations, density matrices, total energies, and diagnostic
-residuals needed by both response calculations and training losses.
+where $\mathcal{I}_k$ contains the fixed numerical input for molecule
+$k$, $\mathbf{y}^{\rm gs}_k$ and $\mathbf{y}^{\rm es}_k$ denote
+ground-state and excited-state targets, and $w_k$ is a sample weight.
+The fixed input includes nuclear data, basis metadata, AO values on
+the molecular grid, one-electron integrals, two-electron contraction
+data, initial densities, and optional sources for local HF and PT2
+channels.  These sources may be cached grid descriptors or auxiliary
+contraction factors from which state-dependent descriptors are
+recomputed during SCF.  Only the neural functional parameters
+$\theta$ are updated during training.
 
-The differentiable program can be evaluated either through an
-explicit finite SCF trace or through an implicit fixed-point
-gradient. Both modes use the same molecular state and Fock-building
-path. This is important for comparing training objectives: changes in
-the gradient treatment should not change the forward SCF solution
-used to build the TDDFT response problem.
+The training workflow is organized into four operations.  First, a
+PySCF mean-field calculation is converted into a fixed numerical
+reference containing the molecule, basis metadata, grid information,
+one- and two-electron data, and optional local HF and PT2 descriptors.
+Second, the neural XC functional is assembled by choosing the
+semilocal energy-density channels and by enabling the HF and PT2
+channels required by the calculation.  The semilocal channels define
+the local energy-density basis, whereas the HF and PT2 options control
+additional functional components and the local descriptors that
+condition the coefficient model.
 
-The TDDFT layer is differentiated in the same operator-first spirit.
-For a converged SCF state, the implementation builds matrix actions
-for the TDA or full Casida response problem from orbital-energy
-differences, Coulomb and exchange contractions, semilocal XC response
-actions, and nonlocal neural-channel response terms. During training,
-the Davidson solver is used only as the forward numerical procedure
-for obtaining the requested low-lying roots. Following the implicit
-differentiation formulation for iterative eigensolvers by Lei Wang and
-co-workers,\cite{Xie2020DominantEigensolverAD} GradTDDFT uses a
-differentiable Davidson mode in which the reverse-mode derivative
-is not taken through the Davidson iteration history, but through the
-stationarity of the converged Ritz pairs. In practice, the
-matrix-vector products used inside the Davidson iterations are
-detached from the reverse pass. After convergence, the Ritz
-amplitudes are also held fixed and the excitation energy is
-reconstructed as a Rayleigh quotient of the current response
-operator. Gradients of excitation-energy losses therefore flow
-through the response matrix-action builder, the SCF fixed point, and
-the neural functional parameters, while avoiding a large
-differentiation tape for the iterative eigensolver. Oscillator
-strengths and broadened spectra are evaluated from the same forward
-roots; their present training path does not include an additional
-eigenvector-response derivative beyond this fixed-amplitude
-reconstruction. Detailed formulas for the TDA and Casida root-energy
-derivatives are given in the Supporting Information.
+Third, the training mode is selected.  Fixed-density training evaluates
+the objective on supplied densities, while self-consistent training
+first solves the differentiable SCF problem before evaluating the
+observable.  The self-consistent path can use either explicit
+differentiation through the SCF trace or an implicit fixed-point
+gradient.  Excited-state training uses the same molecular datum but
+adds TDA or Casida response targets and the selected response backend,
+such as the RIS approximation used for larger response calculations.
+Finally, ground-state and excited-state targets are packaged with the
+fixed molecular reference and passed to the optimizer.  The two
+training tasks share the same data-flow abstraction, but the reported
+ground-state and excited-state models are optimized in separate runs.
 
-% ======================================================================
-\subsection{Functional Evaluation and Response Core}
-
-The functional interface is organized around a local energy-density
-map. For traditional semilocal functionals, the map evaluates a
-specified LDA, GGA, or meta-GGA energy density on the grid. For
-neural functionals, local density descriptors are combined with
-learned coefficient fields that mix semilocal, HF, and optional MP2/PT2
-channels. In both cases the scalar XC energy is obtained by numerical
-quadrature, and the SCF potential follows from differentiating the
-same energy expression with respect to the density variables.
-
-The conventional semilocal energy-density components are evaluated
-through the JAX-XC functional library,\cite{JAXXC} with hybrid exact
-exchange handled by the nonlocal HF channel. JAX-XC provides a broader
-catalogue of Libxc-translated LDA, GGA, meta-GGA, and hybrid functional
-routines than the subset used below. For the GradTDDFT implementation
-and the calculations in this manuscript, the default validated
-functional inputs include:
-\begin{itemize}
-  \item LDA and local-correlation components: LDA exchange,
-    Perdew--Wang correlation, Vosko--Wilk--Nusair correlation, and
-    the VWN-RPA variant.
-  \item GGA components: Becke 88 exchange, PBE exchange, the
-    range-separated PBE exchange component, LYP correlation, and PBE
-    correlation.
-  \item Composite local and semilocal specifications: LDA, SVWN,
-    SVWN-RPA, PBE, and the local semilocal part of LC-WPBE.
-  \item Global and screened hybrid specifications: PBE0/PBEH, B3LYP,
-    BHandHLYP, HSE03, and HSE06. Their semilocal terms are routed
-    through JAX-XC, while the HF fraction is assembled by the exact
-    exchange contraction path.
-\end{itemize}
-Additional installed JAX-XC names, including further GGA, meta-GGA,
-and hybrid components, can be routed as optional channels after
-validation for the selected SCF and TDDFT response path. They are not
-part of the default validated set used for the calculations described
-here.
-
-The TDDFT response layer reuses the converged SCF state and constructs
-the TDA or full Casida matrices from orbital-energy differences,
-Coulomb and exchange response contractions, and the XC kernel. For
-semilocal response, the local kernel is the Hessian of the same
-energy-density map used for the SCF potential. This gives a single
-source for $E_{\rm xc}$, $v_{\rm xc}$, and $f_{\rm xc}$ rather than
-three separately implemented formulas. The corresponding data flow for
-traditional functionals is summarized in
-Figure~\ref{fig:traditional-response-core}.
-
-\begin{figure}
-  \centering
-  \includegraphics[width=\linewidth]{figures/figure3-traditional-response-core-gpt-image2.png}
-  \caption{Differentiable response-core construction for traditional
-    semilocal functionals. Fixed molecular data define local density
-    variables and transition response features, while differentiation
-    of the XC energy density supplies the potential and local Hessian
-    used to assemble TDDFT response matrices.}
-  \label{fig:traditional-response-core}
-\end{figure}
-
-For the neural HF channel, the response binding converts the learned
-local exchange field into a density-weighted scalar exchange fraction
-and inserts it into the same nonlocal exact-exchange contractions used
-by hybrid TDDFT. For the neural MP2/PT2 channel, the response solver
-first obtains the TDA or Casida singles roots and then applies a
-state-specific CIS(D)-type second-order correction scaled by the
-learned PT2 coefficient. This is the calculation path used for the
-excited-state tests described in Section~\ref{sec:results}.
-
-% ======================================================================
-\subsection{Training and Observable Evaluation}
-
-The final computational graph maps neural parameters to scalar losses.
-Starting from the fixed molecular state, GradTDDFT performs SCF,
-constructs the response matrices, solves the TDA or full TDDFT
-eigenvalue problem, and evaluates observables such as excitation
-energies, oscillator strengths, transition dipoles, state-ordering
-metrics. Figure~\ref{fig:computation-flow}
-summarizes this end-to-end path.
+For a batch $\mathcal{B}$, the differentiable predictor maps
+$\theta$ and the fixed molecular inputs to observables,
+\begin{equation}
+  \widehat{\mathbf{y}}_k(\theta)
+  =
+  \mathcal{O}
+  \left[
+    \mathcal{T}_{\theta}(\mathcal{I}_k)
+  \right],
+  \qquad
+  k \in \mathcal{B}.
+  \label{eq:implementation-predictor}
+\end{equation}
+Here $\mathcal{T}_{\theta}$ denotes the selected forward electronic
+structure calculation: fixed-density evaluation, self-consistent SCF,
+or SCF followed by TDA/Casida response.  The observable map
+$\mathcal{O}$ extracts the quantities used by the current objective,
+such as total energies, orbital diagnostics, excitation energies,
+oscillator strengths, or broadened spectra.  The standard training
+iteration is
+\begin{align}
+  \mathcal{L}_{\mathcal{B}}(\theta)
+  &=
+  \frac{1}{\sum_{k\in\mathcal{B}} w_k}
+  \sum_{k\in\mathcal{B}}
+  w_k\,
+  \ell
+  \left(
+    \widehat{\mathbf{y}}_k(\theta),
+    \mathbf{y}_k
+  \right),
+  \label{eq:implementation-batch-loss}
+  \\
+  \theta_{t+1}
+  &=
+  \mathcal{U}
+  \left(
+    \theta_t,
+    \nabla_{\theta}\mathcal{L}_{\mathcal{B}}(\theta_t)
+  \right),
+  \label{eq:implementation-optimizer}
+\end{align}
+where $\mathcal{U}$ is the optimizer update.  In practice the loss and
+its gradient are evaluated by reverse-mode automatic differentiation
+with respect to $\theta$, followed by finite-value checks, gradient
+sanitization, gradient-norm logging, and parameter-update logging.
+Ground-state and excited-state targets share this data representation,
+but the calculations reported here optimize ground-state and
+excited-state objectives in separate runs.
 
 \begin{figure}
   \centering
   \includegraphics[width=\linewidth]{figures/figure2-computation-flow-sphnet-style-gpt-image2.png}
-  \caption{End-to-end computation flow for differentiable
-    ground-state and excited-state training.
-    Fixed molecular data are passed through SCF and TDDFT response
-    construction to produce observables and scalar losses whose
-    gradients propagate back to the neural functional parameters.}
+  \caption{Training data flow in GradTDDFT. Fixed molecular inputs are
+    passed to a differentiable SCF or SCF--TDDFT predictor; scalar
+    losses are formed from selected observables, and reverse-mode
+    differentiation supplies gradients with respect to the neural XC
+    parameters.}
   \label{fig:computation-flow}
 \end{figure}
 
-Loss terms can target ground-state energies, excitation energies,
-oscillator strengths, or state-ordering diagnostics. The current
-training protocol optimizes ground-state and excited-state objectives
-in separate runs.
-Each calculation records the SCF convergence
-status, response solver, excited-state treatment, backend, seed, and reference
-labels. These records separate numerical failures from functional
-errors.
+The SCF part of $\mathcal{T}_{\theta}$ can be differentiated either
+through a finite sequence of SCF iterations or through the fixed-point
+adjoint described in Section~\ref{sec:theory}.  The TDDFT part uses a
+Davidson forward solve for the requested low-lying TDA or Casida roots.
+During training, the reverse pass uses the implicit eigensolver
+differentiation of Xie, Liu, and Wang\cite{Xie2020DominantEigensolverAD}
+applied to the converged Ritz pairs, so the gradient is not propagated
+through the full Davidson iteration history.
 
 % ======================================================================
-\subsection{Verification}
+\subsection{Component Gradient Evaluation}
+\label{sec:implementation-component-gradients}
 
-Verification uses matched PySCF calculations and gradient audits.
-Runs with traditional functionals compare SCF energies, orbital
-energies, TDA and full TDDFT excitation energies, oscillator
-strengths, transition dipoles, and response-matrix components against
-PySCF references. The matched settings include geometry, basis, grid,
-functional, and spin treatment. These tests establish that the
-differentiable path reproduces the reference TDDFT calculation before
-neural parameters are introduced.
+The neural functional separates neural-network inputs from the
+functional channels that enter the energy density.  At grid point $g$,
+the network input descriptor is written as
+\begin{equation}
+  \mathbf{x}_g
+  =
+  \left(
+    \mathbf{u}_g,
+    d^{\rm sl}_g,
+    \eta^{\rm HF}_g,
+    \eta^{\rm PT2}_g
+  \right),
+  \qquad
+  \mathbf{c}^{\theta}_g
+  =
+  \mathcal{N}_{\theta}(\mathbf{x}_g),
+  \label{eq:implementation-network-inputs}
+\end{equation}
+where $\mathbf{u}_g$ contains local density variables,
+$d^{\rm sl}_g$ denotes the optional semilocal descriptor used by the
+coefficient model, and $\eta^{\rm HF}_g$ and $\eta^{\rm PT2}_g$ denote
+optional HF and PT2 input descriptors.  These descriptors determine
+the neural mixing field but are not themselves the definition of the
+XC energy channel.  For grid weight $w_g$, the functional channel basis
+is
+\begin{equation}
+  \mathbf{b}_g
+  =
+  \left(
+    e^{\rm sl}_{1,g},\ldots,e^{\rm sl}_{M,g},
+    e^{\rm HF}_g,
+    e^{\rm PT2}_g
+  \right),
+  \qquad
+  e^{\theta}_{{\rm xc},g}
+  =
+  \mathbf{c}^{\theta}_g \cdot \mathbf{b}_g ,
+  \label{eq:implementation-channel-basis}
+\end{equation}
+where $e^{\rm sl}_{m,g}$ are local or semilocal energy-density
+channels, while $e^{\rm HF}_g$ and $e^{\rm PT2}_g$ are the local
+representations of the HF and PT2 functional components.  The same
+underlying local exchange or pair-gauge quantities may be used both in
+$\mathbf{x}_g$ and in $\mathbf{b}_g$, but their roles are different:
+the former conditions the neural coefficients, whereas the latter
+contributes to the energy density.  The direct parameter gradient at a
+fixed electronic state is therefore assembled channel by channel as
+\begin{equation}
+  \frac{\partial E^{\theta}_{\rm xc}}{\partial \theta}
+  =
+  \sum_g
+  w_g
+  \mathbf{b}_g^{\rm T}
+  \frac{\partial \mathbf{c}^{\theta}_g}{\partial \theta}.
+  \label{eq:implementation-parameter-gradient}
+\end{equation}
+At a fixed SCF or TDDFT state, Eq.~\eqref{eq:implementation-parameter-gradient}
+is the direct parameter-gradient path for all channels.  In
+self-consistent calculations the input descriptors and channel values
+are not restricted to their initial reference values; when the required
+source tensors are available, the HF and PT2 quantities are rebuilt
+from the current density and orbital state.
 
-Differentiability audits evaluate representative scalar losses through
-the full SCF, response, and observable graph. The audits check finite
-values, finite gradients, and nonzero parameter sensitivity. They are
-run for explicit finite-SCF differentiation and implicit fixed-point
-gradients, together with implicit TDDFT root differentiation, ensuring
-that the implementation can support the training paradigms described
-in Section~\ref{sec:theory}.
+For SCF and TDDFT response, GradTDDFT also needs derivatives with
+respect to the density variables.  Let
+$\mathbf{u}_g=(\rho_g,\nabla\rho_g,\tau_g,\nabla^2\rho_g)$ denote the
+active local variables for the selected LDA, GGA, or meta-GGA channel.
+The local part of the XC potential and the local response action are
+computed as
+\begin{align}
+  V^{\theta}_{\rm loc}
+  &=
+  \sum_g
+  w_g
+  \frac{\partial e^{\theta}_{{\rm xc},g}}
+       {\partial \mathbf{u}_g}
+  \frac{\partial \mathbf{u}_g}{\partial P},
+  \label{eq:implementation-local-potential}
+  \\
+  K^{\theta}_{\rm loc}[\Delta P]
+  &=
+  \frac{\partial V^{\theta}_{\rm loc}}{\partial P}[\Delta P].
+  \label{eq:implementation-local-response-action}
+\end{align}
+For traditional semilocal functionals, the energy density and its
+response tensor are evaluated through JAX-XC.\cite{JAXXC}  For neural
+functionals, the same derivatives are generated from the pointwise
+energy-density map in Eq.~\eqref{eq:implementation-channel-basis}.  The
+implementation uses Hessian-vector products for response actions when
+possible, avoiding explicit construction of a dense grid--grid kernel.
+Figure~\ref{fig:traditional-response-core} summarizes this response
+core for semilocal channels.
+
+\begin{figure}
+  \centering
+  \includegraphics[width=\linewidth]{figures/figure3-traditional-response-core-gpt-image2.png}
+  \caption{Differentiable response-core construction. Fixed molecular
+    inputs define local density and transition-density variables on the
+    grid. Differentiation of the same XC energy-density map produces
+    the SCF potential and the local response action used in TDDFT.}
+  \label{fig:traditional-response-core}
+\end{figure}
+
+The HF information therefore appears in two places.  As a neural input,
+$\eta^{\rm HF}_g$ conditions the coefficient field
+$\mathbf{c}^{\theta}_g$.  As a functional component,
+$e^{\rm HF}_g$ contributes an exchange channel to the energy density
+and determines the effective HF mixing used in the nonlocal exchange
+contractions.  During self-consistent forward execution, these local HF
+quantities are evaluated from the current density matrix and orbital
+state when local exchange factors are available, so the HF channel
+follows the SCF update.  For derivative construction, GradTDDFT keeps
+the local-HF descriptor values and auxiliary exchange factors fixed
+inside the local response tensor; gradients with respect to $\theta$
+still pass through the learned HF coefficient field.  The resulting
+mixing field is either averaged to the scalar exchange fraction used in
+the TDDFT response operator or contracted back to an explicit
+exchange-like Fock contribution.  The omitted part is the full local-HF
+second response term associated with differentiating the local exchange
+descriptor itself in the TDDFT kernel.
+
+The PT2 information is organized in the same two-role manner.
+$\eta^{\rm PT2}_g$ may be used as a neural input descriptor, while
+$e^{\rm PT2}_g$ is the PT2 channel in the energy-density basis.  In
+ground-state training it contributes to
+Eq.~\eqref{eq:implementation-channel-basis} and to the local potential
+derivatives in Eqs.~\eqref{eq:implementation-local-potential} and
+\eqref{eq:implementation-local-response-action}.  In the excited-state
+calculations reported here, the learned PT2 coefficient is converted
+to a density-weighted scalar amplitude and applied to a state-specific
+second-order correction after the singles response roots are obtained.
+This keeps the neural PT2 supervision connected to the differentiable
+TDDFT predictor while avoiding an additional local Hessian term for the
+second-order correction itself.

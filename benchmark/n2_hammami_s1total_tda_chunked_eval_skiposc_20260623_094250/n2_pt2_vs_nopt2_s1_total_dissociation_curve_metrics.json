@@ -1,0 +1,39 @@
+{
+  "system": "N2",
+  "state": "S1",
+  "quantity": "S1 total energy E1(R)",
+  "basis": "def2-tzvp",
+  "xc": "b3lyp",
+  "solver": "TDA",
+  "reference": "Hammami2026 large-CAS A1Pi_g",
+  "n_points": 35,
+  "train_r_values_angstrom": [
+    0.8,
+    1.1,
+    1.6,
+    2.0,
+    2.2,
+    2.5,
+    3.0
+  ],
+  "no_pt2": {
+    "mae_ev": 0.8710758199790151,
+    "max_abs_error_ev": 2.904795219505678,
+    "max_abs_error_r_angstrom": 3.0
+  },
+  "pt2_strict": {
+    "mae_ev": 0.16125690471127854,
+    "max_abs_error_ev": 0.47684157854023035,
+    "max_abs_error_r_angstrom": 0.8647058823529412
+  },
+  "source_csvs": {
+    "no_pt2": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/n2_hammami_s1total_tda_chunked_eval_skiposc_20260623_094250/nopt2_dense_curve_35pt_merged.csv",
+    "pt2_strict": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/n2_hammami_s1total_tda_chunked_eval_skiposc_20260623_094250/pt2strict_dense_curve_35pt_merged.csv"
+  },
+  "visualization_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/n2_hammami_s1total_tda_chunked_eval_skiposc_20260623_094250/n2_pt2_vs_nopt2_s1_total_curve_visualization_data.csv",
+  "outputs": {
+    "png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/n2_hammami_s1total_tda_chunked_eval_skiposc_20260623_094250/n2_pt2_vs_nopt2_s1_total_dissociation_curve.png",
+    "pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/n2_hammami_s1total_tda_chunked_eval_skiposc_20260623_094250/n2_pt2_vs_nopt2_s1_total_dissociation_curve.pdf",
+    "svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/n2_hammami_s1total_tda_chunked_eval_skiposc_20260623_094250/n2_pt2_vs_nopt2_s1_total_dissociation_curve.svg"
+  }
+}

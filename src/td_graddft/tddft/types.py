@@ -30,6 +30,7 @@ class TDAResult:
     excitation_energies: Array
     amplitudes: Array
     posthoc_correction: Optional[Array] = None
+    converged: Array | bool = True
 
 
 @_pytree_dataclass
@@ -41,3 +42,4 @@ class TDDFTResult:
     x_amplitudes: Array
     y_amplitudes: Array
     posthoc_correction: Optional[Array] = None
+    converged: Array | bool = True

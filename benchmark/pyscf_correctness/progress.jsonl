@@ -1,0 +1,52 @@
+{"event": "task_start", "index": 1, "ntasks": 26, "task_id": "water__RKS__pbe__def2-svp__0__tda__singlet__5__0560854ab7", "timestamp_utc": "2026-05-27T08:52:11+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "water__RKS__pbe__def2-svp__0__tda__singlet__5__0560854ab7", "timestamp_utc": "2026-05-27T08:52:11+00:00"}
+{"event": "task_start", "index": 2, "ntasks": 26, "task_id": "water__RKS__pbe__def2-svp__0__tda__triplet__5__cf3938befa", "timestamp_utc": "2026-05-27T08:52:30+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_restricted_triplet_pending", "task_id": "water__RKS__pbe__def2-svp__0__tda__triplet__5__cf3938befa", "timestamp_utc": "2026-05-27T08:52:30+00:00"}
+{"event": "task_start", "index": 3, "ntasks": 26, "task_id": "water__RKS__pbe__def2-svp__0__tddft__singlet__5__56a4c044ae", "timestamp_utc": "2026-05-27T08:52:41+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "water__RKS__pbe__def2-svp__0__tddft__singlet__5__56a4c044ae", "timestamp_utc": "2026-05-27T08:52:41+00:00"}
+{"event": "task_start", "index": 4, "ntasks": 26, "task_id": "water__RKS__pbe__def2-svp__0__tddft__triplet__5__e6f9adcf17", "timestamp_utc": "2026-05-27T08:52:53+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_restricted_triplet_pending", "task_id": "water__RKS__pbe__def2-svp__0__tddft__triplet__5__e6f9adcf17", "timestamp_utc": "2026-05-27T08:52:53+00:00"}
+{"event": "task_start", "index": 5, "ntasks": 26, "task_id": "co__RKS__pbe__def2-svp__0__tda__singlet__5__1a229d07e1", "timestamp_utc": "2026-05-27T08:53:04+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "co__RKS__pbe__def2-svp__0__tda__singlet__5__1a229d07e1", "timestamp_utc": "2026-05-27T08:53:04+00:00"}
+{"event": "task_start", "index": 6, "ntasks": 26, "task_id": "co__RKS__pbe__def2-svp__0__tda__triplet__5__b8d234573c", "timestamp_utc": "2026-05-27T08:53:23+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_restricted_triplet_pending", "task_id": "co__RKS__pbe__def2-svp__0__tda__triplet__5__b8d234573c", "timestamp_utc": "2026-05-27T08:53:23+00:00"}
+{"event": "task_start", "index": 7, "ntasks": 26, "task_id": "co__RKS__pbe__def2-svp__0__tddft__singlet__5__be8cffe1f8", "timestamp_utc": "2026-05-27T08:53:34+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "co__RKS__pbe__def2-svp__0__tddft__singlet__5__be8cffe1f8", "timestamp_utc": "2026-05-27T08:53:34+00:00"}
+{"event": "task_start", "index": 8, "ntasks": 26, "task_id": "co__RKS__pbe__def2-svp__0__tddft__triplet__5__7b8a348932", "timestamp_utc": "2026-05-27T08:53:47+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_restricted_triplet_pending", "task_id": "co__RKS__pbe__def2-svp__0__tddft__triplet__5__7b8a348932", "timestamp_utc": "2026-05-27T08:53:47+00:00"}
+{"event": "task_start", "index": 9, "ntasks": 26, "task_id": "n2__RKS__pbe__def2-svp__0__tda__singlet__5__95ff3e95ed", "timestamp_utc": "2026-05-27T08:53:58+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "n2__RKS__pbe__def2-svp__0__tda__singlet__5__95ff3e95ed", "timestamp_utc": "2026-05-27T08:53:58+00:00"}
+{"event": "task_start", "index": 10, "ntasks": 26, "task_id": "n2__RKS__pbe__def2-svp__0__tda__triplet__5__d007ca5201", "timestamp_utc": "2026-05-27T08:54:11+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_restricted_triplet_pending", "task_id": "n2__RKS__pbe__def2-svp__0__tda__triplet__5__d007ca5201", "timestamp_utc": "2026-05-27T08:54:11+00:00"}
+{"event": "task_start", "index": 11, "ntasks": 26, "task_id": "n2__RKS__pbe__def2-svp__0__tddft__singlet__5__6373588e3b", "timestamp_utc": "2026-05-27T08:54:19+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "n2__RKS__pbe__def2-svp__0__tddft__singlet__5__6373588e3b", "timestamp_utc": "2026-05-27T08:54:19+00:00"}
+{"event": "task_start", "index": 12, "ntasks": 26, "task_id": "n2__RKS__pbe__def2-svp__0__tddft__triplet__5__bd777f5c8e", "timestamp_utc": "2026-05-27T08:54:28+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_restricted_triplet_pending", "task_id": "n2__RKS__pbe__def2-svp__0__tddft__triplet__5__bd777f5c8e", "timestamp_utc": "2026-05-27T08:54:28+00:00"}
+{"event": "task_start", "index": 13, "ntasks": 26, "task_id": "ethylene__RKS__pbe__def2-svp__0__tda__singlet__5__2fcd93c0c3", "timestamp_utc": "2026-05-27T08:54:36+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "ethylene__RKS__pbe__def2-svp__0__tda__singlet__5__2fcd93c0c3", "timestamp_utc": "2026-05-27T08:54:36+00:00"}
+{"event": "task_start", "index": 14, "ntasks": 26, "task_id": "ethylene__RKS__pbe__def2-svp__0__tda__triplet__5__22b34c6c7e", "timestamp_utc": "2026-05-27T08:54:57+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_restricted_triplet_pending", "task_id": "ethylene__RKS__pbe__def2-svp__0__tda__triplet__5__22b34c6c7e", "timestamp_utc": "2026-05-27T08:54:57+00:00"}
+{"event": "task_start", "index": 15, "ntasks": 26, "task_id": "ethylene__RKS__pbe__def2-svp__0__tddft__singlet__5__c45cc6ad51", "timestamp_utc": "2026-05-27T08:55:12+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "ethylene__RKS__pbe__def2-svp__0__tddft__singlet__5__c45cc6ad51", "timestamp_utc": "2026-05-27T08:55:12+00:00"}
+{"event": "task_start", "index": 16, "ntasks": 26, "task_id": "ethylene__RKS__pbe__def2-svp__0__tddft__triplet__5__bd2dbca70f", "timestamp_utc": "2026-05-27T08:55:27+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_restricted_triplet_pending", "task_id": "ethylene__RKS__pbe__def2-svp__0__tddft__triplet__5__bd2dbca70f", "timestamp_utc": "2026-05-27T08:55:27+00:00"}
+{"event": "task_start", "index": 17, "ntasks": 26, "task_id": "formaldehyde__RKS__pbe__def2-svp__0__tda__singlet__5__6a8809d2c3", "timestamp_utc": "2026-05-27T08:55:42+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "formaldehyde__RKS__pbe__def2-svp__0__tda__singlet__5__6a8809d2c3", "timestamp_utc": "2026-05-27T08:55:42+00:00"}
+{"event": "task_start", "index": 18, "ntasks": 26, "task_id": "formaldehyde__RKS__pbe__def2-svp__0__tda__triplet__5__2de5820828", "timestamp_utc": "2026-05-27T08:56:10+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_restricted_triplet_pending", "task_id": "formaldehyde__RKS__pbe__def2-svp__0__tda__triplet__5__2de5820828", "timestamp_utc": "2026-05-27T08:56:10+00:00"}
+{"event": "task_start", "index": 19, "ntasks": 26, "task_id": "formaldehyde__RKS__pbe__def2-svp__0__tddft__singlet__5__0b01dc44a8", "timestamp_utc": "2026-05-27T08:57:03+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "formaldehyde__RKS__pbe__def2-svp__0__tddft__singlet__5__0b01dc44a8", "timestamp_utc": "2026-05-27T08:57:03+00:00"}
+{"event": "task_start", "index": 20, "ntasks": 26, "task_id": "formaldehyde__RKS__pbe__def2-svp__0__tddft__triplet__5__4b659d380d", "timestamp_utc": "2026-05-27T08:58:01+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_restricted_triplet_pending", "task_id": "formaldehyde__RKS__pbe__def2-svp__0__tddft__triplet__5__4b659d380d", "timestamp_utc": "2026-05-27T08:58:01+00:00"}
+{"event": "task_start", "index": 21, "ntasks": 26, "task_id": "benzene__RKS__pbe__def2-svp__0__tda__singlet__5__26f076b945", "timestamp_utc": "2026-05-27T08:58:53+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "benzene__RKS__pbe__def2-svp__0__tda__singlet__5__26f076b945", "timestamp_utc": "2026-05-27T08:58:53+00:00"}
+{"event": "task_start", "index": 22, "ntasks": 26, "task_id": "benzene__RKS__pbe__def2-svp__0__tda__triplet__5__8e5324e6de", "timestamp_utc": "2026-05-27T09:01:24+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_restricted_triplet_pending", "task_id": "benzene__RKS__pbe__def2-svp__0__tda__triplet__5__8e5324e6de", "timestamp_utc": "2026-05-27T09:01:24+00:00"}
+{"event": "task_start", "index": 23, "ntasks": 26, "task_id": "benzene__RKS__pbe__def2-svp__0__tddft__singlet__5__4471525f77", "timestamp_utc": "2026-05-27T09:03:37+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "benzene__RKS__pbe__def2-svp__0__tddft__singlet__5__4471525f77", "timestamp_utc": "2026-05-27T09:03:37+00:00"}
+{"event": "task_start", "index": 24, "ntasks": 26, "task_id": "benzene__RKS__pbe__def2-svp__0__tddft__triplet__5__6c1666e3db", "timestamp_utc": "2026-05-27T09:06:01+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_restricted_triplet_pending", "task_id": "benzene__RKS__pbe__def2-svp__0__tddft__triplet__5__6c1666e3db", "timestamp_utc": "2026-05-27T09:06:01+00:00"}
+{"event": "task_start", "index": 25, "ntasks": 26, "task_id": "oh__UKS__pbe__def2-svp__0__tda__spin_conserving__5__92b795ae64", "timestamp_utc": "2026-05-27T09:08:14+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_unrestricted_semilocal_pending", "task_id": "oh__UKS__pbe__def2-svp__0__tda__spin_conserving__5__92b795ae64", "timestamp_utc": "2026-05-27T09:08:14+00:00"}
+{"event": "task_start", "index": 26, "ntasks": 26, "task_id": "oh__UKS__pbe__def2-svp__0__tddft__spin_conserving__5__dc1f2c7f5d", "timestamp_utc": "2026-05-27T09:09:26+00:00"}
+{"event": "task_ok", "support_status": "pyscf_only_unrestricted_semilocal_pending", "task_id": "oh__UKS__pbe__def2-svp__0__tddft__spin_conserving__5__dc1f2c7f5d", "timestamp_utc": "2026-05-27T09:09:26+00:00"}

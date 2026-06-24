@@ -18,6 +18,7 @@ from ..scf import (
     run_uks_from_integrals,
 )
 from ..data.integrals import build_j_from_eri_pair_matrix, build_jk_from_eri_pair_matrix
+from ..df import build_j_from_df, build_jk_from_df
 from ..scf.rks import _vxc_matrix_from_grid_potential
 from ..spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
 from ..tddft.response_options import (
@@ -515,10 +516,21 @@ def _coulomb_energy(density_matrix: Array, rep_tensor: Array) -> Array:
 
 
 def _coulomb_potential_from_molecule(molecule: Any, density_matrix: Array) -> Array:
+    df_factors = getattr(molecule, "df_factors", None)
+    if df_factors is not None:
+        factors = jnp.asarray(df_factors)
+        if int(factors.size) > 0:
+            return build_j_from_df(factors, density_matrix)
     return _coulomb_potential(density_matrix, _repulsion_integrals_from_molecule(molecule))
 
 
 def _exchange_potential_from_molecule(molecule: Any, density_matrix: Array) -> Array:
+    df_factors = getattr(molecule, "df_factors", None)
+    if df_factors is not None:
+        factors = jnp.asarray(df_factors)
+        if int(factors.size) > 0:
+            _, k_matrix = build_jk_from_df(factors, density_matrix)
+            return k_matrix
     return _exchange_potential(density_matrix, _repulsion_integrals_from_molecule(molecule))
 
 

@@ -1,0 +1,45 @@
+{
+  "args": {
+    "bases": [
+      "def2-svp"
+    ],
+    "energy_tol_ev": 0.05,
+    "grid_level": 0,
+    "matrix_max_elements": 200000,
+    "max_tasks": null,
+    "molecules": [
+      "water",
+      "co",
+      "n2",
+      "ethylene",
+      "formaldehyde",
+      "benzene"
+    ],
+    "nstates": 5,
+    "osc_tol": 0.05,
+    "outdir": "benchmark/pyscf_correctness/runs/remote_b3lyp_def2svp_singlet_20260527",
+    "preset": "paper",
+    "skip_existing": true,
+    "solvers": [
+      "tda",
+      "tddft"
+    ],
+    "spin_channels": [
+      "singlet"
+    ],
+    "write_manifest_only": false,
+    "xcs": [
+      "b3lyp"
+    ]
+  },
+  "jax_default_backend": "gpu",
+  "jax_devices": [
+    "cuda:0"
+  ],
+  "jax_platforms": "cuda",
+  "jax_version": "0.10.0",
+  "platform": "Linux-4.18.0-348.el8.x86_64-x86_64-with-glibc2.28",
+  "pyscf_version": "2.13.0",
+  "python": "3.11.15 (main, Mar 11 2026, 17:20:07) [GCC 14.3.0]",
+  "timestamp_utc": "2026-05-27T10:31:17+00:00"
+}

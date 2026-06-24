@@ -52,6 +52,7 @@ class UnrestrictedTDAResult:
     amplitudes_alpha: Array
     amplitudes_beta: Array
     posthoc_correction: Array | None = None
+    converged: Array | bool = True
 
 
 @_pytree_dataclass
@@ -65,6 +66,7 @@ class UnrestrictedTDDFTResult:
     y_amplitudes_alpha: Array
     y_amplitudes_beta: Array
     posthoc_correction: Array | None = None
+    converged: Array | bool = True
 
 
 @dataclass(frozen=True)
@@ -785,10 +787,6 @@ def build_unrestricted_tdhf_operator(
     )
 
 
-def _is_traced_convergence_flag(value: Any) -> bool:
-    return isinstance(value, jax.core.Tracer)
-
-
 def _finalize_unrestricted_tda_result(
     eigvals: Array,
     eigvecs: Array,
@@ -797,6 +795,7 @@ def _finalize_unrestricted_tda_result(
     excitation_threshold: float,
     de_a: Array,
     de_b: Array,
+    converged=True,
 ) -> UnrestrictedTDAResult:
     nocca, nvira = de_a.shape
     noccb, nvirb = de_b.shape
@@ -813,6 +812,7 @@ def _finalize_unrestricted_tda_result(
         excitation_energies=energies,
         amplitudes_alpha=amplitudes_alpha,
         amplitudes_beta=amplitudes_beta,
+        converged=converged,
     )
 
 
@@ -841,8 +841,6 @@ def solve_unrestricted_tda_from_operator(
         max_subspace=davidson_max_subspace,
         positive_eig_threshold=excitation_threshold,
     )
-    if not _is_traced_convergence_flag(converged) and not bool(converged):
-        raise RuntimeError("Davidson unrestricted TDA solver did not converge.")
     return _finalize_unrestricted_tda_result(
         eigvals,
         eigvecs,
@@ -850,6 +848,7 @@ def solve_unrestricted_tda_from_operator(
         excitation_threshold=excitation_threshold,
         de_a=de_a,
         de_b=de_b,
+        converged=converged,
     )
 
 
@@ -863,6 +862,7 @@ def _finalize_unrestricted_casida_result(
     matrix_eps: float,
     de_a: Array,
     de_b: Array,
+    converged=True,
 ) -> UnrestrictedTDDFTResult:
     nocca, nvira = de_a.shape
     noccb, nvirb = de_b.shape
@@ -892,6 +892,7 @@ def _finalize_unrestricted_casida_result(
         x_amplitudes_beta=x_beta,
         y_amplitudes_alpha=y_alpha,
         y_amplitudes_beta=y_beta,
+        converged=converged,
     )
 
 
@@ -927,8 +928,6 @@ def solve_unrestricted_casida_from_tdhf_operator(
         max_subspace=davidson_max_subspace,
         matrix_eps=matrix_eps,
     )
-    if not _is_traced_convergence_flag(converged) and not bool(converged):
-        raise RuntimeError("Davidson unrestricted TDDFT solver did not converge.")
     return _finalize_unrestricted_casida_result(
         w,
         x_vecs,
@@ -938,6 +937,7 @@ def solve_unrestricted_casida_from_tdhf_operator(
         matrix_eps=matrix_eps,
         de_a=de_a,
         de_b=de_b,
+        converged=converged,
     )
 
 

@@ -1,0 +1,4 @@
+{"event": "task_start", "index": 1, "ntasks": 2, "task_id": "water__RKS__pbe__def2-svp__0__tda__singlet__5__0560854ab7", "timestamp_utc": "2026-05-27T08:51:16+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "water__RKS__pbe__def2-svp__0__tda__singlet__5__0560854ab7", "timestamp_utc": "2026-05-27T08:51:16+00:00"}
+{"event": "task_start", "index": 2, "ntasks": 2, "task_id": "water__RKS__pbe__def2-svp__0__tddft__singlet__5__56a4c044ae", "timestamp_utc": "2026-05-27T08:51:35+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "water__RKS__pbe__def2-svp__0__tddft__singlet__5__56a4c044ae", "timestamp_utc": "2026-05-27T08:51:35+00:00"}

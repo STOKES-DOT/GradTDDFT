@@ -1,0 +1,19 @@
+{
+  "command": "benchmark/pyscf_correctness/benchmark_fxc_ad_profile.py --molecules water co n2 ethylene formaldehyde benzene --xc b3lyp --basis def2-svp --grid-level 0 --warm-repeats 3 --output-dir benchmark/pyscf_correctness/runs/remote_fxc_ad_profile_b3lyp_def2svp_gpu0_20260527",
+  "env": {
+    "CUDA_VISIBLE_DEVICES": "GPU-01dc121c-c6bb-974d-7fb1-11ae8c25d11c",
+    "JAX_ENABLE_X64": "1",
+    "JAX_PLATFORMS": "cuda",
+    "XLA_PYTHON_CLIENT_PREALLOCATE": "false"
+  },
+  "jax_backend": "gpu",
+  "jax_devices": [
+    "cuda:0"
+  ],
+  "jax_version": "0.10.0",
+  "nvidia_smi": "Unable to determine the device handle for GPU2: 0000:49:00.0: Unknown Error\nindex, uuid, name, memory.total [MiB], memory.used [MiB]\n0, GPU-01dc121c-c6bb-974d-7fb1-11ae8c25d11c, NVIDIA GeForce RTX 5090, 32607 MiB, 549 MiB\n1, GPU-9d7b061e-980f-e04a-19cd-e0072e6385b9, NVIDIA GeForce RTX 5090, 32607 MiB, 741 MiB\n3, GPU-8d828ed2-aa47-5619-3252-a5bd7783c3de, NVIDIA GeForce RTX 5090, 32607 MiB, 687 MiB\n4, GPU-7a6aac16-5c9b-e899-49ab-f43e10bcf2f5, NVIDIA GeForce RTX 5090, 32607 MiB, 18 MiB\n5, GPU-a1abf553-b010-6d29-9852-a7c78cda2bb2, NVIDIA GeForce RTX 5090, 32607 MiB, 19473 MiB\n6, GPU-34176f6c-8278-3c66-3419-365ab2fd4b36, NVIDIA GeForce RTX 5090, 32607 MiB, 25693 MiB\n7, GPU-488dbae2-96e3-2698-66f8-d1928726bef8, NVIDIA GeForce RTX 5090, 32607 MiB, 1053 MiB\n",
+  "platform": "Linux-4.18.0-348.el8.x86_64-x86_64-with-glibc2.28",
+  "pyscf_version": "2.13.0",
+  "python": "3.11.15 (main, Mar 11 2026, 17:20:07) [GCC 14.3.0]",
+  "timestamp_utc": "2026-05-27T12:01:25+00:00"
+}

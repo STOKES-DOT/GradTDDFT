@@ -1,0 +1,58 @@
+[
+  {
+    "anti_fro": 0.0,
+    "anti_max_abs": 0.0,
+    "component": "delta_eps",
+    "fro": 8.694341122159397,
+    "sym_max_eig": 6.675191064917124,
+    "sym_min_eig": 0.65457756787407
+  },
+  {
+    "anti_fro": 2.988680774572777e-15,
+    "anti_max_abs": 1.3704315460216776e-15,
+    "component": "ao_mo",
+    "fro": 0.32108335047659087,
+    "sym_max_eig": 0.20434377279796415,
+    "sym_min_eig": -0.060785381689968644
+  },
+  {
+    "anti_fro": 0.0003557663027106233,
+    "anti_max_abs": 0.00024748126259893297,
+    "component": "grid_xc",
+    "fro": 0.3030075611498991,
+    "sym_max_eig": -0.007263787846789256,
+    "sym_min_eig": -0.15425869727035804
+  },
+  {
+    "anti_fro": 0.0,
+    "anti_max_abs": 0.0,
+    "component": "nonlocal",
+    "fro": 0.0,
+    "sym_max_eig": 0.0,
+    "sym_min_eig": 0.0
+  },
+  {
+    "anti_fro": 0.00035576630270974023,
+    "anti_max_abs": 0.00024748126259804826,
+    "component": "full",
+    "fro": 8.496877069194536,
+    "sym_max_eig": 6.504143942384449,
+    "sym_min_eig": 0.6228428307518422
+  },
+  {
+    "anti_fro": 0.00035576630270974023,
+    "anti_max_abs": 0.00024748126259804826,
+    "component": "sum_components",
+    "fro": 8.496877069194536,
+    "sym_max_eig": 6.504143942384449,
+    "sym_min_eig": 0.6228428307518422
+  },
+  {
+    "anti_fro": 0.0,
+    "anti_max_abs": 0.0,
+    "component": "full_minus_sum",
+    "fro": 0.0,
+    "sym_max_eig": 0.0,
+    "sym_min_eig": 0.0
+  }
+]

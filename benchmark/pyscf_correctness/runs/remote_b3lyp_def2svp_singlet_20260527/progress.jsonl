@@ -1,0 +1,25 @@
+{"event": "task_start", "index": 1, "ntasks": 12, "task_id": "water__RKS__b3lyp__def2-svp__0__tda__singlet__5__2910305ef3", "timestamp_utc": "2026-05-27T10:24:25+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "water__RKS__b3lyp__def2-svp__0__tda__singlet__5__2910305ef3", "timestamp_utc": "2026-05-27T10:24:25+00:00"}
+{"event": "task_start", "index": 2, "ntasks": 12, "task_id": "water__RKS__b3lyp__def2-svp__0__tddft__singlet__5__db722eb5e1", "timestamp_utc": "2026-05-27T10:24:48+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "water__RKS__b3lyp__def2-svp__0__tddft__singlet__5__db722eb5e1", "timestamp_utc": "2026-05-27T10:24:48+00:00"}
+{"event": "task_start", "index": 3, "ntasks": 12, "task_id": "co__RKS__b3lyp__def2-svp__0__tda__singlet__5__5c2bc69c62", "timestamp_utc": "2026-05-27T10:25:04+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "co__RKS__b3lyp__def2-svp__0__tda__singlet__5__5c2bc69c62", "timestamp_utc": "2026-05-27T10:25:04+00:00"}
+{"event": "task_start", "index": 4, "ntasks": 12, "task_id": "co__RKS__b3lyp__def2-svp__0__tddft__singlet__5__41a2d81dec", "timestamp_utc": "2026-05-27T10:25:23+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "co__RKS__b3lyp__def2-svp__0__tddft__singlet__5__41a2d81dec", "timestamp_utc": "2026-05-27T10:25:23+00:00"}
+{"event": "task_start", "index": 5, "ntasks": 12, "task_id": "n2__RKS__b3lyp__def2-svp__0__tda__singlet__5__997584bb47", "timestamp_utc": "2026-05-27T10:25:45+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "n2__RKS__b3lyp__def2-svp__0__tda__singlet__5__997584bb47", "timestamp_utc": "2026-05-27T10:25:45+00:00"}
+{"event": "task_start", "index": 6, "ntasks": 12, "task_id": "n2__RKS__b3lyp__def2-svp__0__tddft__singlet__5__437f678bbc", "timestamp_utc": "2026-05-27T10:26:01+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "n2__RKS__b3lyp__def2-svp__0__tddft__singlet__5__437f678bbc", "timestamp_utc": "2026-05-27T10:26:01+00:00"}
+{"event": "task_start", "index": 7, "ntasks": 12, "task_id": "ethylene__RKS__b3lyp__def2-svp__0__tda__singlet__5__919490fad7", "timestamp_utc": "2026-05-27T10:26:12+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "ethylene__RKS__b3lyp__def2-svp__0__tda__singlet__5__919490fad7", "timestamp_utc": "2026-05-27T10:26:12+00:00"}
+{"event": "task_start", "index": 8, "ntasks": 12, "task_id": "ethylene__RKS__b3lyp__def2-svp__0__tddft__singlet__5__95f17d9344", "timestamp_utc": "2026-05-27T10:26:34+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "ethylene__RKS__b3lyp__def2-svp__0__tddft__singlet__5__95f17d9344", "timestamp_utc": "2026-05-27T10:26:34+00:00"}
+{"event": "task_start", "index": 9, "ntasks": 12, "task_id": "formaldehyde__RKS__b3lyp__def2-svp__0__tda__singlet__5__e1645337ec", "timestamp_utc": "2026-05-27T10:27:46+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "formaldehyde__RKS__b3lyp__def2-svp__0__tda__singlet__5__e1645337ec", "timestamp_utc": "2026-05-27T10:27:46+00:00"}
+{"event": "task_start", "index": 10, "ntasks": 12, "task_id": "formaldehyde__RKS__b3lyp__def2-svp__0__tddft__singlet__5__2586db55d1", "timestamp_utc": "2026-05-27T10:28:49+00:00"}
+{"event": "task_start", "index": 10, "ntasks": 12, "task_id": "formaldehyde__RKS__b3lyp__def2-svp__0__tddft__singlet__5__2586db55d1", "timestamp_utc": "2026-05-27T10:31:18+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "formaldehyde__RKS__b3lyp__def2-svp__0__tddft__singlet__5__2586db55d1", "timestamp_utc": "2026-05-27T10:31:18+00:00"}
+{"event": "task_start", "index": 11, "ntasks": 12, "task_id": "benzene__RKS__b3lyp__def2-svp__0__tda__singlet__5__d2f0093852", "timestamp_utc": "2026-05-27T10:32:00+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "benzene__RKS__b3lyp__def2-svp__0__tda__singlet__5__d2f0093852", "timestamp_utc": "2026-05-27T10:32:00+00:00"}
+{"event": "task_start", "index": 12, "ntasks": 12, "task_id": "benzene__RKS__b3lyp__def2-svp__0__tddft__singlet__5__9f858a2ce9", "timestamp_utc": "2026-05-27T10:32:53+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "benzene__RKS__b3lyp__def2-svp__0__tddft__singlet__5__9f858a2ce9", "timestamp_utc": "2026-05-27T10:32:53+00:00"}

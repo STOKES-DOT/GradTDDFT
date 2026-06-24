@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import os
 from dataclasses import dataclass
@@ -11,7 +12,6 @@ import time
 from typing import Any
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
-os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
 os.environ.setdefault("MPLCONFIGDIR", str(Path("outputs") / ".mplconfig"))
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +30,7 @@ import optax
 
 from td_graddft import neural_xc
 from td_graddft.data.hdf5_cache import read_unrestricted_molecule, write_unrestricted_molecule
+from td_graddft.data.reference import unrestricted_reference_from_pyscf
 from td_graddft.neural_xc import (
     DEFAULT_INPUT_FEATURE_MODE,
     DEFAULT_NETWORK_ARCHITECTURE,
@@ -161,10 +162,14 @@ def _cache_key(row: XNDDimerRow, args: argparse.Namespace) -> str:
     basis = str(args.basis).replace("/", "_")
     xc = str(args.xc).replace("/", "_")
     feature_mode = "canonical" if str(args.input_feature_mode) == "dm21_original" else str(args.input_feature_mode)
+    pt2 = "pt2" if bool(args.include_pt2_channel) else "nopt2"
     pair = f"{row.atom1}-{row.atom2}".replace("/", "_")
     return (
         f"xnd_dimers/basis={basis}/xc={xc}/grid={int(args.grids_level)}/"
         f"max_l={int(args.max_l)}/integral={str(args.integral_backend)}/"
+        f"reference={str(args.reference_builder)}/"
+        f"jk={str(args.jk_backend)}/df_tol={float(args.df_tol):.1e}/df_rank={args.df_max_rank}/"
+        f"mode={str(args.training_mode)}/{pt2}_{str(args.pt2_channel_mode)}/"
         f"features={feature_mode}/row={row.row_index:04d}_{pair}_spin={row.spin}"
     )
 
@@ -181,7 +186,12 @@ def _write_reference(group: Any, point: ReferencePoint) -> None:
     write_unrestricted_molecule(group.require_group("molecule"), point.molecule)
 
 
-def _read_reference(group: Any) -> ReferencePoint:
+def _read_reference(
+    group: Any,
+    *,
+    array_backend: str = "jax",
+    hfx_nu_storage: str = "array",
+) -> ReferencePoint:
     row = XNDDimerRow(
         row_index=int(group.attrs["row_index"]),
         atom1=str(group.attrs["atom1"]),
@@ -191,12 +201,55 @@ def _read_reference(group: Any) -> ReferencePoint:
         spin=int(group.attrs["spin"]),
         target_energy_h=float(group.attrs["target_energy_h"]),
     )
-    return ReferencePoint(row=row, molecule=read_unrestricted_molecule(group["molecule"]))
+    return ReferencePoint(
+        row=row,
+        molecule=read_unrestricted_molecule(
+            group["molecule"],
+            array_backend=array_backend,
+            hfx_nu_storage=hfx_nu_storage,
+        ),
+    )
 
 
 def build_reference(row: XNDDimerRow, *, args: argparse.Namespace) -> ReferencePoint:
     feature_mode = str(args.input_feature_mode)
-    compute_hfx = feature_mode in {"canonical", "dm21_original"}
+    compute_hfx = feature_mode in {"canonical", "dm21_original"} or bool(args.include_hfx_channel)
+    compute_pt2 = bool(args.include_pt2_channel)
+    if str(args.reference_builder) == "pyscf":
+        from pyscf import dft, gto
+
+        mol = gto.M(
+            atom=_atom_string(row),
+            basis=str(args.basis),
+            unit="Angstrom",
+            charge=0,
+            spin=int(row.spin),
+            cart=True,
+            verbose=int(args.verbose),
+        )
+        mf = dft.UKS(mol)
+        mf.xc = str(args.xc)
+        if str(args.jk_backend) == "df":
+            mf = mf.density_fit()
+        mf.grids.level = int(args.grids_level)
+        mf.max_cycle = int(args.reference_scf_max_cycle)
+        mf.conv_tol = float(args.reference_scf_conv_tol)
+        if hasattr(mf, "conv_tol_grad"):
+            mf.conv_tol_grad = float(args.reference_scf_conv_tol_density)
+        if hasattr(mf, "damp"):
+            mf.damp = float(args.reference_scf_damping)
+        if hasattr(mf, "level_shift"):
+            mf.level_shift = float(args.reference_scf_level_shift)
+        mf.kernel()
+        molecule = unrestricted_reference_from_pyscf(
+            mf,
+            compute_local_hfx_features=compute_hfx,
+            compute_local_hfx_aux=compute_hfx,
+            compute_local_pt2_features=compute_pt2,
+            jk_backend=str(args.jk_backend),
+            array_backend=("host" if bool(args.reference_only) else "jax"),
+        )
+        return ReferencePoint(row=row, molecule=molecule)
     molecule = unrestricted_molecule_from_spec_with_jax_uks(
         atom=_atom_string(row),
         basis=str(args.basis),
@@ -215,11 +268,15 @@ def build_reference(row: XNDDimerRow, *, args: argparse.Namespace) -> ReferenceP
             damping=float(args.reference_scf_damping),
             level_shift=float(args.reference_scf_level_shift),
             potential_clip=float(args.reference_scf_potential_clip),
+            jk_backend=str(args.jk_backend),
+            df_tol=float(args.df_tol),
+            df_max_rank=args.df_max_rank,
         ),
         grid_ao_backend="jax",
         integral_backend=str(args.integral_backend),
         compute_local_hfx_features=compute_hfx,
         compute_local_hfx_aux=compute_hfx,
+        compute_local_pt2_features=compute_pt2,
         verbose=int(args.verbose),
     )
     return ReferencePoint(row=row, molecule=molecule)
@@ -238,7 +295,11 @@ def get_or_build_reference(
             with h5py.File(cache_path, "r") as handle:
                 if key in handle:
                     logger.log(f"[ref_cache] hit row={row.row_index} {row.atom1}-{row.atom2}")
-                    return _read_reference(handle[key])
+                    return _read_reference(
+                        handle[key],
+                        array_backend="host",
+                        hfx_nu_storage=("chunked" if bool(args.include_hfx_channel) else "array"),
+                    )
         except Exception as exc:
             logger.log(f"[ref_cache] read error row={row.row_index}: {exc!r}; rebuilding")
     try:
@@ -264,16 +325,53 @@ def get_or_build_reference(
     return point
 
 
-def build_data(points: list[ReferencePoint]) -> tuple[GroundStateDatum, ...]:
-    return tuple(
-        GroundStateDatum.from_parts(
-            point.molecule,
-            core=GroundStateCoreDatum(
-                target_total_energy=jnp.asarray(point.row.target_energy_h, dtype=jnp.float64),
-            ),
-        )
-        for point in points
+def reference_exists(row: XNDDimerRow, *, args: argparse.Namespace) -> bool:
+    cache_path = Path(args.reference_cache)
+    if not cache_path.exists() or bool(args.rebuild_reference_cache):
+        return True
+    with h5py.File(cache_path, "r") as handle:
+        return _cache_key(row, args) in handle
+
+
+def build_reference_cache_only(
+    rows: list[XNDDimerRow],
+    *,
+    args: argparse.Namespace,
+    logger: RunLogger,
+) -> int:
+    count = 0
+    for row in rows:
+        point = get_or_build_reference(row, args=args, logger=logger)
+        if point is not None:
+            count += 1
+        del point
+        gc.collect()
+        try:
+            jax.clear_caches()
+        except Exception:
+            pass
+    return count
+
+
+def build_datum(point: ReferencePoint) -> GroundStateDatum:
+    return GroundStateDatum.from_parts(
+        point.molecule,
+        core=GroundStateCoreDatum(
+            target_total_energy=jnp.asarray(point.row.target_energy_h, dtype=jnp.float64),
+        ),
     )
+
+
+def load_reference_datum(
+    row: XNDDimerRow,
+    *,
+    args: argparse.Namespace,
+    logger: RunLogger,
+) -> tuple[ReferencePoint, GroundStateDatum] | None:
+    point = get_or_build_reference(row, args=args, logger=logger)
+    if point is None:
+        return None
+    return point, build_datum(point)
 
 
 def _write_split_csv(path: Path, train_rows: list[XNDDimerRow], test_rows: list[XNDDimerRow]) -> None:
@@ -298,14 +396,12 @@ def _write_split_csv(path: Path, train_rows: list[XNDDimerRow], test_rows: list[
 
 
 def train(
-    train_points: list[ReferencePoint],
-    test_points: list[ReferencePoint],
+    train_rows: list[XNDDimerRow],
+    test_rows: list[XNDDimerRow],
     *,
     args: argparse.Namespace,
     logger: RunLogger,
 ) -> dict[str, Any]:
-    train_data = build_data(train_points)
-    test_data = build_data(test_points)
     functional = neural_xc.Functional(
         semilocal_xc=tuple(str(name) for name in args.semilocal_xc),
         hidden_dims=tuple(int(value) for value in args.hidden_dims),
@@ -313,7 +409,9 @@ def train(
         input_feature_mode=(
             "canonical" if str(args.input_feature_mode) == "dm21_original" else str(args.input_feature_mode)
         ),
-        include_pt2_channel=False,
+        include_hfx_channel=bool(args.include_hfx_channel),
+        include_pt2_channel=bool(args.include_pt2_channel),
+        pt2_channel_mode=str(args.pt2_channel_mode),
         name="neural_xc_xnd_dimers_ground",
     )
     coefficient_prior = neural_xc.resolve_coefficient_prior_values(
@@ -321,7 +419,7 @@ def train(
     )
     training_config = GroundStateTrainingConfig.from_parts(
         core=GroundStateCoreTrainingConfig(
-            mode="self_consistent",
+            mode=str(args.training_mode),
             energy_mse_weight=float(args.energy_mse_weight),
             energy_mae_weight=float(args.energy_mae_weight),
             energy_normalization=str(args.energy_normalization),
@@ -351,12 +449,21 @@ def train(
         decay_rate=float(args.lr_decay_factor),
         staircase=True,
     )
+    init_loaded = None
+    for row in train_rows:
+        init_loaded = load_reference_datum(row, args=args, logger=logger)
+        if init_loaded is not None:
+            break
+    if init_loaded is None:
+        raise RuntimeError("Need at least one train reference to initialize the model.")
+    init_point, init_datum = init_loaded
     state = create_train_state_from_molecule(
         functional,
         jax.random.PRNGKey(int(args.seed)),
-        train_points[0].molecule,
+        init_point.molecule,
         optax.adam(lr_schedule),
     )
+    del init_loaded, init_point, init_datum
     loss_and_grad = make_ground_state_loss_and_grad(
         functional,
         training_config=training_config,
@@ -372,53 +479,88 @@ def train(
     if bool(args.jit_eval):
         eval_single = jax.jit(eval_single)
 
-    def eval_data(data: tuple[GroundStateDatum, ...]) -> dict[str, float]:
+    def eval_data(rows: list[XNDDimerRow], *, label: str) -> dict[str, float]:
+        logger.log(f"[eval] {label} start n={len(rows)}")
         losses = []
         raw_maes = []
         norm_maes = []
         conv = []
-        for datum in data:
+        progress_every = max(1, min(25, len(rows)))
+        for row_index, row in enumerate(rows, start=1):
+            loaded = load_reference_datum(row, args=args, logger=logger)
+            if loaded is None:
+                continue
+            point, datum = loaded
             loss_val, metrics = eval_single(state.params, datum)
             losses.append(float(loss_val))
             raw_maes.append(_metric_scalar(metrics, "energy_mae"))
             norm_maes.append(_metric_scalar(metrics, "normalized_energy_mae"))
             conv.append(_metric_scalar(metrics, "scf_converged", 1.0))
-        return {
+            del loaded, point, datum
+            if row_index % progress_every == 0 or row_index == len(rows):
+                logger.log(f"[eval] {label} progress {row_index}/{len(rows)}")
+        result = {
             "loss": float(np.mean(losses)) if losses else float("nan"),
             "energy_mae_h": float(np.mean(raw_maes)) if raw_maes else float("nan"),
             "normalized_energy_mae": float(np.mean(norm_maes)) if norm_maes else float("nan"),
             "scf_converged_fraction": float(np.mean(conv)) if conv else float("nan"),
         }
+        logger.log(
+            f"[eval] {label} done loss={result['loss']:.8e} "
+            f"energy_mae={result['energy_mae_h']:.8e} "
+            f"scf_converged={result['scf_converged_fraction']:.6f}"
+        )
+        return result
 
     rng = np.random.default_rng(int(args.seed))
-    train_indices = np.arange(len(train_data))
+    train_indices = np.arange(len(train_rows))
     rng.shuffle(train_indices)
     cursor = 0
     history: list[dict[str, float]] = []
+    history_path = Path(args.outdir) / "training_history.csv"
+
+    def flush_history() -> None:
+        write_history(history_path, history)
+
     best_params = state.params
     best_test_loss = float("inf")
     best_step = 0
 
-    initial_train = eval_data(train_data)
-    initial_test = eval_data(test_data)
+    if bool(args.skip_initial_eval):
+        initial_train = {"loss": float("nan"), "energy_mae_h": float("nan")}
+        initial_test = {"loss": float("nan"), "energy_mae_h": float("nan")}
+        logger.log("[train_init] skipped initial eval")
+    else:
+        initial_train = eval_data(train_rows, label="initial_train")
+        initial_test = eval_data(test_rows, label="initial_test")
+        logger.log(
+            "[train_init] "
+            f"train_loss={initial_train['loss']:.8e} "
+            f"test_loss={initial_test['loss']:.8e} "
+            f"train_energy_mae={initial_train['energy_mae_h']:.8e} "
+            f"test_energy_mae={initial_test['energy_mae_h']:.8e}"
+        )
     history.append(
         {
             "step": 0,
-            "batch_loss": float("nan"),
-            "batch_energy_mae_h": float("nan"),
             "train_loss": initial_train["loss"],
-            "test_loss": initial_test["loss"],
             "train_energy_mae_h": initial_train["energy_mae_h"],
+            "train_loss_reevaluated": initial_train["loss"],
+            "train_energy_mae_reevaluated_h": initial_train["energy_mae_h"],
+            "test_loss": initial_test["loss"],
             "test_energy_mae_h": initial_test["energy_mae_h"],
             "grad_norm": float("nan"),
             "param_update_norm": float("nan"),
             "lr": float(args.learning_rate),
         }
     )
+    flush_history()
     logger.log(
         "[train] "
-        f"steps={int(args.steps)} batch_size={int(args.batch_size)} "
-        f"train={len(train_data)} test={len(test_data)} lr={float(args.learning_rate):.6g} "
+        f"steps={int(args.steps)} train_step_mode=stream_single_molecule "
+        f"batch_size={int(args.batch_size)} "
+        f"jit_train={bool(args.jit_train)} jit_eval={bool(args.jit_eval)} "
+        f"train={len(train_rows)} test={len(test_rows)} lr={float(args.learning_rate):.6g} "
         f"lr_decay_every={int(args.lr_decay_every)} lr_decay_factor={float(args.lr_decay_factor):.6g} "
         f"energy_normalization={args.energy_normalization}"
     )
@@ -435,11 +577,19 @@ def train(
         maes = []
         grad_norms = []
         for idx in batch_ids:
-            loss_val, metrics, grads = loss_and_grad(state.params, train_data[int(idx)])
+            loaded = load_reference_datum(train_rows[int(idx)], args=args, logger=logger)
+            if loaded is None:
+                continue
+            point, datum = loaded
+            loss_val, metrics, grads = loss_and_grad(state.params, datum)
             losses.append(float(loss_val))
             maes.append(_metric_scalar(metrics, "energy_mae"))
             grad_norms.append(_metric_scalar(metrics, "grad_norm"))
             grad_sum = _tree_add(grad_sum, grads)
+            del loaded, point, datum
+        if grad_sum is None:
+            logger.log(f"[train] no valid references in batch at step {step}; skipped update")
+            continue
         grads_avg = _tree_scale(grad_sum, 1.0 / max(1, len(batch_ids)))
         state = state.apply_gradients(grads=grads_avg)
         param_delta = jax.tree_util.tree_map(
@@ -450,42 +600,55 @@ def train(
         if not _tree_all_finite(state.params):
             state = prev_state
             logger.log(f"[train] non-finite params at step {step}; reverted update")
-        batch_loss = float(np.mean(losses))
-        batch_mae = float(np.mean(maes))
+        train_loss = float(np.mean(losses))
+        train_mae = float(np.mean(maes))
         train_eval = {"loss": float("nan"), "energy_mae_h": float("nan")}
         test_eval = {"loss": float("nan"), "energy_mae_h": float("nan")}
-        if step % int(args.eval_every) == 0 or step == int(args.steps):
-            train_eval = eval_data(train_data)
-            test_eval = eval_data(test_data)
+        final_step = step == int(args.steps)
+        if (step % int(args.eval_every) == 0 or final_step) and not (
+            final_step and bool(args.skip_final_evaluation)
+        ):
+            train_eval = eval_data(train_rows, label=f"step={step} train")
+            test_eval = eval_data(test_rows, label=f"step={step} test")
             if test_eval["loss"] < best_test_loss:
                 best_test_loss = test_eval["loss"]
                 best_step = step
                 best_params = state.params
         row = {
             "step": step,
-            "batch_loss": batch_loss,
-            "batch_energy_mae_h": batch_mae,
-            "train_loss": train_eval["loss"],
+            "train_loss": train_loss,
+            "train_energy_mae_h": train_mae,
+            "train_loss_reevaluated": train_eval["loss"],
+            "train_energy_mae_reevaluated_h": train_eval["energy_mae_h"],
             "test_loss": test_eval["loss"],
-            "train_energy_mae_h": train_eval["energy_mae_h"],
             "test_energy_mae_h": test_eval["energy_mae_h"],
             "grad_norm": float(np.mean(grad_norms)),
             "param_update_norm": float(_tree_l2_norm(param_delta)),
             "lr": float(lr_schedule(step - 1)),
         }
         history.append(row)
+        flush_history()
         if step == 1 or step % int(args.log_every) == 0 or step == int(args.steps):
             logger.log(
                 "[train] "
                 f"step={step:5d}/{int(args.steps):5d} "
-                f"batch_loss={row['batch_loss']:.8e} "
-                f"batch_energy_mae={row['batch_energy_mae_h']:.8e} "
-                f"train_loss={row['train_loss']:.8e} test_loss={row['test_loss']:.8e} "
+                f"train_loss={row['train_loss']:.8e} "
+                f"train_energy_mae={row['train_energy_mae_h']:.8e} "
+                f"train_loss_reevaluated={row['train_loss_reevaluated']:.8e} "
+                f"test_loss={row['test_loss']:.8e} "
                 f"grad_norm={row['grad_norm']:.8e} lr={row['lr']:.8e}"
             )
     elapsed = time.perf_counter() - t0
-    final_train = eval_data(train_data)
-    final_test = eval_data(test_data)
+    if bool(args.skip_final_evaluation):
+        final_train = {"loss": float("nan"), "energy_mae_h": float("nan")}
+        final_test = {"loss": float("nan"), "energy_mae_h": float("nan")}
+        if best_test_loss == float("inf"):
+            best_params = state.params
+            best_step = int(args.steps)
+        logger.log("[train] skipped final eval")
+    else:
+        final_train = eval_data(train_rows, label="final_train")
+        final_test = eval_data(test_rows, label="final_test")
     if final_test["loss"] < best_test_loss:
         best_test_loss = final_test["loss"]
         best_step = int(args.steps)
@@ -522,18 +685,23 @@ def write_history(path: Path, history: list[dict[str, Any]]) -> None:
 def write_predictions(
     path: Path,
     *,
-    points: list[ReferencePoint],
-    data: tuple[GroundStateDatum, ...],
+    rows: list[XNDDimerRow],
     split: str,
     params: Any,
     eval_single: Any,
+    args: argparse.Namespace,
+    logger: RunLogger,
 ) -> list[dict[str, Any]]:
-    rows = []
-    for point, datum in zip(points, data, strict=True):
+    pred_rows = []
+    for row in rows:
+        loaded = load_reference_datum(row, args=args, logger=logger)
+        if loaded is None:
+            continue
+        point, datum = loaded
         _, metrics = eval_single(params, datum)
         predicted = _metric_scalar(metrics, "predicted_total_energies")
         target = float(point.row.target_energy_h)
-        rows.append(
+        pred_rows.append(
             {
                 "split": split,
                 "row_index": int(point.row.row_index),
@@ -548,13 +716,16 @@ def write_predictions(
                 "energy_abs_err_ev": abs(predicted - target) * HARTREE_TO_EV,
             }
         )
+        del loaded, point, datum
+    if not pred_rows:
+        return pred_rows
     mode = "a" if path.exists() else "w"
     with path.open(mode, encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer = csv.DictWriter(handle, fieldnames=list(pred_rows[0].keys()))
         if mode == "w":
             writer.writeheader()
-        writer.writerows(rows)
-    return rows
+        writer.writerows(pred_rows)
+    return pred_rows
 
 
 def plot_outputs(outdir: Path, history: list[dict[str, Any]], pred_rows: list[dict[str, Any]]) -> None:
@@ -564,12 +735,10 @@ def plot_outputs(outdir: Path, history: list[dict[str, Any]], pred_rows: list[di
     import matplotlib.pyplot as plt
 
     steps = np.asarray([row["step"] for row in history], dtype=float)
-    batch_loss = np.asarray([row["batch_loss"] for row in history], dtype=float)
-    train_loss = np.asarray([row["train_loss"] for row in history], dtype=float)
+    train_loss = np.asarray([row["train_loss_reevaluated"] for row in history], dtype=float)
     test_loss = np.asarray([row["test_loss"] for row in history], dtype=float)
 
     fig, ax = plt.subplots(figsize=(7.2, 4.4))
-    ax.plot(steps[np.isfinite(batch_loss)], batch_loss[np.isfinite(batch_loss)], lw=1.0, alpha=0.55, label="batch")
     ax.plot(steps[np.isfinite(train_loss)], train_loss[np.isfinite(train_loss)], marker="o", lw=1.5, label="train eval")
     ax.plot(steps[np.isfinite(test_loss)], test_loss[np.isfinite(test_loss)], marker="s", lw=1.5, label="test eval")
     ax.set_yscale("log")
@@ -580,27 +749,28 @@ def plot_outputs(outdir: Path, history: list[dict[str, Any]], pred_rows: list[di
     fig.savefig(outdir / "training_loss.png", dpi=220)
     plt.close(fig)
 
-    train = [row for row in pred_rows if row["split"] == "train"]
-    test = [row for row in pred_rows if row["split"] == "test"]
-    fig, ax = plt.subplots(figsize=(5.2, 5.0))
-    for label, rows, marker in (("train", train, "o"), ("test", test, "s")):
-        if not rows:
-            continue
-        target = np.asarray([row["target_energy_h"] for row in rows], dtype=float)
-        pred = np.asarray([row["predicted_energy_h"] for row in rows], dtype=float)
-        ax.scatter(target, pred, s=16, alpha=0.75, marker=marker, label=label)
-    all_e = np.asarray(
-        [row["target_energy_h"] for row in pred_rows] + [row["predicted_energy_h"] for row in pred_rows],
-        dtype=float,
-    )
-    lo, hi = float(np.min(all_e)), float(np.max(all_e))
-    ax.plot([lo, hi], [lo, hi], color="black", lw=1.0)
-    ax.set_xlabel("target energy (Ha)")
-    ax.set_ylabel("predicted energy (Ha)")
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(outdir / "xnd_dimers_ground_energy_scatter.png", dpi=220)
-    plt.close(fig)
+    if pred_rows:
+        train = [row for row in pred_rows if row["split"] == "train"]
+        test = [row for row in pred_rows if row["split"] == "test"]
+        fig, ax = plt.subplots(figsize=(5.2, 5.0))
+        for label, rows, marker in (("train", train, "o"), ("test", test, "s")):
+            if not rows:
+                continue
+            target = np.asarray([row["target_energy_h"] for row in rows], dtype=float)
+            pred = np.asarray([row["predicted_energy_h"] for row in rows], dtype=float)
+            ax.scatter(target, pred, s=16, alpha=0.75, marker=marker, label=label)
+        all_e = np.asarray(
+            [row["target_energy_h"] for row in pred_rows] + [row["predicted_energy_h"] for row in pred_rows],
+            dtype=float,
+        )
+        lo, hi = float(np.min(all_e)), float(np.max(all_e))
+        ax.plot([lo, hi], [lo, hi], color="black", lw=1.0)
+        ax.set_xlabel("target energy (Ha)")
+        ax.set_ylabel("predicted energy (Ha)")
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(outdir / "xnd_dimers_ground_energy_scatter.png", dpi=220)
+        plt.close(fig)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -609,6 +779,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--outdir", default="outputs/xnd_dimers_ground")
     p.add_argument("--reference-cache", default="outputs/xnd_dimers_ground/reference_cache.h5")
     p.add_argument("--rebuild-reference-cache", action="store_true")
+    p.add_argument("--reference-only", action="store_true")
     p.add_argument("--fail-on-build-error", action="store_true")
     p.add_argument("--max-points", type=int, default=None)
     p.add_argument("--test-fraction", type=float, default=0.2)
@@ -618,6 +789,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--grids-level", type=int, default=2)
     p.add_argument("--max-l", type=int, default=3)
     p.add_argument("--integral-backend", choices=("cpu", "gpu", "jax", "libcint"), default="gpu")
+    p.add_argument("--jk-backend", choices=("full", "df"), default="full")
+    p.add_argument("--reference-builder", choices=("jax", "pyscf"), default="jax")
+    p.add_argument("--df-tol", type=float, default=1e-10)
+    p.add_argument("--df-max-rank", type=int, default=None)
     p.add_argument("--reference-scf-max-cycle", type=int, default=512)
     p.add_argument("--reference-scf-conv-tol", type=float, default=1e-10)
     p.add_argument("--reference-scf-conv-tol-density", type=float, default=1e-8)
@@ -633,6 +808,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--energy-mae-weight", type=float, default=1.0)
     p.add_argument("--energy-normalization", choices=("none", "per_electron", "per_atom"), default="per_electron")
     p.add_argument("--coefficient-prior-weight", type=float, default=0.0)
+    p.add_argument("--training-mode", choices=("fixed_density", "self_consistent"), default="self_consistent")
+    p.add_argument("--include-hfx-channel", action="store_true")
+    p.add_argument("--include-pt2-channel", action="store_true")
+    p.add_argument("--pt2-channel-mode", choices=("scaled_projected", "local_exact"), default="scaled_projected")
     p.add_argument("--train-scf-max-cycle", type=int, default=0)
     p.add_argument("--train-scf-damping", type=float, default=0.25)
     p.add_argument("--train-scf-level-shift", type=float, default=0.0)
@@ -651,6 +830,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--semilocal-xc", nargs="+", default=list(_DEFAULT_SEMILOCAL_XC))
     p.add_argument("--jit-train", action="store_true")
     p.add_argument("--jit-eval", action="store_true")
+    p.add_argument("--skip-initial-eval", action="store_true")
+    p.add_argument("--skip-final-evaluation", action="store_true")
     p.add_argument("--log-every", type=int, default=20)
     p.add_argument("--eval-every", type=int, default=100)
     p.add_argument("--verbose", type=int, default=0)
@@ -673,51 +854,73 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     logger.log(
         "[setup] "
         f"csv={args.csv} rows={len(rows)} train={len(train_rows)} test={len(test_rows)} "
-        f"basis={args.basis} grid={args.grids_level} integral={args.integral_backend}"
+        f"basis={args.basis} grid={args.grids_level} integral={args.integral_backend} "
+        f"reference={args.reference_builder} jk={args.jk_backend} "
+        f"include_hfx_channel={bool(args.include_hfx_channel)}"
     )
-    train_points = [
-        point
-        for row in train_rows
-        if (point := get_or_build_reference(row, args=args, logger=logger)) is not None
-    ]
-    test_points = [
-        point
-        for row in test_rows
-        if (point := get_or_build_reference(row, args=args, logger=logger)) is not None
-    ]
-    if not train_points or not test_points:
-        raise RuntimeError(f"Need non-empty train/test references; got {len(train_points)}/{len(test_points)}")
-    logger.log(f"[setup] references ready train={len(train_points)} test={len(test_points)}")
-    result = train(train_points, test_points, args=args, logger=logger)
+    if bool(args.reference_only):
+        train_references = build_reference_cache_only(train_rows, args=args, logger=logger)
+        test_references = build_reference_cache_only(test_rows, args=args, logger=logger)
+        if not train_references or not test_references:
+            raise RuntimeError(f"Need non-empty train/test references; got {train_references}/{test_references}")
+        logger.log(f"[setup] references cached train={train_references} test={test_references}")
+        summary = {
+            "csv": str(args.csv),
+            "basis": str(args.basis),
+            "xc": str(args.xc),
+            "grids_level": int(args.grids_level),
+            "integral_backend": str(args.integral_backend),
+            "reference_builder": str(args.reference_builder),
+            "jk_backend": str(args.jk_backend),
+            "include_hfx_channel": bool(args.include_hfx_channel),
+            "reference_only": True,
+            "train_rows_requested": len(train_rows),
+            "test_rows_requested": len(test_rows),
+            "train_references": train_references,
+            "test_references": test_references,
+            "reference_cache": str(args.reference_cache),
+        }
+        (outdir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        logger.log(f"[summary] reference_only outdir={outdir}")
+        return summary
+    train_rows_ready = [row for row in train_rows if reference_exists(row, args=args)]
+    test_rows_ready = [row for row in test_rows if reference_exists(row, args=args)]
+    if not train_rows_ready or not test_rows_ready:
+        raise RuntimeError(f"Need non-empty train/test references; got {len(train_rows_ready)}/{len(test_rows_ready)}")
+    logger.log(f"[setup] reference rows ready train={len(train_rows_ready)} test={len(test_rows_ready)}")
+    result = train(train_rows_ready, test_rows_ready, args=args, logger=logger)
     write_history(outdir / "training_history.csv", result["history"])
     checkpoint_path = outdir / "neural_xc_params.msgpack"
     save_params_checkpoint(checkpoint_path, result["best_params"])
     pred_path = outdir / "xnd_dimers_ground_predictions.csv"
     if pred_path.exists():
         pred_path.unlink()
-    train_data = build_data(train_points)
-    test_data = build_data(test_points)
     pred_rows = []
-    pred_rows.extend(
-        write_predictions(
-            pred_path,
-            points=train_points,
-            data=train_data,
-            split="train",
-            params=result["best_params"],
-            eval_single=result["eval_single"],
+    if bool(args.skip_final_evaluation):
+        logger.log("[summary] skipped final predictions")
+    else:
+        pred_rows.extend(
+            write_predictions(
+                pred_path,
+                rows=train_rows_ready,
+                split="train",
+                params=result["best_params"],
+                eval_single=result["eval_single"],
+                args=args,
+                logger=logger,
+            )
         )
-    )
-    pred_rows.extend(
-        write_predictions(
-            pred_path,
-            points=test_points,
-            data=test_data,
-            split="test",
-            params=result["best_params"],
-            eval_single=result["eval_single"],
+        pred_rows.extend(
+            write_predictions(
+                pred_path,
+                rows=test_rows_ready,
+                split="test",
+                params=result["best_params"],
+                eval_single=result["eval_single"],
+                args=args,
+                logger=logger,
+            )
         )
-    )
     plot_outputs(outdir, result["history"], pred_rows)
     summary = {
         "csv": str(args.csv),
@@ -725,14 +928,24 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "xc": str(args.xc),
         "grids_level": int(args.grids_level),
         "integral_backend": str(args.integral_backend),
+        "reference_builder": str(args.reference_builder),
+        "jk_backend": str(args.jk_backend),
+        "df_tol": float(args.df_tol),
+        "df_max_rank": args.df_max_rank,
         "input_feature_mode": str(args.input_feature_mode),
+        "training_mode": str(args.training_mode),
+        "include_hfx_channel": bool(args.include_hfx_channel),
+        "include_pt2_channel": bool(args.include_pt2_channel),
+        "pt2_channel_mode": str(args.pt2_channel_mode),
+        "skip_initial_eval": bool(args.skip_initial_eval),
+        "skip_final_evaluation": bool(args.skip_final_evaluation),
         "energy_normalization": str(args.energy_normalization),
         "seed": int(args.seed),
         "test_fraction": float(args.test_fraction),
         "train_rows_requested": len(train_rows),
         "test_rows_requested": len(test_rows),
-        "train_references": len(train_points),
-        "test_references": len(test_points),
+        "train_references": len(train_rows_ready),
+        "test_references": len(test_rows_ready),
         "steps": int(args.steps),
         "batch_size": int(args.batch_size),
         "learning_rate": float(args.learning_rate),
@@ -746,9 +959,13 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "best_step": int(result["best_step"]),
         "elapsed_s": float(result["elapsed_s"]),
         "history_csv": str(outdir / "training_history.csv"),
-        "prediction_csv": str(pred_path),
+        "prediction_csv": (None if bool(args.skip_final_evaluation) else str(pred_path)),
         "training_curve_png": str(outdir / "training_loss.png"),
-        "prediction_scatter_png": str(outdir / "xnd_dimers_ground_energy_scatter.png"),
+        "prediction_scatter_png": (
+            None
+            if bool(args.skip_final_evaluation)
+            else str(outdir / "xnd_dimers_ground_energy_scatter.png")
+        ),
         "checkpoint": str(checkpoint_path),
     }
     (outdir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

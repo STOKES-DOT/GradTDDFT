@@ -107,15 +107,30 @@ def implicit_fixed_point_solution(
             out = _optimality_transpose(vec) - regularization * vec
             return _clean_and_clip(out, cfg.clip).reshape(-1)
 
-        lambda_flat = solve_implicit_linear_system(
-            _adjoint_op,
-            -jax.lax.stop_gradient(rhs.reshape(-1)),
-            solver_name=cfg.solver_name,
-            tol=cfg.tolerance,
-            max_iter=cfg.max_iter,
-            restart=cfg.restart,
-        )
-        adjoint = jax.lax.stop_gradient(lambda_flat).reshape(solution_local.shape)
+        solver_name = str(cfg.solver_name).lower()
+        if solver_name in {"neumann", "fixed_point", "fixed-point"}:
+            denom = jnp.asarray(1.0, dtype=solution_local.dtype) + regularization
+
+            def _neumann_step(_idx: int, adjoint_value: Array) -> Array:
+                next_value = rhs + fixed_point_transpose(adjoint_value)
+                return _clean_and_clip(next_value / denom, cfg.clip)
+
+            adjoint = jax.lax.fori_loop(
+                0,
+                max(1, int(cfg.max_iter)),
+                _neumann_step,
+                jnp.zeros_like(rhs),
+            )
+        else:
+            lambda_flat = solve_implicit_linear_system(
+                _adjoint_op,
+                -jax.lax.stop_gradient(rhs.reshape(-1)),
+                solver_name=cfg.solver_name,
+                tol=cfg.tolerance,
+                max_iter=cfg.max_iter,
+                restart=cfg.restart,
+            )
+            adjoint = jax.lax.stop_gradient(lambda_flat).reshape(solution_local.shape)
         adjoint = _clean_and_clip(adjoint, cfg.clip)
 
         if params_vjp_from_adjoint is not None:

@@ -1,0 +1,2 @@
+step,loss_pre_update,e1_total_penalty_pre_update,e1_total_mae_pre_update,e1_total_mse_pre_update,grad_norm,grad_abs_max,param_update_norm,nonfinite_grad_fraction,loss_reevaluated,e1_total_mae_reevaluated
+0,0.0003088689429638797,0.0003088689429638797,0.0003085086223779676,3.603205859120443e-07,nan,nan,nan,0.0,0.0003088689429638797,0.0003085086223779676

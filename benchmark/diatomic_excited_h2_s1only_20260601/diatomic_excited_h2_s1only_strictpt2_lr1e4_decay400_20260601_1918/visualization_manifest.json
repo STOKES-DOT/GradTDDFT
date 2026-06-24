@@ -1,0 +1,55 @@
+{
+  "description": "Data files needed to reproduce H2 bond-scan training visualizations.",
+  "figures": [
+    {
+      "data_files": [
+        "/home/yjiao/TD-GradDFT/outputs/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_s1_tda_dense_curve.csv",
+        "/home/yjiao/TD-GradDFT/outputs/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_s1_tda_excited_curve.csv",
+        "/home/yjiao/TD-GradDFT/outputs/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_s1_reference_points.csv",
+        "/home/yjiao/TD-GradDFT/outputs/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/training_history.csv"
+      ],
+      "figure": "/home/yjiao/TD-GradDFT/outputs/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_s1_tda_dense_curve.png",
+      "x": "r_angstrom",
+      "y": [
+        "fci_energy_h",
+        "exact_energy_h",
+        "predicted_energy_h",
+        "fci_s1_h",
+        "exact_s1_h",
+        "predicted_s1_h",
+        "energy_abs_err_ev",
+        "s1_gap_abs_err_ev",
+        "density_l2"
+      ]
+    },
+    {
+      "data_files": [
+        "/home/yjiao/TD-GradDFT/outputs/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_equilibrium_tda_spectrum_vs_fci_sticks.csv",
+        "/home/yjiao/TD-GradDFT/outputs/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_equilibrium_tda_spectrum_vs_fci_broadened.csv"
+      ],
+      "figure": "/home/yjiao/TD-GradDFT/outputs/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/h2_equilibrium_tda_spectrum_vs_fci.png",
+      "x": "excitation_ev / energy_ev",
+      "y": [
+        "oscillator_strength",
+        "intensity"
+      ]
+    },
+    {
+      "data_files": [
+        "/home/yjiao/TD-GradDFT/outputs/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/training_history.csv"
+      ],
+      "figure": "/home/yjiao/TD-GradDFT/outputs/diatomic_excited_h2_s1only_strictpt2_lr1e4_decay400_20260601_1918/training_loss.png",
+      "x": "step",
+      "y": [
+        "loss_pre_update",
+        "s1_penalty_pre_update",
+        "s1_mae_pre_update",
+        "s1_mse_pre_update",
+        "grad_norm",
+        "grad_abs_max",
+        "param_update_norm"
+      ]
+    }
+  ],
+  "paper_experiment": "Bond-Scan S0/S1 Benchmarks"
+}

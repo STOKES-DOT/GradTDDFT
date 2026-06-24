@@ -1,0 +1,14 @@
+host=c20
+start_time=2026-06-22T14:08:30+08:00
+cwd=/home/yjiao/TD-GradDFT
+python=/home/yjiao/opt/miniconda3/envs/jax_scf/bin/python
+gpu_uuid=GPU-7a6aac16-5c9b-e899-49ab-f43e10bcf2f5
+db_path=/home/yjiao/QH9Stable.db
+db_id=55967
+formula=C9H20
+N=29
+electrons=74
+basis=sto-3g
+xc=b3lyp
+steps=3
+nstates=3

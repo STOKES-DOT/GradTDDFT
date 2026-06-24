@@ -32,6 +32,26 @@ def test_implicit_fixed_point_solution_matches_scalar_analytic_gradient():
     assert np.allclose(jax.grad(solve)(param), 1.0 / (1.0 - 0.2) ** 2, rtol=1e-6)
 
 
+def test_implicit_fixed_point_solution_neumann_adjoint_matches_scalar_gradient():
+    cfg = ImplicitFixedPointConfig(
+        solver_name="neumann",
+        max_iter=12,
+    )
+
+    def solve(param):
+        solution = jax.lax.stop_gradient(1.0 / (1.0 - param))
+        return implicit_fixed_point_solution(
+            param,
+            solution=solution,
+            fixed_point=lambda x, p: p * x + 1.0,
+            config=cfg,
+        )
+
+    param = jnp.asarray(0.2, dtype=jnp.float64)
+
+    assert np.allclose(jax.grad(solve)(param), 1.0 / (1.0 - 0.2) ** 2, rtol=1e-6)
+
+
 def test_scf_package_exports_new_refactor_boundaries():
     from td_graddft.scf import (
         ImplicitFixedPointConfig as ExportedImplicitFixedPointConfig,

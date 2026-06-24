@@ -1,0 +1,16 @@
+{"event": "task_start", "index": 1, "ntasks": 8, "task_id": "ethylene__RKS__pbe__def2-svp__0__tda__singlet__5__2fcd93c0c3", "timestamp_utc": "2026-06-16T09:35:07+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "ethylene__RKS__pbe__def2-svp__0__tda__singlet__5__2fcd93c0c3", "timestamp_utc": "2026-06-16T09:35:07+00:00"}
+{"event": "task_start", "index": 2, "ntasks": 8, "task_id": "ethylene__RKS__pbe__def2-svp__0__tddft__singlet__5__c45cc6ad51", "timestamp_utc": "2026-06-16T09:35:26+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "ethylene__RKS__pbe__def2-svp__0__tddft__singlet__5__c45cc6ad51", "timestamp_utc": "2026-06-16T09:35:26+00:00"}
+{"event": "task_start", "index": 3, "ntasks": 8, "task_id": "water__RKS__pbe__def2-svp__0__tda__singlet__5__0560854ab7", "timestamp_utc": "2026-06-16T09:35:39+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "water__RKS__pbe__def2-svp__0__tda__singlet__5__0560854ab7", "timestamp_utc": "2026-06-16T09:35:39+00:00"}
+{"event": "task_start", "index": 4, "ntasks": 8, "task_id": "water__RKS__pbe__def2-svp__0__tddft__singlet__5__56a4c044ae", "timestamp_utc": "2026-06-16T09:35:55+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "water__RKS__pbe__def2-svp__0__tddft__singlet__5__56a4c044ae", "timestamp_utc": "2026-06-16T09:35:55+00:00"}
+{"event": "task_start", "index": 5, "ntasks": 8, "task_id": "co__RKS__pbe__def2-svp__0__tda__singlet__5__1a229d07e1", "timestamp_utc": "2026-06-16T09:36:07+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "co__RKS__pbe__def2-svp__0__tda__singlet__5__1a229d07e1", "timestamp_utc": "2026-06-16T09:36:07+00:00"}
+{"event": "task_start", "index": 6, "ntasks": 8, "task_id": "co__RKS__pbe__def2-svp__0__tddft__singlet__5__be8cffe1f8", "timestamp_utc": "2026-06-16T09:36:25+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "co__RKS__pbe__def2-svp__0__tddft__singlet__5__be8cffe1f8", "timestamp_utc": "2026-06-16T09:36:25+00:00"}
+{"event": "task_start", "index": 7, "ntasks": 8, "task_id": "n2__RKS__pbe__def2-svp__0__tda__singlet__5__95ff3e95ed", "timestamp_utc": "2026-06-16T09:36:38+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "n2__RKS__pbe__def2-svp__0__tda__singlet__5__95ff3e95ed", "timestamp_utc": "2026-06-16T09:36:38+00:00"}
+{"event": "task_start", "index": 8, "ntasks": 8, "task_id": "n2__RKS__pbe__def2-svp__0__tddft__singlet__5__6373588e3b", "timestamp_utc": "2026-06-16T09:37:04+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "n2__RKS__pbe__def2-svp__0__tddft__singlet__5__6373588e3b", "timestamp_utc": "2026-06-16T09:37:04+00:00"}

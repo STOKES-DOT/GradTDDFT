@@ -1,0 +1,2 @@
+{"event": "task_start", "index": 1, "ntasks": 1, "task_id": "benzene__RKS__b3lyp__def2-svp__0__tddft__singlet__6__f73e8519a1", "timestamp_utc": "2026-06-03T09:02:34+00:00"}
+{"event": "task_ok", "support_status": "graddft_supported", "task_id": "benzene__RKS__b3lyp__def2-svp__0__tddft__singlet__6__f73e8519a1", "timestamp_utc": "2026-06-03T09:02:34+00:00"}

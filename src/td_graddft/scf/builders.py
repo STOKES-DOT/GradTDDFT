@@ -460,17 +460,7 @@ def unrestricted_molecule_from_spec_with_jax_uks(
     parse_xc(xc_spec_resolved)
     cfg = UKSConfig(xc_spec=xc_spec_resolved) if uks_config is None else uks_config
     if cfg.xc_spec != xc_spec_resolved:
-        cfg = UKSConfig(
-            xc_spec=xc_spec_resolved,
-            max_cycle=cfg.max_cycle,
-            conv_tol=cfg.conv_tol,
-            conv_tol_density=cfg.conv_tol_density,
-            damping=cfg.damping,
-            level_shift=cfg.level_shift,
-            orthogonalization_eps=cfg.orthogonalization_eps,
-            density_floor=cfg.density_floor,
-            potential_clip=cfg.potential_clip,
-        )
+        cfg = replace(cfg, xc_spec=xc_spec_resolved)
 
     scf_inputs = build_uks_integral_inputs(
         atom=atom,
@@ -587,6 +577,7 @@ def unrestricted_molecule_from_spec_with_jax_uks(
         hfx_local=hfx_local,
         hfx_nu=hfx_nu,
         pt2_local=pt2_local,
+        df_factors=scf_inputs.df_factors,
     )
 
 

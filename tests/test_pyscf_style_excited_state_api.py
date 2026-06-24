@@ -81,6 +81,37 @@ def test_tda_from_restricted_mf_stores_fields_and_spectra(monkeypatch):
     assert td.transition_dipole().shape == (2, 3)
 
 
+def test_tda_facade_preserves_nonconverged_ritz_result(monkeypatch):
+    import td_graddft.tdscf.api as api
+
+    class FakeRestrictedCasidaTDDFT:
+        def __init__(self, **kwargs):
+            pass
+
+        def tda(self, nstates=None):
+            return types.SimpleNamespace(
+                excitation_energies=jnp.asarray([0.10]),
+                amplitudes="amplitudes",
+                converged=False,
+            )
+
+    monkeypatch.setattr(api, "RestrictedCasidaTDDFT", FakeRestrictedCasidaTDDFT)
+
+    reference = types.SimpleNamespace(
+        mo_coeff=jnp.zeros((2, 2)),
+        mo_occ=jnp.asarray([2.0, 0.0]),
+        mo_energy=jnp.asarray([-0.5, 0.1]),
+    )
+
+    td = tdscf.TDA(reference)
+    result = td.kernel(nstates=1)
+
+    assert result is td.result
+    assert td.e is result.excitation_energies
+    assert td.xy == "amplitudes"
+    assert td.converged is False
+
+
 def test_tddft_from_raw_restricted_reference_uses_kernel(monkeypatch):
     import td_graddft.tdscf.api as api
 
