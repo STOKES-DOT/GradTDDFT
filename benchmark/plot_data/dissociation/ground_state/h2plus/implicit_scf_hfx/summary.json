@@ -1,0 +1,22 @@
+{
+  "basis": "def2-svp",
+  "dense_curve_csv": "outputs/remote_h2_h2plus_ground_hfx_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_124636/h2plus_ion_ground_hfx/h2plus_ground_dense_curve.csv",
+  "dense_energy_mae_ev": 0.007139088205942826,
+  "density_constraint_weight": 1.0,
+  "elapsed_s": 1109.8907435449946,
+  "figure_png": "outputs/remote_h2_h2plus_ground_hfx_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_124636/h2plus_ion_ground_hfx/h2plus_ground_training_and_curve.png",
+  "final_energy_mae_ev": 0.0015539772045795486,
+  "final_loss": 5.712923567711308e-05,
+  "grid_level": 2,
+  "integral_backend": "gpu",
+  "learning_rate": 0.001,
+  "lr_decay_every": 200,
+  "lr_decay_factor": 0.5,
+  "min_loss": 5.58855567017994e-05,
+  "min_loss_step": 1952,
+  "reference_points_csv": "outputs/remote_h2_h2plus_ground_hfx_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_124636/h2plus_ion_ground_hfx/h2plus_reference_points.csv",
+  "steps": 2000,
+  "system": "H2+",
+  "training_history_csv": "outputs/remote_h2_h2plus_ground_hfx_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_124636/h2plus_ion_ground_hfx/training_history.csv",
+  "visualization_manifest": "outputs/remote_h2_h2plus_ground_hfx_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_124636/h2plus_ion_ground_hfx/visualization_manifest.json"
+}

@@ -1,0 +1,62 @@
+[
+  {
+    "variant": "lda_vwn_rpa",
+    "semilocal_components": [
+      "lda_x",
+      "lda_c_vwn_rpa"
+    ],
+    "system": "N2",
+    "states": [
+      "ground",
+      "S1"
+    ],
+    "scf_mode": "implicit_scf",
+    "hfx": "enabled",
+    "pt2": "disabled",
+    "target_curves": [
+      "E0(R)",
+      "Omega1(R)",
+      "E1(R)=E0(R)+Omega1(R)"
+    ]
+  },
+  {
+    "variant": "gga_pbe",
+    "semilocal_components": [
+      "gga_x_pbe",
+      "gga_c_pbe"
+    ],
+    "system": "N2",
+    "states": [
+      "ground",
+      "S1"
+    ],
+    "scf_mode": "implicit_scf",
+    "hfx": "enabled",
+    "pt2": "disabled",
+    "target_curves": [
+      "E0(R)",
+      "Omega1(R)",
+      "E1(R)=E0(R)+Omega1(R)"
+    ]
+  },
+  {
+    "variant": "mgga_r2scan",
+    "semilocal_components": [
+      "mgga_x_r2scan",
+      "mgga_c_r2scan"
+    ],
+    "system": "N2",
+    "states": [
+      "ground",
+      "S1"
+    ],
+    "scf_mode": "implicit_scf",
+    "hfx": "enabled",
+    "pt2": "disabled",
+    "target_curves": [
+      "E0(R)",
+      "Omega1(R)",
+      "E1(R)=E0(R)+Omega1(R)"
+    ]
+  }
+]

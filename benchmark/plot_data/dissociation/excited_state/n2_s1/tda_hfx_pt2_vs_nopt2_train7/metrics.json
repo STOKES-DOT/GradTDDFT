@@ -1,0 +1,49 @@
+{
+  "system": "N2",
+  "state": "S1",
+  "spectroscopic_state": "A 1Pi_g",
+  "quantity": "S1 total energy E1(R)",
+  "basis": "def2-tzvp",
+  "xc": "b3lyp",
+  "solver": "TDA",
+  "reference": "Hammami2026 large-CAS A1Pi_g",
+  "n_points": 35,
+  "train_r_values_angstrom": [
+    0.8,
+    1.1,
+    1.6,
+    2.0,
+    2.2,
+    2.5,
+    3.0
+  ],
+  "cases": {
+    "pt2_strict": {
+      "model_label": "Neural TDA+PT2",
+      "dense_mae_ev_from_csv": 0.16125690471127854,
+      "dense_rmse_ev_from_csv": 0.20137255795466458,
+      "dense_max_abs_error_ev_from_csv": 0.47684157854023035,
+      "dense_max_abs_error_r_angstrom": 0.8647058823529412,
+      "source_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/n2_hammami_s1total_tda_chunked_eval_skiposc_20260623_094250/pt2strict_dense_curve_35pt_merged.csv"
+    },
+    "no_pt2": {
+      "model_label": "Neural TDA/no-PT2",
+      "dense_mae_ev_from_csv": 0.871075819979015,
+      "dense_rmse_ev_from_csv": 1.1923861814426238,
+      "dense_max_abs_error_ev_from_csv": 2.904795219505678,
+      "dense_max_abs_error_r_angstrom": 3.0,
+      "source_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/n2_hammami_s1total_tda_chunked_eval_skiposc_20260623_094250/nopt2_dense_curve_35pt_merged.csv"
+    }
+  },
+  "outputs": {
+    "run_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/n2_hammami_s1total_tda_chunked_eval_skiposc_20260623_094250/n2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.pdf",
+    "run_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/n2_hammami_s1total_tda_chunked_eval_skiposc_20260623_094250/n2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.png",
+    "run_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/n2_hammami_s1total_tda_chunked_eval_skiposc_20260623_094250/n2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.svg",
+    "paper_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/n2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.pdf",
+    "paper_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/n2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.png",
+    "paper_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/n2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.svg",
+    "paper_review_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper_review/tdgraddft-paper/figures/n2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.pdf",
+    "paper_review_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper_review/tdgraddft-paper/figures/n2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.png",
+    "paper_review_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper_review/tdgraddft-paper/figures/n2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style.svg"
+  }
+}

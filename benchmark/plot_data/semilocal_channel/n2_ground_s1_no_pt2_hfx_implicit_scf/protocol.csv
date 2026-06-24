@@ -1,0 +1,4 @@
+variant,semilocal_components,system,states,scf_mode,hfx,pt2,target_curves
+lda_vwn_rpa,lda_x+lda_c_vwn_rpa,N2,ground;S1,implicit_scf,enabled,disabled,E0(R);Omega1(R);E1(R)=E0(R)+Omega1(R)
+gga_pbe,gga_x_pbe+gga_c_pbe,N2,ground;S1,implicit_scf,enabled,disabled,E0(R);Omega1(R);E1(R)=E0(R)+Omega1(R)
+mgga_r2scan,mgga_x_r2scan+mgga_c_r2scan,N2,ground;S1,implicit_scf,enabled,disabled,E0(R);Omega1(R);E1(R)=E0(R)+Omega1(R)

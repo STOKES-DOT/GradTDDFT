@@ -1,0 +1,57 @@
+{
+  "system": "H2+",
+  "state": "ground",
+  "spectroscopic_state": "X 2Sigma_g+",
+  "quantity": "ground-state total energy E0(R)",
+  "reference_label": "FCI one-electron reference",
+  "functional_channel": "HFX neural channel",
+  "chemical_accuracy_band_mev": 43.3641153087705,
+  "implicit_scf": {
+    "mode_label": "Implicit SCF",
+    "n_points": 100,
+    "train_r_values_angstrom": [
+      0.4,
+      1.7999999999999998,
+      3.1999999999999997,
+      4.6,
+      6.0
+    ],
+    "dense_mae_ev": 0.007139088205942825,
+    "dense_rmse_ev": 0.008637853478933984,
+    "dense_max_abs_error_ev": 0.019166726268593365,
+    "dense_max_abs_error_r_angstrom": 0.6262626262626263,
+    "png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/h2plus_ground_hfx_mode_comparison_20260617/h2plus_ground_hfx_implicit_scf_dissociation_paper_style.png",
+    "pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/h2plus_ground_hfx_mode_comparison_20260617/h2plus_ground_hfx_implicit_scf_dissociation_paper_style.pdf",
+    "svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/h2plus_ground_hfx_mode_comparison_20260617/h2plus_ground_hfx_implicit_scf_dissociation_paper_style.svg",
+    "paper_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2plus_ground_hfx_implicit_scf_dissociation_paper_style.png",
+    "paper_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2plus_ground_hfx_implicit_scf_dissociation_paper_style.pdf",
+    "paper_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2plus_ground_hfx_implicit_scf_dissociation_paper_style.svg"
+  },
+  "fixed_density": {
+    "mode_label": "Fixed density",
+    "n_points": 100,
+    "train_r_values_angstrom": [
+      0.4,
+      1.7999999999999998,
+      3.1999999999999997,
+      4.6,
+      6.0
+    ],
+    "dense_mae_ev": 0.013203388295728489,
+    "dense_rmse_ev": 0.01995983435055475,
+    "dense_max_abs_error_ev": 0.06322663928152009,
+    "dense_max_abs_error_r_angstrom": 0.795959595959596,
+    "png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/h2plus_ground_hfx_mode_comparison_20260617/h2plus_ground_hfx_fixed_density_dissociation_paper_style.png",
+    "pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/h2plus_ground_hfx_mode_comparison_20260617/h2plus_ground_hfx_fixed_density_dissociation_paper_style.pdf",
+    "svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/h2plus_ground_hfx_mode_comparison_20260617/h2plus_ground_hfx_fixed_density_dissociation_paper_style.svg",
+    "paper_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2plus_ground_hfx_fixed_density_dissociation_paper_style.png",
+    "paper_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2plus_ground_hfx_fixed_density_dissociation_paper_style.pdf",
+    "paper_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2plus_ground_hfx_fixed_density_dissociation_paper_style.svg"
+  },
+  "source_paths": {
+    "implicit_dense_curve_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_h2_h2plus_ground_hfx_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_124636/h2plus_ion_ground_hfx/h2plus_ground_dense_curve.csv",
+    "implicit_training_points_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_h2_h2plus_ground_hfx_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_124636/h2plus_ion_ground_hfx/h2plus_reference_points.csv",
+    "fixed_dense_curve_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_h2plus_ground_hfx_fixed_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_133509/h2plus_ground_dense_curve.csv",
+    "fixed_training_points_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/outputs/remote_h2plus_ground_hfx_fixed_density_grid2_def2svp_2000ep_lr1e3_decay200_20260617_133509/h2plus_reference_points.csv"
+  }
+}
