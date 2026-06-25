@@ -845,6 +845,7 @@ class _RestrictedSCFContext:
     mo_occ_stacked: Array
     hfx_nu: Any
     uses_explicit_hfx_fock: bool
+    preserve_pt2_local: bool
 
 
 @dataclass(frozen=True)
@@ -1037,6 +1038,17 @@ class DifferentiableSCF:
             if callable(explicit_hfx_probe)
             else False
         )
+        hf_mode_probe = getattr(xc_functional, "_ground_state_hf_mode_for_molecule", None)
+        ground_state_hf_mode = (
+            str(hf_mode_probe(molecule))
+            if callable(hf_mode_probe)
+            else ("scf" if uses_explicit_hfx_fock else "frozen")
+        )
+        hfx_nu_for_scf = (
+            hfx_nu_source(molecule) if ground_state_hf_mode == "scf" else None
+        )
+        pt2_mode_probe = getattr(xc_functional, "_configured_ground_state_pt2_mode", None)
+        ground_state_pt2_mode = pt2_mode_probe() if callable(pt2_mode_probe) else None
         return _RestrictedSCFContext(
             molecule=molecule,
             xc_functional=xc_functional,
@@ -1049,8 +1061,9 @@ class DifferentiableSCF:
             x=x,
             mo_occ_total=mo_occ_total,
             mo_occ_stacked=_restricted_stacked_occupations_from_total(mo_occ_total),
-            hfx_nu=hfx_nu_source(molecule),
+            hfx_nu=hfx_nu_for_scf,
             uses_explicit_hfx_fock=uses_explicit_hfx_fock,
+            preserve_pt2_local=str(ground_state_pt2_mode).lower() == "frozen",
         )
 
     def _restricted_response_jk(
@@ -1222,6 +1235,7 @@ class DifferentiableSCF:
         mo_coeff: Array,
         mo_energy: Array,
         mo_occ_stacked: Array,
+        preserve_pt2_local: bool = False,
     ) -> Any:
         updates = {
             "rdm1": jnp.stack([0.5 * density, 0.5 * density], axis=0),
@@ -1231,27 +1245,28 @@ class DifferentiableSCF:
         }
         if is_dataclass(molecule):
             field_names = getattr(molecule, "__dataclass_fields__", {})
+            stale_field_names = (
+                "eri_ovov",
+                "eri_ovvo",
+                "eri_oovv",
+            )
+            if not preserve_pt2_local:
+                stale_field_names = (*stale_field_names, "pt2_local")
             updates.update(
                 {
                     name: None
-                    for name in (
-                        "eri_ovov",
-                        "eri_ovvo",
-                        "eri_oovv",
-                        "pt2_local",
-                    )
+                    for name in stale_field_names
                     if name in field_names
                 }
             )
         else:
-            updates.update(
-                {
-                    "eri_ovov": None,
-                    "eri_ovvo": None,
-                    "eri_oovv": None,
-                    "pt2_local": None,
-                }
-            )
+            updates.update({
+                "eri_ovov": None,
+                "eri_ovvo": None,
+                "eri_oovv": None,
+            })
+            if not preserve_pt2_local:
+                updates["pt2_local"] = None
         return _replace_molecule(molecule, **updates)
 
     def _run_restricted_scf_core(
@@ -1347,6 +1362,7 @@ class DifferentiableSCF:
             mo_coeff=mo_coeff_final,
             mo_energy=mo_energy_final,
             mo_occ_stacked=problem.ctx.mo_occ_stacked,
+            preserve_pt2_local=problem.ctx.preserve_pt2_local,
         )
         molecule_final = self._with_neural_xc_grid_payload(molecule_final, xc_functional)
         return molecule_final, self._rks_loop_info(
@@ -1861,8 +1877,13 @@ class DifferentiableSCF:
                 x=x_arg,
                 mo_occ_total=mo_occ_total_arg,
                 mo_occ_stacked=mo_occ_stacked_arg,
-                hfx_nu=hfx_nu_source(molecule_arg),
+                hfx_nu=(
+                    hfx_nu_source(molecule_arg)
+                    if ctx.hfx_nu is not None
+                    else None
+                ),
                 uses_explicit_hfx_fock=ctx.uses_explicit_hfx_fock,
+                preserve_pt2_local=ctx.preserve_pt2_local,
             )
 
         def _density_from_fock(fock: Array, args: tuple[Any, ...] | None) -> Array:
@@ -1938,6 +1959,7 @@ class DifferentiableSCF:
             mo_coeff=mo_coeff_implicit,
             mo_energy=mo_energy_implicit,
             mo_occ_stacked=ctx.mo_occ_stacked,
+            preserve_pt2_local=ctx.preserve_pt2_local,
         )
         molecule_final = self._with_neural_xc_grid_payload(molecule_final, xc_functional)
         return molecule_final, self._rks_loop_info(

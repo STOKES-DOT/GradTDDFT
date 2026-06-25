@@ -120,6 +120,57 @@ class AssemblyMixin:
     def _uses_hfx_channel(self) -> bool:
         return bool(getattr(self, "include_hfx_channel", False))
 
+    def _uses_pt2_channel(self) -> bool:
+        return bool(getattr(self, "include_pt2_channel", False))
+
+    def _configured_ground_state_hf_mode(self) -> Literal["off", "frozen", "scf"] | None:
+        mode = getattr(self, "ground_state_hf_mode", None)
+        if mode is None:
+            return None
+        mode = str(mode).lower()
+        if mode not in {"off", "frozen", "scf"}:
+            raise ValueError(
+                "ground_state_hf_mode must be 'off', 'frozen', or 'scf'; "
+                f"got {mode!r}."
+            )
+        return mode  # type: ignore[return-value]
+
+    def _ground_state_hf_mode_for_molecule(
+        self,
+        molecule: Any,
+    ) -> Literal["off", "frozen", "scf"]:
+        configured = self._configured_ground_state_hf_mode()
+        if configured is not None:
+            return configured
+        if not self._uses_hfx_channel():
+            return "off"
+        if has_hfx_nu_source(molecule) or getattr(molecule, "hfx_fxx", None) is not None:
+            return "scf"
+        return "frozen"
+
+    def _configured_ground_state_pt2_mode(self) -> Literal["off", "frozen", "scf"] | None:
+        mode = getattr(self, "ground_state_pt2_mode", None)
+        if mode is None:
+            return None
+        mode = str(mode).lower()
+        if mode not in {"off", "frozen", "scf"}:
+            raise ValueError(
+                "ground_state_pt2_mode must be 'off', 'frozen', or 'scf'; "
+                f"got {mode!r}."
+            )
+        return mode  # type: ignore[return-value]
+
+    def _ground_state_pt2_mode_for_molecule(
+        self,
+        molecule: Any,
+    ) -> Literal["off", "frozen", "scf"]:
+        configured = self._configured_ground_state_pt2_mode()
+        if configured is not None:
+            return configured
+        if not self._uses_pt2_channel():
+            return "off"
+        return "frozen" if getattr(molecule, "pt2_local", None) is not None else "scf"
+
     def _response_hf_mode(self) -> Literal["approx", "strict"]:
         mode = str(getattr(self, "response_hf_mode", DEFAULT_NEURAL_XC_RESPONSE_HF_MODE)).lower()
         if mode not in {"approx", "strict"}:
@@ -1193,7 +1244,9 @@ class NeuralXCModel(
     input_feature_mode: Literal["enhanced", "canonical"] = DEFAULT_INPUT_FEATURE_MODE
     hf_input_mode: Literal["total_only", "spin_resolved"] = "spin_resolved"
     include_hfx_channel: bool = False
+    ground_state_hf_mode: Literal["off", "frozen", "scf"] | None = None
     include_pt2_channel: bool = False
+    ground_state_pt2_mode: Literal["off", "frozen", "scf"] | None = None
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected"
     response_hf_mode: Literal["approx", "strict"] = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE
     response_pt2_mode: Literal["approx", "strict"] = "approx"

@@ -357,11 +357,30 @@ class NeuralXCBindingMixin:
         features: RestrictedFeatureBundle,
         include_fxx: bool = False,
     ) -> tuple[Array, Array, Array, Array | None]:
+        mode = self._ground_state_hf_mode_for_molecule(molecule)
+        if mode == "off":
+            zero = jnp.zeros_like(features.rho)
+            return zero, zero, zero, None
         nu_source = hfx_nu_source(molecule)
+        cached_fxx = getattr(molecule, "hfx_fxx", None)
+        if mode == "frozen":
+            nu_source = None
+            cached_fxx = None
+        elif mode == "scf" and nu_source is None and cached_fxx is None:
+            raise ValueError(
+                "ground_state_hf_mode='scf' requires molecule.hfx_nu or "
+                "molecule.hfx_nu_api or molecule.hfx_fxx so the HF channel can be "
+                "updated during SCF."
+            )
         current_hfx_fxx = None
         if nu_source is None:
             hfx_local = getattr(molecule, "hfx_local", None)
             if hfx_local is None:
+                if self._configured_ground_state_hf_mode() == "frozen":
+                    raise ValueError(
+                        "ground_state_hf_mode='frozen' requires molecule.hfx_local "
+                        "so the HF channel remains fixed during SCF."
+                    )
                 hfx_local, _ = self._restricted_hfx_local_and_fxx(molecule)
             hfx_local = jnp.asarray(hfx_local)
             if hfx_local.ndim != 3 or hfx_local.shape[0] != 2:
@@ -372,7 +391,6 @@ class NeuralXCBindingMixin:
             e_hf_a = jnp.asarray(hfx_local[0, :, 0])
             e_hf_b = jnp.asarray(hfx_local[1, :, 0])
             if include_fxx:
-                cached_fxx = getattr(molecule, "hfx_fxx", None)
                 if cached_fxx is not None:
                     current_hfx_fxx = jnp.asarray(cached_fxx)
         else:
@@ -660,19 +678,64 @@ class NeuralXCBindingMixin:
     ) -> tuple[Array, Array]:
         semilocal_total = jnp.sum(semilocal_channels, axis=-1)
         weights = jnp.asarray(grid_weights)
-        coefficients = self.channel_coefficients(
-            params,
+        hf_total = jnp.asarray(hf_projected)
+        hfx_a = jnp.asarray(hf_feature_a)
+        hfx_b = jnp.asarray(hf_feature_b)
+        if hfx_a.ndim == hf_total.ndim:
+            hfx_a = hfx_a[..., None]
+        if hfx_b.ndim == hf_total.ndim:
+            hfx_b = hfx_b[..., None]
+        semilocal_basis = self._semilocal_local_contribution_channels(
             features,
-            semilocal_energy_density=semilocal_total,
-            hf_energy_density=jax.lax.stop_gradient(hf_projected),
-            pt2_energy_density=pt2_projected,
-            hf_spin_energy_density=(
-                jax.lax.stop_gradient(hf_feature_a),
-                jax.lax.stop_gradient(hf_feature_b),
-            ),
+            semilocal_channels,
         )
-        grad_a = weights * self._local_hf_fraction_from_coefficients(coefficients)
-        grad_b = grad_a
+        pt2_basis = None if pt2_projected is None else jax.lax.stop_gradient(pt2_projected)
+        basis = self._assemble_basis_channels(
+            jax.lax.stop_gradient(semilocal_basis),
+            hf_projected=jax.lax.stop_gradient(hf_total),
+            pt2_projected=pt2_basis,
+        )
+        semilocal_total = jax.lax.stop_gradient(semilocal_total)
+        pt2_input = None if pt2_projected is None else jax.lax.stop_gradient(pt2_projected)
+
+        def energy_from_hfx_inputs(
+            hf_total_arg: Array,
+            hfx_a_arg: Array,
+            hfx_b_arg: Array,
+        ) -> tuple[Array, Array]:
+            coefficients = self.channel_coefficients(
+                params,
+                features,
+                semilocal_energy_density=semilocal_total,
+                hf_energy_density=hf_total_arg,
+                pt2_energy_density=pt2_input,
+                hf_spin_energy_density=(hfx_a_arg, hfx_b_arg),
+            )
+            local_channels = self._assemble_channel_contributions(coefficients, basis)
+            local_energy = jnp.sum(local_channels, axis=-1)
+            energy = jnp.tensordot(weights, local_energy, axes=(0, 0))
+            return energy, coefficients
+
+        (_, coefficients), (grad_total, grad_a, grad_b) = jax.value_and_grad(
+            energy_from_hfx_inputs,
+            argnums=(0, 1, 2),
+            has_aux=True,
+        )(
+            jax.lax.stop_gradient(hf_total),
+            jax.lax.stop_gradient(hfx_a),
+            jax.lax.stop_gradient(hfx_b),
+        )
+        direct_hfx_grad = weights * self._local_hf_fraction_from_coefficients(coefficients)
+        total_input_grad = jnp.asarray(grad_total)
+        grad_a = jnp.asarray(grad_a)
+        grad_b = jnp.asarray(grad_b)
+        if grad_a.ndim == total_input_grad.ndim:
+            grad_a = grad_a[..., None]
+        if grad_b.ndim == total_input_grad.ndim:
+            grad_b = grad_b[..., None]
+        first_channel_grad = direct_hfx_grad + total_input_grad
+        grad_a = grad_a.at[..., 0].add(first_channel_grad)
+        grad_b = grad_b.at[..., 0].add(first_channel_grad)
         grad_a = self._maybe_clip_response(grad_a)
         grad_b = self._maybe_clip_response(grad_b)
         return grad_a, grad_b
@@ -709,6 +772,8 @@ class NeuralXCBindingMixin:
         return e_hf, e_hf_a, e_hf_b
 
     def uses_explicit_hfx_fock_for_scf(self, molecule: Any) -> bool:
+        if self._ground_state_hf_mode_for_molecule(molecule) != "scf":
+            return False
         return (
             self._uses_hfx_channel()
             and (

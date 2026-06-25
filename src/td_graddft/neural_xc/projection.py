@@ -443,10 +443,11 @@ class NeuralXCProjectionMixin:
         *,
         features: RestrictedFeatureBundle | None = None,
         occupation_tolerance: float = 1e-8,
+        use_cached: bool = True,
     ) -> Array:
         """Local MP2 pair gauge without global rescaling."""
         cached = getattr(molecule, "pt2_local", None)
-        if cached is not None:
+        if use_cached and cached is not None:
             cached_arr = jnp.asarray(cached)
             return jnp.nan_to_num(cached_arr, nan=0.0, posinf=0.0, neginf=0.0)
         if self._uses_unrestricted_pt2_projection(molecule):
@@ -468,11 +469,12 @@ class NeuralXCProjectionMixin:
         *,
         features: RestrictedFeatureBundle | None = None,
         occupation_tolerance: float = 1e-8,
+        use_cached: bool = True,
     ) -> Array:
         if getattr(molecule, "grid", None) is None:
             raise AttributeError("Molecule-like object must define grid.weights.")
         weights = jnp.asarray(molecule.grid.weights)
-        cached = getattr(molecule, "pt2_local", None)
+        cached = getattr(molecule, "pt2_local", None) if use_cached else None
         if self._uses_unrestricted_pt2_projection(molecule):
             projected, total_energy = self._unrestricted_mp2_projection_components(
                 molecule,
@@ -496,6 +498,31 @@ class NeuralXCProjectionMixin:
         projected = jnp.nan_to_num(projected, nan=0.0, posinf=0.0, neginf=0.0)
         return self._maybe_clip_response(projected)
 
+    def _zero_pt2_grid_contribution(
+        self,
+        molecule: Any,
+        *,
+        features: RestrictedFeatureBundle | None = None,
+    ) -> Array:
+        if features is not None:
+            return jnp.zeros_like(features.rho)
+        grid = getattr(molecule, "grid", None)
+        if grid is not None and getattr(grid, "weights", None) is not None:
+            return jnp.zeros_like(jnp.asarray(grid.weights))
+        return jnp.zeros_like(grid_features_for_molecule(molecule).rho)
+
+    def _cached_pt2_grid_contribution(
+        self,
+        molecule: Any,
+    ) -> Array:
+        cached = getattr(molecule, "pt2_local", None)
+        if cached is None:
+            raise ValueError(
+                "ground_state_pt2_mode='frozen' requires molecule.pt2_local "
+                "so the PT2 channel remains fixed during SCF."
+            )
+        return jnp.nan_to_num(jnp.asarray(cached), nan=0.0, posinf=0.0, neginf=0.0)
+
     def projected_pt2_grid_contribution(
         self,
         molecule: Any,
@@ -514,17 +541,34 @@ class NeuralXCProjectionMixin:
         to the canonical MP2 energy, but it preserves the unprojected spatial
         profile.
         """
-        if self.pt2_channel_mode == "local_exact":
-            return self._local_exact_pt2_grid_contribution(
+        configured = self._configured_ground_state_pt2_mode()
+        if configured == "off":
+            return self._zero_pt2_grid_contribution(molecule, features=features)
+        if configured == "frozen":
+            return self._cached_pt2_grid_contribution(molecule)
+        use_cached = configured != "scf"
+        try:
+            if self.pt2_channel_mode == "local_exact":
+                return self._local_exact_pt2_grid_contribution(
+                    molecule,
+                    features=features,
+                    occupation_tolerance=occupation_tolerance,
+                    use_cached=use_cached,
+                )
+            return self._legacy_projected_pt2_grid_contribution(
                 molecule,
                 features=features,
                 occupation_tolerance=occupation_tolerance,
+                use_cached=use_cached,
             )
-        return self._legacy_projected_pt2_grid_contribution(
-            molecule,
-            features=features,
-            occupation_tolerance=occupation_tolerance,
-        )
+        except (AttributeError, TypeError, ValueError) as exc:
+            if configured == "scf":
+                raise ValueError(
+                    "ground_state_pt2_mode='scf' requires current orbital, "
+                    "occupation, orbital-energy, AO-grid, and two-electron "
+                    "integral data so the PT2 channel can be updated during SCF."
+                ) from exc
+            raise
 
     def energy_density(
         self,

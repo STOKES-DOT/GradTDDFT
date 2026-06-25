@@ -16,6 +16,8 @@ from .defaults import (
 
 SemilocalBackend = Literal["jax_libxc"]
 HFChannelMode = Literal["total_only", "spin_resolved"]
+GroundStateHFMode = Literal["off", "frozen", "scf"]
+GroundStatePT2Mode = Literal["off", "frozen", "scf"]
 PT2ChannelMode = Literal["off", "scaled_projected", "local_exact"]
 ResponseHFMode = Literal["approx", "strict"]
 ResponsePT2Mode = Literal["approx", "strict"]
@@ -39,7 +41,9 @@ class ComponentSpec:
 class ChannelSpec:
     hf: HFChannelMode = DEFAULT_NEURAL_XC_HF_INPUT_MODE
     include_hfx: bool = False
+    ground_state_hf: GroundStateHFMode | None = None
     pt2: PT2ChannelMode = "off"
+    ground_state_pt2: GroundStatePT2Mode | None = None
     response_hf: ResponseHFMode = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE
     response_pt2: ResponsePT2Mode = DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE
     hfx_channels: int = 2
@@ -76,6 +80,8 @@ __all__ = [
     "ComponentSpec",
     "Config",
     "HFChannelMode",
+    "GroundStateHFMode",
+    "GroundStatePT2Mode",
     "InputFeatureMode",
     "NetworkSpec",
     "PT2ChannelMode",

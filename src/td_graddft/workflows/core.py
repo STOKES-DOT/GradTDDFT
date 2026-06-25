@@ -398,6 +398,7 @@ def train_neural_xc(
         input_feature_mode=config.input_feature_mode,
         hf_input_mode=config.hf_input_mode,
         include_pt2_channel=config.include_pt2_channel,
+        ground_state_pt2_mode=config.ground_state_pt2_mode,
         pt2_channel_mode=config.pt2_channel_mode,
         response_pt2_mode=config.response_pt2_mode,
         strict_feature_alignment=config.strict_feature_alignment,

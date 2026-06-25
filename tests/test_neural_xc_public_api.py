@@ -54,6 +54,22 @@ def test_neural_xc_dm21_preset_returns_example_config():
     assert functional.semilocal_xc == tuple(DEFAULT_NEURAL_XC_SEMILOCAL_XC)
 
 
+def test_neural_xc_config_exposes_ground_state_pt2_mode():
+    config = neural_xc.Config(
+        channels=neural_xc.ChannelSpec(
+            pt2="local_exact",
+            ground_state_pt2="frozen",
+        ),
+        network=neural_xc.NetworkSpec(hidden_dims=(8,)),
+    )
+
+    functional = neural_xc.Functional(config=config)
+
+    assert functional.include_pt2_channel is True
+    assert functional.ground_state_pt2_mode == "frozen"
+    assert functional.pt2_channel_mode == "local_exact"
+
+
 def test_neural_xc_lists_wrapped_jax_xc_components_and_exposes_status():
     names = neural_xc.available_semilocal_components()
     infos = neural_xc.available_semilocal_component_infos()

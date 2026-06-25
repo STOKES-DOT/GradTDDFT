@@ -72,6 +72,7 @@ class NeuralXCTrainingConfig:
     input_feature_mode: Literal["enhanced", "canonical"] = DEFAULT_INPUT_FEATURE_MODE
     hf_input_mode: Literal["total_only", "spin_resolved"] = DEFAULT_NEURAL_XC_HF_INPUT_MODE
     include_pt2_channel: bool = False
+    ground_state_pt2_mode: Literal["off", "frozen", "scf"] | None = None
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected"
     response_pt2_mode: Literal["approx", "strict"] = (
         DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE
