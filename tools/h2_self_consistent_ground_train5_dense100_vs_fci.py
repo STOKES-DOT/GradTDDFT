@@ -173,6 +173,12 @@ def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.scf_gradient_mode = _normalize_scf_gradient_mode(args.scf_gradient_mode)
     if args.ground_state_hf_mode is not None:
         args.ground_state_hf_mode = str(args.ground_state_hf_mode).strip().lower()
+    if args.ground_state_pt2_mode is not None:
+        args.ground_state_pt2_mode = str(args.ground_state_pt2_mode).strip().lower()
+        if args.ground_state_pt2_mode == "frozen":
+            args.ground_state_pt2_mode = "nograd"
+        args.include_pt2_channel = args.ground_state_pt2_mode != "off"
+    args.pt2_channel_mode = str(args.pt2_channel_mode).strip().lower()
     return args
 
 
@@ -227,6 +233,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Add a projected restricted MP2 local channel to the Neural_xc basis.",
+    )
+    p.add_argument(
+        "--ground-state-pt2-mode",
+        choices=("off", "nograd", "scf"),
+        default=None,
+        help="Ground-state PT2 channel mode passed to Neural_xc.",
+    )
+    p.add_argument(
+        "--pt2-channel-mode",
+        choices=("scaled_projected", "local_exact"),
+        default="scaled_projected",
+        help="Local PT2 basis construction used when the PT2 channel is enabled.",
     )
     p.add_argument(
         "--include-hfx-channel",
@@ -823,6 +841,8 @@ def train_functional(
         architecture=str(args.network_architecture),
         input_feature_mode=str(args.input_feature_mode),
         include_pt2_channel=bool(args.include_pt2_channel),
+        ground_state_pt2_mode=args.ground_state_pt2_mode,
+        pt2_channel_mode=str(args.pt2_channel_mode),
         include_hfx_channel=bool(args.include_hfx_channel),
         ground_state_hf_mode=args.ground_state_hf_mode,
         name=f"neural_xc_h2_fci_{str(args.training_mode)}",
@@ -842,6 +862,8 @@ def train_functional(
         "[init] coefficient_prior="
         f"{None if coefficient_prior is None else tuple(float(x) for x in coefficient_prior)} "
         f"include_pt2_channel={bool(args.include_pt2_channel)} "
+        f"ground_state_pt2_mode={args.ground_state_pt2_mode} "
+        f"pt2_channel_mode={str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else 'none'} "
         f"include_hfx_channel={bool(args.include_hfx_channel)} "
         f"ground_state_hf_mode={args.ground_state_hf_mode}"
     )
@@ -1501,6 +1523,11 @@ def write_summary(
         handle.write("reference_method = fci_ground_state\n")
         handle.write(f"training_mode = {args.training_mode}\n")
         handle.write(f"include_pt2_channel = {bool(args.include_pt2_channel)}\n")
+        handle.write(f"ground_state_pt2_mode = {args.ground_state_pt2_mode}\n")
+        handle.write(
+            "pt2_channel_mode = "
+            f"{str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None}\n"
+        )
         handle.write(f"semilocal_xc = {tuple(str(name) for name in args.semilocal_xc)}\n")
         handle.write(f"hidden_dims = {list(int(value) for value in args.hidden_dims)}\n")
         handle.write(f"density_constraint_weight = {float(args.density_constraint_weight)}\n")

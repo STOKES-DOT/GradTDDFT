@@ -73,6 +73,7 @@ class _ToyMolecule:
     rdm1: jnp.ndarray
     h1e: jnp.ndarray
     nuclear_repulsion: float
+    overlap_matrix: jnp.ndarray | None = None
     hfx_local: jnp.ndarray | None = None
     hfx_omega_values: tuple[float, ...] | None = None
     hfx_nu: jnp.ndarray | None = None
@@ -2586,7 +2587,26 @@ def test_ground_state_pt2_mode_scf_ignores_cached_pt2_local():
     assert not jnp.allclose(pt2, molecule.pt2_local, atol=1e-9)
 
 
-def test_ground_state_pt2_mode_scf_fock_fails_until_variational_pt2_is_implemented():
+def test_ground_state_pt2_mode_scf_init_does_not_require_static_integrals():
+    molecule = replace(
+        _make_pt2_toy_molecule(),
+        rep_tensor=jnp.zeros((0, 0, 0, 0)),
+        pt2_local=None,
+    )
+    functional = NeuralXCFunctional(
+        model=_ConstantChannelModel((0.0, 0.0)),
+        semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
+        include_pt2_channel=True,
+        ground_state_pt2_mode="scf",
+        pt2_channel_mode="local_exact",
+        name="pt2_scf_init_no_static_integrals",
+    )
+
+    params = functional.init_from_molecule(jax.random.PRNGKey(246), molecule)
+    assert params is not None
+
+
+def test_ground_state_pt2_mode_scf_fock_includes_ad_pt2_response():
     molecule = _make_pt2_toy_molecule()
     semilocal_zero = lambda features: jnp.zeros_like(features.rho)
     functional = NeuralXCFunctional(
@@ -2595,18 +2615,75 @@ def test_ground_state_pt2_mode_scf_fock_fails_until_variational_pt2_is_implement
         include_pt2_channel=True,
         ground_state_pt2_mode="scf",
         pt2_channel_mode="local_exact",
-        name="pt2_scf_requires_variational_fock",
+        name="pt2_scf_ad_variational_fock",
     )
     params = functional.init_from_molecule(jax.random.PRNGKey(241), molecule)
 
-    with pytest.raises(NotImplementedError, match="PT2.*variational"):
-        functional.scf_xc_fock_terms(
-            params,
-            molecule,
-            weights=molecule.grid.weights,
-            functional_dtype=jnp.float64,
-            vxc_clip=20.0,
+    _vxc_matrix, alpha, extra_fock, xc_energy = functional.scf_xc_fock_terms(
+        params,
+        molecule,
+        weights=molecule.grid.weights,
+        functional_dtype=jnp.float64,
+        vxc_clip=20.0,
+    )
+
+    assert jnp.allclose(alpha, 0.0, atol=1e-12)
+    assert jnp.isfinite(xc_energy)
+    assert jnp.all(jnp.isfinite(extra_fock))
+    assert jnp.allclose(extra_fock, extra_fock.T, atol=1e-12)
+    assert jnp.linalg.norm(extra_fock) > 0.0
+
+
+def test_ground_state_pt2_mode_scf_ad_fock_uses_overlap_metric(monkeypatch):
+    molecule = _make_pt2_toy_molecule()
+    overlap = jnp.asarray([[1.2, 0.2], [0.2, 0.9]], dtype=jnp.float64)
+    evals, evecs = jnp.linalg.eigh(overlap)
+    mo_coeff = evecs @ jnp.diag(evals ** -0.5) @ evecs.T
+    molecule = replace(
+        molecule,
+        mo_coeff=jnp.stack([mo_coeff, mo_coeff], axis=0),
+        overlap_matrix=overlap,
+    )
+    functional = make_neural_xc_functional(
+        semilocal_xc="pbe",
+        hidden_dims=(8, 8),
+        include_pt2_channel=True,
+        ground_state_pt2_mode="scf",
+        pt2_channel_mode="local_exact",
+    )
+
+    def fake_projected_pt2_grid_contribution(self, molecule_arg, *, features=None):
+        mo_energy = jnp.asarray(molecule_arg.mo_energy)
+        if mo_energy.ndim == 2:
+            mo_energy = mo_energy[0]
+        return jnp.stack(
+            [
+                mo_energy[0] + 2.0 * mo_energy[1],
+                -mo_energy[0] + mo_energy[1],
+            ]
         )
+
+    monkeypatch.setattr(
+        NeuralXCFunctional,
+        "projected_pt2_grid_contribution",
+        fake_projected_pt2_grid_contribution,
+    )
+    grad = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
+    features = restricted_grid_features(molecule)
+
+    fock, used = functional._contract_pt2_scf_feature_gradient_to_restricted_fock(
+        molecule,
+        grad,
+        features=features,
+        dtype=jnp.float64,
+    )
+
+    energy_grad = jnp.asarray([grad[0] - grad[1], 2.0 * grad[0] + grad[1]])
+    transform = overlap @ mo_coeff
+    expected = transform @ jnp.diag(energy_grad) @ transform.T
+    assert used
+    assert jnp.allclose(fock, expected, atol=1e-12)
+    assert not jnp.allclose(fock, mo_coeff @ jnp.diag(energy_grad) @ mo_coeff.T)
 
 
 def test_ground_state_pt2_mode_nograd_fock_requires_handwritten_response_cache():
