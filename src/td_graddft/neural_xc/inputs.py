@@ -688,7 +688,9 @@ def _local_hfx_features_from_nu_cache(
     ao: Any,
     dm_spin: tuple[Any, Any],
     nu_cache: Any,
-) -> jnp.ndarray:
+    *,
+    return_fxx: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     ao_arr = jnp.asarray(ao)
     dm_a, dm_b = (jnp.asarray(dm_spin[0]), jnp.asarray(dm_spin[1]))
     nu = jnp.asarray(nu_cache)
@@ -700,7 +702,11 @@ def _local_hfx_features_from_nu_cache(
     exx_a = -0.5 * jnp.einsum("gq,wgq->wg", e_a, fxx_a, precision=Precision.HIGHEST)
     exx_b = -0.5 * jnp.einsum("gq,wgq->wg", e_b, fxx_b, precision=Precision.HIGHEST)
     exx = jnp.stack([exx_a.T, exx_b.T], axis=0)
-    return jnp.nan_to_num(exx, nan=0.0, posinf=0.0, neginf=0.0)
+    exx = jnp.nan_to_num(exx, nan=0.0, posinf=0.0, neginf=0.0)
+    if not return_fxx:
+        return exx
+    fxx = jnp.nan_to_num(0.5 * (fxx_a + fxx_b), nan=0.0, posinf=0.0, neginf=0.0)
+    return exx, fxx
 
 
 def _local_hfx_features_from_basis_dm(
@@ -712,17 +718,20 @@ def _local_hfx_features_from_basis_dm(
     omega_values: tuple[float, ...],
     chunk_size: int = 512,
     return_nu: bool = False,
-) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
+    return_fxx: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, ...]:
     coords_arr = jnp.asarray(coords)
     ao_arr = jnp.asarray(ao)
     ngrid = int(coords_arr.shape[0])
     hfx_chunks: list[jnp.ndarray] = []
     nu_chunks_per_omega: list[jnp.ndarray] = []
+    fxx_chunks_per_omega: list[jnp.ndarray] = []
 
     for omega in omega_values:
         zeta = None if abs(float(omega)) < 1e-14 else float(omega) * float(omega)
         omega_nu_chunks: list[jnp.ndarray] = []
         omega_hfx_chunks: list[jnp.ndarray] = []
+        omega_fxx_chunks: list[jnp.ndarray] = []
         for start in range(0, ngrid, int(chunk_size)):
             end = min(start + int(chunk_size), ngrid)
             nu_chunk = rinv_matrices(
@@ -732,24 +741,35 @@ def _local_hfx_features_from_basis_dm(
                 engine="auto",
                 grid_chunk_size=min(int(chunk_size), max(1, end - start)),
             )
-            omega_hfx_chunks.append(
-                _local_hfx_features_from_nu_cache(
-                    ao_arr[start:end],
-                    dm_spin,
-                    nu_chunk[None, ...],
-                )[:, :, 0]
+            hfx_result = _local_hfx_features_from_nu_cache(
+                ao_arr[start:end],
+                dm_spin,
+                nu_chunk[None, ...],
+                return_fxx=return_fxx,
             )
+            if return_fxx:
+                hfx_chunk, fxx_chunk = hfx_result
+                omega_fxx_chunks.append(fxx_chunk[0])
+            else:
+                hfx_chunk = hfx_result
+            omega_hfx_chunks.append(hfx_chunk[:, :, 0])
             if return_nu:
                 omega_nu_chunks.append(nu_chunk)
         hfx_chunks.append(jnp.concatenate(omega_hfx_chunks, axis=1))
         if return_nu:
             nu_chunks_per_omega.append(jnp.concatenate(omega_nu_chunks, axis=0))
+        if return_fxx:
+            fxx_chunks_per_omega.append(jnp.concatenate(omega_fxx_chunks, axis=0))
 
     hfx_local = jnp.stack(hfx_chunks, axis=-1)
-    if not return_nu:
+    outputs = [hfx_local]
+    if return_nu:
+        outputs.append(jnp.stack(nu_chunks_per_omega, axis=0))
+    if return_fxx:
+        outputs.append(jnp.stack(fxx_chunks_per_omega, axis=0))
+    if len(outputs) == 1:
         return hfx_local
-    nu_cache = jnp.stack(nu_chunks_per_omega, axis=0)
-    return hfx_local, nu_cache
+    return tuple(outputs)
 
 
 def _local_pt2_feature_from_restricted_orbitals(
@@ -778,7 +798,11 @@ def _local_pt2_feature_from_restricted_orbitals(
     if mo_energy_arr.ndim == 2:
         mo_energy_arr = mo_energy_arr[0]
 
-    nocc_int = int(nocc) if nocc is not None else int(jnp.count_nonzero(mo_occ_arr > occupation_tolerance))
+    nocc_int = (
+        int(nocc)
+        if nocc is not None
+        else int(jnp.count_nonzero(mo_occ_arr > occupation_tolerance))
+    )
     nmo = int(mo_coeff_arr.shape[1])
     if nocc_int <= 0 or nocc_int >= nmo:
         raise ValueError("PT2 local feature requires at least one occupied and one virtual orbital.")
@@ -868,7 +892,10 @@ def _local_pt2_feature_from_restricted_orbitals(
         )
     elif eri_pair_matrix is not None and jnp.asarray(eri_pair_matrix).size != 0:
         pair = jnp.asarray(eri_pair_matrix)
-        rows, cols, _, multiplicity = _metadata_arrays(int(mo_coeff_arr.shape[0]), ao_arr.dtype)
+        rows, cols, _, multiplicity = _metadata_arrays(
+            int(mo_coeff_arr.shape[0]),
+            ao_arr.dtype,
+        )
         grid_pair = ao_arr[:, rows] * ao_arr[:, cols] * multiplicity[None, :]
         ov = _mo_pair_products(orbo, orbv, rows, cols)
         pair_potential = jnp.einsum(
@@ -897,6 +924,179 @@ def _local_pt2_feature_from_restricted_orbitals(
         precision=Precision.HIGHEST,
     )
     return jnp.nan_to_num(local_energy, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _local_pt2_feature_and_fock_response_from_restricted_orbitals(
+    ao: Any,
+    mo_coeff: Any,
+    mo_occ: Any,
+    mo_energy: Any,
+    *,
+    rep_tensor: Any | None = None,
+    eri_ovov: Any | None = None,
+    eri_pair_matrix: Any | None = None,
+    df_factors: Any | None = None,
+    nocc: int | None = None,
+    occupation_tolerance: float = 1e-8,
+    density_floor: float = 1e-12,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return fixed-reference restricted PT2 local energy and AO Fock response.
+
+    The response is the derivative of the fixed-source linearization
+    ``p_g[D] = Tr[D R_g]`` with respect to the spin-summed AO density ``D``.
+    At the reference closed-shell density it reconstructs the cached local PT2
+    feature while avoiding AD through MP2 amplitudes during SCF/training.
+    """
+
+    ao_arr = jnp.asarray(ao)
+    mo_coeff_arr = jnp.asarray(mo_coeff)
+    mo_occ_arr = jnp.asarray(mo_occ)
+    mo_energy_arr = jnp.asarray(mo_energy)
+
+    if mo_coeff_arr.ndim == 3:
+        mo_coeff_arr = mo_coeff_arr[0]
+    if mo_occ_arr.ndim == 2:
+        mo_occ_arr = mo_occ_arr[0]
+    if mo_energy_arr.ndim == 2:
+        mo_energy_arr = mo_energy_arr[0]
+
+    nocc_int = int(nocc) if nocc is not None else int(jnp.count_nonzero(mo_occ_arr > occupation_tolerance))
+    nmo = int(mo_coeff_arr.shape[1])
+    if nocc_int <= 0 or nocc_int >= nmo:
+        raise ValueError("PT2 local feature requires at least one occupied and one virtual orbital.")
+
+    orbo = mo_coeff_arr[:, :nocc_int]
+    orbv = mo_coeff_arr[:, nocc_int:]
+    eps_occ = mo_energy_arr[:nocc_int]
+    eps_vir = mo_energy_arr[nocc_int:]
+
+    eri_ovov_arr = None if eri_ovov is None else jnp.asarray(eri_ovov)
+    if eri_ovov_arr is None:
+        if df_factors is not None:
+            factors = jnp.asarray(df_factors)
+            if factors.size != 0:
+                eri_ovov_arr, _, _ = df_factors_to_mo_eri_slices(
+                    factors,
+                    mo_coeff_arr,
+                    nocc_int,
+                    include_oovv=False,
+                )
+        if eri_ovov_arr is None and eri_pair_matrix is not None:
+            pair = jnp.asarray(eri_pair_matrix)
+            if pair.size != 0:
+                eri_ovov_arr, _, _ = eri_pair_matrix_to_mo_eri_slices(
+                    pair,
+                    mo_coeff_arr,
+                    nocc=nocc_int,
+                    include_oovv=False,
+                )
+        if eri_ovov_arr is None:
+            if rep_tensor is None:
+                raise ValueError(
+                    "PT2 local feature requires rep_tensor, eri_ovov, eri_pair_matrix, "
+                    "or df_factors."
+                )
+            rep = jnp.asarray(rep_tensor)
+            if rep.size == 0:
+                raise ValueError(
+                    "PT2 local feature cannot be constructed from an empty rep_tensor without df_factors."
+                )
+            eri_ovov_arr = jnp.einsum(
+                "pqrs,pi,qa,rj,sb->iajb",
+                rep,
+                orbo,
+                orbv,
+                orbo,
+                orbv,
+                precision=Precision.HIGHEST,
+            )
+
+    denom = (
+        eps_occ[:, None, None, None]
+        + eps_occ[None, None, :, None]
+        - eps_vir[None, :, None, None]
+        - eps_vir[None, None, None, :]
+    )
+    denom = jnp.where(jnp.abs(denom) > density_floor, denom, -density_floor)
+    direct = eri_ovov_arr
+    exchange = jnp.transpose(eri_ovov_arr, (0, 3, 2, 1))
+    pair_weights = (2.0 * direct - exchange) / denom
+
+    rho_o = jnp.einsum("rp,pi->ri", ao_arr, orbo, precision=Precision.HIGHEST)
+    rho_v = jnp.einsum("rp,pa->ra", ao_arr, orbv, precision=Precision.HIGHEST)
+
+    if df_factors is not None and jnp.asarray(df_factors).size != 0:
+        factors = jnp.asarray(df_factors)
+        grid_aux = jnp.einsum(
+            "Qpq,gp,gq->gQ",
+            factors,
+            ao_arr,
+            ao_arr,
+            precision=Precision.HIGHEST,
+        )
+        qjb = jnp.einsum(
+            "Qrs,rj,sb->Qjb",
+            factors,
+            orbo,
+            orbv,
+            precision=Precision.HIGHEST,
+        )
+        pair_potential = jnp.einsum(
+            "gQ,Qjb->gjb",
+            grid_aux,
+            qjb,
+            precision=Precision.HIGHEST,
+        )
+    elif eri_pair_matrix is not None and jnp.asarray(eri_pair_matrix).size != 0:
+        pair = jnp.asarray(eri_pair_matrix)
+        rows, cols, _, multiplicity = _metadata_arrays(int(mo_coeff_arr.shape[0]), ao_arr.dtype)
+        grid_pair = ao_arr[:, rows] * ao_arr[:, cols] * multiplicity[None, :]
+        ov = _mo_pair_products(orbo, orbv, rows, cols)
+        pair_potential = jnp.einsum(
+            "gP,PQ,jbQ->gjb",
+            grid_pair,
+            pair,
+            ov,
+            precision=Precision.HIGHEST,
+        )
+    else:
+        rep = jnp.asarray(rep_tensor)
+        pair_potential = jnp.einsum(
+            "gp,gq,pqrs,rj,sb->gjb",
+            ao_arr,
+            ao_arr,
+            rep,
+            orbo,
+            orbv,
+            precision=Precision.HIGHEST,
+        )
+
+    source_occ = jnp.einsum(
+        "ga,gjb,iajb->gi",
+        rho_v,
+        pair_potential,
+        pair_weights,
+        precision=Precision.HIGHEST,
+    )
+    local_energy = jnp.einsum("gi,gi->g", rho_o, source_occ, precision=Precision.HIGHEST)
+    local_energy = jnp.nan_to_num(local_energy, nan=0.0, posinf=0.0, neginf=0.0)
+
+    occ_gram_inv = jnp.linalg.pinv(
+        jnp.einsum("pi,pj->ij", orbo, orbo, precision=Precision.HIGHEST)
+    )
+    source_ao = jnp.einsum(
+        "pi,ij,gj->gp",
+        orbo,
+        occ_gram_inv,
+        source_occ,
+        precision=Precision.HIGHEST,
+    )
+    response = 0.25 * (
+        ao_arr[:, :, None] * source_ao[:, None, :]
+        + source_ao[:, :, None] * ao_arr[:, None, :]
+    )
+    response = jnp.nan_to_num(response, nan=0.0, posinf=0.0, neginf=0.0)
+    return local_energy, response
 
 
 def _local_pt2_feature_from_unrestricted_orbitals(
@@ -1101,6 +1301,7 @@ __all__ = [
     "is_chunked_hfx_nu",
     "_local_hfx_features_from_basis_dm",
     "_local_hfx_features_from_dm",
+    "_local_pt2_feature_and_fock_response_from_restricted_orbitals",
     "_local_pt2_feature_from_restricted_orbitals",
     "_local_pt2_feature_from_unrestricted_orbitals",
 ]

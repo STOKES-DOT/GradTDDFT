@@ -313,6 +313,37 @@ class BoundNeuralXCFunctional:
 
 
 class NeuralXCBindingMixin:
+    def _pt2_fock_response_source(self, molecule: Any) -> Any | None:
+        return getattr(molecule, "pt2_fock_response", None)
+
+    def uses_explicit_pt2_fock_for_scf(self, molecule: Any) -> bool:
+        if not self.include_pt2_channel:
+            return False
+        if self._ground_state_pt2_mode_for_molecule(molecule) != "nograd":
+            return False
+        return self._pt2_fock_response_source(molecule) is not None
+
+    def _raise_if_variational_pt2_scf_is_required(self, molecule: Any) -> None:
+        if not self.include_pt2_channel:
+            return
+        mode = self._ground_state_pt2_mode_for_molecule(molecule)
+        if mode == "nograd" and self._pt2_fock_response_source(molecule) is None:
+            raise NotImplementedError(
+                "PT2 nograd mode in the self-consistent Fock path requires "
+                "molecule.pt2_fock_response so the fixed PT2 local channel can "
+                "contribute through a handwritten response/Fock contraction. "
+                "Disable the PT2 channel for SCF or provide the PT2 response cache."
+            )
+        if mode != "scf":
+            return
+        raise NotImplementedError(
+            "PT2 scf mode is not variationally consistent in the self-consistent "
+            "Fock path: the local PT2 channel depends on the current orbitals and "
+            "orbital energies, but the required variational PT2 Fock/OEP response "
+            "term is not implemented. Use ground_state_pt2_mode='nograd' or disable "
+            "the PT2 channel for SCF."
+        )
+
     def _restricted_grid_features(
         self,
         molecule: Any,
@@ -363,24 +394,62 @@ class NeuralXCBindingMixin:
             return zero, zero, zero, None
         nu_source = hfx_nu_source(molecule)
         cached_fxx = getattr(molecule, "hfx_fxx", None)
-        if mode == "frozen":
-            nu_source = None
-            cached_fxx = None
-        elif mode == "scf" and nu_source is None and cached_fxx is None:
+        configured_mode = self._configured_ground_state_hf_mode()
+        if mode == "nograd" and cached_fxx is None:
             raise ValueError(
-                "ground_state_hf_mode='scf' requires molecule.hfx_nu or "
-                "molecule.hfx_nu_api or molecule.hfx_fxx so the HF channel can be "
+                "ground_state_hf_mode='nograd' requires molecule.hfx_fxx "
+                "as the fixed GradDFT-style chi/fxx reference."
+            )
+        if (
+            mode == "scf"
+            and configured_mode == "scf"
+            and nu_source is None
+            and cached_fxx is None
+        ):
+            raise ValueError(
+                "ground_state_hf_mode='scf' requires molecule.hfx_nu, "
+                "molecule.hfx_nu_api, or molecule.hfx_fxx so the HF channel can be "
                 "updated during SCF."
             )
         current_hfx_fxx = None
-        if nu_source is None:
+        if mode == "nograd" and cached_fxx is not None:
+            if getattr(molecule, "ao", None) is None:
+                raise AttributeError("Molecule-like object must define ao.")
+            ao = jnp.asarray(molecule.ao)
+            fxx = jnp.asarray(cached_fxx, dtype=ao.dtype)
+            if fxx.ndim != 3:
+                raise ValueError(
+                    "HFX fxx cache must have shape (n_omega, ngrids, nao), "
+                    f"got {fxx.shape}."
+                )
+            if (
+                int(fxx.shape[1]) != int(features.rho.shape[0])
+                or int(fxx.shape[1]) != int(ao.shape[0])
+            ):
+                raise ValueError(
+                    "HFX fxx cache grid axis must match molecule grid features "
+                    f"(got {fxx.shape[1]}, ao={ao.shape[0]}, features={features.rho.shape[0]})."
+                )
+            if int(fxx.shape[2]) != int(ao.shape[1]):
+                raise ValueError(
+                    "HFX fxx cache AO axis must match molecule.ao second axis "
+                    f"(got {fxx.shape[2]} vs {ao.shape[1]})."
+                )
+            dm_a, dm_b = self._restricted_spin_density_blocks(molecule)
+            dm_a = jax.lax.stop_gradient(jnp.asarray(dm_a, dtype=ao.dtype))
+            dm_b = jax.lax.stop_gradient(jnp.asarray(dm_b, dtype=ao.dtype))
+            fxx0 = jax.lax.stop_gradient(fxx[:1])[0]
+            e_a = jnp.einsum("gp,pq->gq", ao, dm_a, precision=Precision.HIGHEST)
+            e_b = jnp.einsum("gp,pq->gq", ao, dm_b, precision=Precision.HIGHEST)
+            e_hf_a = -0.5 * jnp.einsum("gq,gq->g", e_a, fxx0, precision=Precision.HIGHEST)
+            e_hf_b = -0.5 * jnp.einsum("gq,gq->g", e_b, fxx0, precision=Precision.HIGHEST)
+            e_hf_a = jax.lax.stop_gradient(e_hf_a)
+            e_hf_b = jax.lax.stop_gradient(e_hf_b)
+            if include_fxx:
+                current_hfx_fxx = jax.lax.stop_gradient(fxx[:1])
+        elif nu_source is None:
             hfx_local = getattr(molecule, "hfx_local", None)
             if hfx_local is None:
-                if self._configured_ground_state_hf_mode() == "frozen":
-                    raise ValueError(
-                        "ground_state_hf_mode='frozen' requires molecule.hfx_local "
-                        "so the HF channel remains fixed during SCF."
-                    )
                 hfx_local, _ = self._restricted_hfx_local_and_fxx(molecule)
             hfx_local = jnp.asarray(hfx_local)
             if hfx_local.ndim != 3 or hfx_local.shape[0] != 2:
@@ -497,6 +566,7 @@ class NeuralXCBindingMixin:
         params: PyTree,
         molecule: Any,
     ) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
+        self._raise_if_variational_pt2_scf_is_required(molecule)
         features, total_gradient, semilocal_channels, semilocal = (
             self._restricted_grid_payload(molecule)
         )
@@ -577,6 +647,7 @@ class NeuralXCBindingMixin:
             hf_projected,
             pt2_projected=pt2_projected,
             hf_spin_energy_density=(hfx_feature_a, hfx_feature_b),
+            include_hf_basis=self.uses_explicit_hfx_fock_for_scf(molecule),
             strict_payload=strict_payload,
         )
         hfx_fock, uses_explicit_hfx_fock = self._explicit_hfx_fock_from_components(
@@ -591,17 +662,29 @@ class NeuralXCBindingMixin:
             grid_weights=grid_weights,
             hfx_fxx=current_hfx_fxx,
         )
+        pt2_fock, _uses_explicit_pt2_fock = self._explicit_pt2_fock_from_components(
+            params,
+            molecule,
+            features=features,
+            semilocal_channels=semilocal_channels,
+            hf_projected=hf_projected,
+            hfx_feature_a=hfx_feature_a,
+            hfx_feature_b=hfx_feature_b,
+            pt2_projected=pt2_projected,
+            grid_weights=grid_weights,
+        )
         alpha = self._alpha_for_scf_fock(
             alpha,
             uses_explicit_hfx_fock=uses_explicit_hfx_fock,
         )
+        extra_fock = hfx_fock + pt2_fock
         return (
             projected_vrho,
             projected_vgrad,
             projected_vtau,
             projected_vlapl,
             alpha,
-            hfx_fock,
+            extra_fock,
             xc_energy,
         )
 
@@ -681,10 +764,6 @@ class NeuralXCBindingMixin:
         hf_total = jnp.asarray(hf_projected)
         hfx_a = jnp.asarray(hf_feature_a)
         hfx_b = jnp.asarray(hf_feature_b)
-        if hfx_a.ndim == hf_total.ndim:
-            hfx_a = hfx_a[..., None]
-        if hfx_b.ndim == hf_total.ndim:
-            hfx_b = hfx_b[..., None]
         semilocal_basis = self._semilocal_local_contribution_channels(
             features,
             semilocal_channels,
@@ -740,10 +819,137 @@ class NeuralXCBindingMixin:
         grad_b = self._maybe_clip_response(grad_b)
         return grad_a, grad_b
 
+    def _grid_pt2_feature_gradient(
+        self,
+        params: PyTree,
+        features: RestrictedFeatureBundle,
+        semilocal_channels: Array,
+        hf_projected: Array,
+        hfx_feature_a: Array,
+        hfx_feature_b: Array,
+        pt2_projected: Array | None,
+        *,
+        grid_weights: Array,
+    ) -> Array:
+        if pt2_projected is None:
+            return jnp.zeros_like(features.rho)
+        semilocal_total = jax.lax.stop_gradient(jnp.sum(semilocal_channels, axis=-1))
+        semilocal_basis = jax.lax.stop_gradient(
+            self._semilocal_local_contribution_channels(features, semilocal_channels)
+        )
+        hf_total = jax.lax.stop_gradient(jnp.asarray(hf_projected))
+        hf_spin_inputs = (
+            jax.lax.stop_gradient(jnp.asarray(hfx_feature_a)),
+            jax.lax.stop_gradient(jnp.asarray(hfx_feature_b)),
+        )
+        weights = jnp.asarray(grid_weights)
+
+        def energy_from_pt2_channel(pt2_arg: Array) -> Array:
+            coefficients = self.channel_coefficients(
+                params,
+                features,
+                semilocal_energy_density=semilocal_total,
+                hf_energy_density=hf_total,
+                pt2_energy_density=pt2_arg,
+                hf_spin_energy_density=hf_spin_inputs,
+            )
+            basis = self._assemble_basis_channels(
+                semilocal_basis,
+                hf_projected=hf_total,
+                pt2_projected=pt2_arg,
+            )
+            local_channels = self._assemble_channel_contributions(coefficients, basis)
+            local_energy = jnp.sum(local_channels, axis=-1)
+            return jnp.tensordot(weights, local_energy, axes=(0, 0))
+
+        grad = jax.grad(energy_from_pt2_channel)(
+            jax.lax.stop_gradient(jnp.asarray(pt2_projected))
+        )
+        return self._maybe_clip_response(jnp.asarray(grad))
+
     def _zero_hfx_fock(self, molecule: Any, dtype: Any | None = None) -> Array:
         ao = jnp.asarray(molecule.ao)
         matrix_dtype = ao.dtype if dtype is None else dtype
         return jnp.zeros((ao.shape[1], ao.shape[1]), dtype=matrix_dtype)
+
+    def _contract_pt2_feature_gradient_to_restricted_fock(
+        self,
+        molecule: Any,
+        grad: Array,
+        *,
+        dtype: Any | None = None,
+    ) -> tuple[Array, bool]:
+        response = self._pt2_fock_response_source(molecule)
+        if response is None:
+            return self._zero_hfx_fock(molecule, dtype), False
+        ao = jnp.asarray(molecule.ao)
+        matrix_dtype = ao.dtype if dtype is None else dtype
+        response_arr = jax.lax.stop_gradient(jnp.asarray(response, dtype=matrix_dtype))
+        if response_arr.ndim == 4 and int(response_arr.shape[0]) == 1:
+            response_arr = response_arr[0]
+        if response_arr.ndim != 3:
+            raise ValueError(
+                "PT2 Fock response cache must have shape (ngrids, nao, nao) "
+                "for restricted SCF."
+            )
+        ngrid, nao, nao2 = (int(dim) for dim in response_arr.shape)
+        if nao != int(ao.shape[1]) or nao2 != int(ao.shape[1]):
+            raise ValueError(
+                "PT2 Fock response AO axes must match molecule.ao second axis "
+                f"(got {(nao, nao2)} vs {(ao.shape[1], ao.shape[1])})."
+            )
+        grad_arr = jnp.asarray(grad, dtype=matrix_dtype)
+        if grad_arr.ndim != 1 or int(grad_arr.shape[0]) != ngrid:
+            raise ValueError(
+                "PT2 feature gradient grid axis must match PT2 Fock response grid axis "
+                f"(got {grad_arr.shape} vs {ngrid})."
+            )
+        fock = jnp.einsum("g,gpq->pq", grad_arr, response_arr, precision=Precision.HIGHEST)
+        fock = jnp.nan_to_num(fock, nan=0.0, posinf=0.0, neginf=0.0)
+        return 0.5 * (fock + fock.T), True
+
+    def _contract_pt2_feature_gradient_to_unrestricted_fock(
+        self,
+        molecule: Any,
+        grad: Array,
+        *,
+        dtype: Any | None = None,
+    ) -> tuple[Array, Array, bool]:
+        response = self._pt2_fock_response_source(molecule)
+        if response is None:
+            zero = self._zero_hfx_fock(molecule, dtype)
+            return zero, zero, False
+        ao = jnp.asarray(molecule.ao)
+        matrix_dtype = ao.dtype if dtype is None else dtype
+        response_arr = jax.lax.stop_gradient(jnp.asarray(response, dtype=matrix_dtype))
+        if response_arr.ndim == 3:
+            fock, used = self._contract_pt2_feature_gradient_to_restricted_fock(
+                molecule,
+                grad,
+                dtype=matrix_dtype,
+            )
+            return fock, fock, used
+        if response_arr.ndim != 4 or int(response_arr.shape[0]) != 2:
+            raise ValueError(
+                "Unrestricted PT2 Fock response cache must have shape "
+                "(2, ngrids, nao, nao)."
+            )
+        _, ngrid, nao, nao2 = (int(dim) for dim in response_arr.shape)
+        if nao != int(ao.shape[1]) or nao2 != int(ao.shape[1]):
+            raise ValueError(
+                "PT2 Fock response AO axes must match molecule.ao second axis "
+                f"(got {(nao, nao2)} vs {(ao.shape[1], ao.shape[1])})."
+            )
+        grad_arr = jnp.asarray(grad, dtype=matrix_dtype)
+        if grad_arr.ndim != 1 or int(grad_arr.shape[0]) != ngrid:
+            raise ValueError(
+                "PT2 feature gradient grid axis must match PT2 Fock response grid axis "
+                f"(got {grad_arr.shape} vs {ngrid})."
+            )
+        fock = jnp.einsum("g,sgpq->spq", grad_arr, response_arr, precision=Precision.HIGHEST)
+        fock = jnp.nan_to_num(fock, nan=0.0, posinf=0.0, neginf=0.0)
+        fock = 0.5 * (fock + jnp.swapaxes(fock, -1, -2))
+        return fock[0], fock[1], True
 
     def _response_hf_grid_contribution_components(
         self,
@@ -772,7 +978,7 @@ class NeuralXCBindingMixin:
         return e_hf, e_hf_a, e_hf_b
 
     def uses_explicit_hfx_fock_for_scf(self, molecule: Any) -> bool:
-        if self._ground_state_hf_mode_for_molecule(molecule) != "scf":
+        if self._ground_state_hf_mode_for_molecule(molecule) not in {"nograd", "scf"}:
             return False
         return (
             self._uses_hfx_channel()
@@ -782,7 +988,7 @@ class NeuralXCBindingMixin:
             )
         )
 
-    def _contract_hfx_feature_gradients_to_restricted_fock(
+    def _hfx_gradient_contraction_inputs(
         self,
         molecule: Any,
         grad_a: Array,
@@ -790,27 +996,22 @@ class NeuralXCBindingMixin:
         *,
         dtype: Any | None = None,
         hfx_fxx: Array | None = None,
-    ) -> tuple[Array, bool]:
-        nu_source = hfx_nu_source(molecule)
-        fxx_source = hfx_fxx
-        if fxx_source is None and nu_source is None:
-            fxx_source = getattr(molecule, "hfx_fxx", None)
-        if nu_source is None and fxx_source is None:
-            return self._zero_hfx_fock(molecule, dtype), False
-
+        repeat_single_fxx: bool = False,
+    ) -> tuple[Array, Any, int, int, Array, Array, Array | None]:
         ao = jnp.asarray(molecule.ao)
         matrix_dtype = ao.dtype if dtype is None else dtype
         ao = jnp.asarray(ao, dtype=matrix_dtype)
-        if fxx_source is not None:
-            fxx_source = jnp.asarray(fxx_source, dtype=matrix_dtype)
-            if fxx_source.ndim != 3:
+        if hfx_fxx is not None:
+            hfx_fxx = jnp.asarray(hfx_fxx, dtype=matrix_dtype)
+            if hfx_fxx.ndim != 3:
                 raise ValueError(
                     "HFX fxx cache must have shape (n_omega, ngrids, nao), "
-                    f"got {fxx_source.shape}."
+                    f"got {hfx_fxx.shape}."
                 )
-            n_omega, ngrid, nao = (int(dim) for dim in fxx_source.shape)
+            n_omega, ngrid, nao = (int(dim) for dim in hfx_fxx.shape)
             nao2 = nao
         else:
+            nu_source = hfx_nu_source(molecule)
             n_omega, ngrid, nao, nao2 = hfx_nu_shape(nu_source)
         if nao != ao.shape[1] or nao2 != ao.shape[1]:
             raise ValueError(
@@ -836,153 +1037,244 @@ class NeuralXCBindingMixin:
             )
         n_grad_channels = int(grad_a.shape[-1])
         if n_grad_channels > int(n_omega):
-            if fxx_source is not None and int(n_omega) == 1:
-                fxx_source = jnp.repeat(fxx_source, n_grad_channels, axis=0)
+            if repeat_single_fxx and hfx_fxx is not None and int(n_omega) == 1:
+                hfx_fxx = jnp.repeat(hfx_fxx, n_grad_channels, axis=0)
                 n_omega = n_grad_channels
             else:
                 raise ValueError(
                     "HFX feature gradient omega axis cannot exceed HFX source omega axis "
                     f"(got {n_grad_channels} vs {n_omega})."
                 )
-        grad = 0.5 * (grad_a[:, :n_grad_channels] + grad_b[:, :n_grad_channels])
-        grad = jnp.nan_to_num(grad, nan=0.0, posinf=0.0, neginf=0.0)
+        return (
+            ao,
+            matrix_dtype,
+            int(ngrid),
+            n_grad_channels,
+            grad_a[:, :n_grad_channels],
+            grad_b[:, :n_grad_channels],
+            hfx_fxx,
+        )
 
+    def _contract_hfx_feature_gradients_to_fock_from_density(
+        self,
+        *,
+        ao: Array,
+        matrix_dtype: Any,
+        density: Array,
+        grad: Array,
+        nu_source: Any,
+        ngrid: int,
+        n_grad_channels: int,
+    ) -> Array:
+        density = jax.lax.stop_gradient(jnp.asarray(density, dtype=matrix_dtype))
+        grad = jnp.nan_to_num(
+            jnp.asarray(grad, dtype=matrix_dtype),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        if is_chunked_hfx_nu(nu_source):
+            chunk_size = min(
+                max(1, int(getattr(nu_source, "chunk_size", 512))),
+                int(ngrid),
+            )
+            n_chunks = (int(ngrid) + chunk_size - 1) // chunk_size
+            zero = jnp.zeros((ao.shape[1], ao.shape[1]), dtype=matrix_dtype)
+
+            def vmat_from_feature_gradients(grad_grid: Array) -> Array:
+                def vmat_chunk_from_start(start: Array) -> Array:
+                    ao_chunk = self._take_grid_chunk(ao, start, chunk_size, axis=0)
+                    grad_chunk = self._take_grid_chunk(grad_grid, start, chunk_size, axis=0)
+                    nu_chunk = hfx_nu_grid_chunk_padded(
+                        nu_source,
+                        start,
+                        chunk_size,
+                        n_omega=n_grad_channels,
+                        dtype=matrix_dtype,
+                    )
+                    e = jnp.einsum("gp,pq->gq", ao_chunk, density, precision=Precision.HIGHEST)
+                    fxx = jnp.einsum("wgbc,gc->wgb", nu_chunk, e, precision=Precision.HIGHEST)
+                    aow = -0.5 * fxx * jnp.transpose(grad_chunk, (1, 0))[:, :, None]
+                    return jnp.einsum("gp,wgq->pq", ao_chunk, aow, precision=Precision.HIGHEST)
+
+                def body(carry: Array, chunk_idx: Array) -> tuple[Array, None]:
+                    start = chunk_idx * chunk_size
+                    return carry + vmat_chunk_from_start(start), None
+
+                vmat_out, _ = jax.lax.scan(body, zero, jnp.arange(n_chunks))
+                correction_out = vmat_out + vmat_out.T
+                return jnp.nan_to_num(correction_out, nan=0.0, posinf=0.0, neginf=0.0)
+
+            @jax.custom_vjp
+            def hfx_fock_from_feature_gradients(grad_grid: Array) -> Array:
+                return vmat_from_feature_gradients(grad_grid)
+
+            def hfx_fock_fwd(grad_grid: Array) -> tuple[Array, None]:
+                return vmat_from_feature_gradients(grad_grid), None
+
+            def hfx_fock_bwd(_residual: None, cotangent: Array) -> tuple[Array]:
+                cotangent = jnp.asarray(cotangent, dtype=matrix_dtype)
+                vmat_cotangent = cotangent + cotangent.T
+
+                def grad_chunk_from_start(start: Array) -> Array:
+                    ao_chunk = self._take_grid_chunk(ao, start, chunk_size, axis=0)
+                    nu_chunk = hfx_nu_grid_chunk_padded(
+                        nu_source,
+                        start,
+                        chunk_size,
+                        n_omega=n_grad_channels,
+                        dtype=matrix_dtype,
+                    )
+                    e = jnp.einsum("gp,pq->gq", ao_chunk, density, precision=Precision.HIGHEST)
+                    fxx = jnp.einsum("wgbc,gc->wgb", nu_chunk, e, precision=Precision.HIGHEST)
+                    return -0.5 * jnp.einsum(
+                        "pq,gp,wgq->gw",
+                        vmat_cotangent,
+                        ao_chunk,
+                        fxx,
+                        precision=Precision.HIGHEST,
+                    )
+
+                def body(_carry: None, chunk_idx: Array) -> tuple[None, Array]:
+                    start = chunk_idx * chunk_size
+                    return None, grad_chunk_from_start(start)
+
+                _, grad_chunks = jax.lax.scan(body, None, jnp.arange(n_chunks))
+                return (grad_chunks.reshape(n_chunks * chunk_size, n_grad_channels)[:ngrid],)
+
+            hfx_fock_from_feature_gradients.defvjp(hfx_fock_fwd, hfx_fock_bwd)
+            return hfx_fock_from_feature_gradients(grad)
+
+        nu = jnp.asarray(nu_source, dtype=matrix_dtype)[:n_grad_channels]
+        e = jnp.einsum("gp,pq->gq", ao, density, precision=Precision.HIGHEST)
+        fxx = jnp.einsum("wgbc,gc->wgb", nu, e, precision=Precision.HIGHEST)
+        aow = -0.5 * fxx * jnp.transpose(grad, (1, 0))[:, :, None]
+        vmat = jnp.einsum("gp,wgq->pq", ao, aow, precision=Precision.HIGHEST)
+        correction = vmat + vmat.T
+        correction = jnp.nan_to_num(correction, nan=0.0, posinf=0.0, neginf=0.0)
+        return 0.5 * (correction + correction.T)
+
+    def _contract_hfx_feature_gradients_to_restricted_fock(
+        self,
+        molecule: Any,
+        grad_a: Array,
+        grad_b: Array,
+        *,
+        dtype: Any | None = None,
+        hfx_fxx: Array | None = None,
+    ) -> tuple[Array, bool]:
+        nu_source = hfx_nu_source(molecule)
+        fxx_source = hfx_fxx
+        if fxx_source is None and nu_source is None:
+            fxx_source = getattr(molecule, "hfx_fxx", None)
+        if nu_source is None and fxx_source is None:
+            return self._zero_hfx_fock(molecule, dtype), False
+
+        ao, matrix_dtype, ngrid, n_grad_channels, grad_a, grad_b, fxx_source = (
+            self._hfx_gradient_contraction_inputs(
+                molecule,
+                grad_a,
+                grad_b,
+                dtype=dtype,
+                hfx_fxx=fxx_source,
+                repeat_single_fxx=True,
+            )
+        )
+        grad = jnp.nan_to_num(
+            0.5 * (grad_a + grad_b),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
         if fxx_source is not None:
             fxx = fxx_source[:n_grad_channels]
             aow = -0.5 * fxx * jnp.transpose(grad, (1, 0))[:, :, None]
             vmat = jnp.einsum("gp,wgq->pq", ao, aow, precision=Precision.HIGHEST)
+            correction = vmat + vmat.T
+            correction = jnp.nan_to_num(correction, nan=0.0, posinf=0.0, neginf=0.0)
+            return 0.5 * (correction + correction.T), True
+
+        rdm1 = jnp.asarray(molecule.rdm1, dtype=matrix_dtype)
+        if rdm1.ndim == 2:
+            density_half = 0.5 * rdm1
+        elif rdm1.ndim == 3 and rdm1.shape[0] == 2:
+            density_half = 0.5 * (rdm1[0] + rdm1[1])
         else:
-            rdm1 = jnp.asarray(molecule.rdm1, dtype=matrix_dtype)
-            if rdm1.ndim == 2:
-                density_half = 0.5 * rdm1
-            elif rdm1.ndim == 3 and rdm1.shape[0] == 2:
-                density_half = 0.5 * (rdm1[0] + rdm1[1])
-            else:
-                raise ValueError(
-                    "Restricted HFX Fock contraction expects rdm1 with shape "
-                    "(nao, nao) or (2, nao, nao)."
-                )
-            density_half = jax.lax.stop_gradient(density_half)
-            if is_chunked_hfx_nu(nu_source):
-                chunk_size = min(
-                    max(1, int(getattr(nu_source, "chunk_size", 512))),
-                    int(ngrid),
-                )
-                n_chunks = (int(ngrid) + chunk_size - 1) // chunk_size
-                zero = jnp.zeros((ao.shape[1], ao.shape[1]), dtype=matrix_dtype)
+            raise ValueError(
+                "Restricted HFX Fock contraction expects rdm1 with shape "
+                "(nao, nao) or (2, nao, nao)."
+            )
+        return (
+            self._contract_hfx_feature_gradients_to_fock_from_density(
+                ao=ao,
+                matrix_dtype=matrix_dtype,
+                density=density_half,
+                grad=grad,
+                nu_source=nu_source,
+                ngrid=ngrid,
+                n_grad_channels=n_grad_channels,
+            ),
+            True,
+        )
 
-                def vmat_from_feature_gradients(grad_grid: Array) -> Array:
-                    def vmat_chunk_from_start(start: Array) -> Array:
-                        ao_chunk = self._take_grid_chunk(ao, start, chunk_size, axis=0)
-                        grad_chunk = self._take_grid_chunk(
-                            grad_grid,
-                            start,
-                            chunk_size,
-                            axis=0,
-                        )
-                        nu_chunk = hfx_nu_grid_chunk_padded(
-                            nu_source,
-                            start,
-                            chunk_size,
-                            n_omega=n_grad_channels,
-                            dtype=matrix_dtype,
-                        )
-                        e = jnp.einsum(
-                            "gp,pq->gq",
-                            ao_chunk,
-                            density_half,
-                            precision=Precision.HIGHEST,
-                        )
-                        fxx = jnp.einsum(
-                            "wgbc,gc->wgb",
-                            nu_chunk,
-                            e,
-                            precision=Precision.HIGHEST,
-                        )
-                        aow = -0.5 * fxx * jnp.transpose(grad_chunk, (1, 0))[:, :, None]
-                        return jnp.einsum(
-                            "gp,wgq->pq",
-                            ao_chunk,
-                            aow,
-                            precision=Precision.HIGHEST,
-                        )
+    def _contract_hfx_feature_gradients_to_unrestricted_fock(
+        self,
+        molecule: Any,
+        grad_a: Array,
+        grad_b: Array,
+        *,
+        dtype: Any | None = None,
+    ) -> tuple[Array, Array, bool]:
+        nu_source = hfx_nu_source(molecule)
+        if nu_source is None:
+            fallback, used = self._contract_hfx_feature_gradients_to_restricted_fock(
+                molecule,
+                grad_a,
+                grad_b,
+                dtype=dtype,
+            )
+            return fallback, fallback, used
 
-                    def body(carry: Array, chunk_idx: Array) -> tuple[Array, None]:
-                        start = chunk_idx * chunk_size
-                        return carry + vmat_chunk_from_start(start), None
+        ao, matrix_dtype, ngrid, n_grad_channels, grad_a, grad_b, _ = (
+            self._hfx_gradient_contraction_inputs(
+                molecule,
+                grad_a,
+                grad_b,
+                dtype=dtype,
+            )
+        )
 
-                    vmat_out, _ = jax.lax.scan(body, zero, jnp.arange(n_chunks))
-                    correction_out = vmat_out + vmat_out.T
-                    return jnp.nan_to_num(
-                        correction_out,
-                        nan=0.0,
-                        posinf=0.0,
-                        neginf=0.0,
-                    )
-
-                @jax.custom_vjp
-                def hfx_fock_from_feature_gradients(grad_grid: Array) -> Array:
-                    return vmat_from_feature_gradients(grad_grid)
-
-                def hfx_fock_fwd(grad_grid: Array) -> tuple[Array, None]:
-                    return vmat_from_feature_gradients(grad_grid), None
-
-                def hfx_fock_bwd(_residual: None, cotangent: Array) -> tuple[Array]:
-                    cotangent = jnp.asarray(cotangent, dtype=matrix_dtype)
-                    vmat_cotangent = cotangent + cotangent.T
-
-                    def grad_chunk_from_start(start: Array) -> Array:
-                        ao_chunk = self._take_grid_chunk(ao, start, chunk_size, axis=0)
-                        nu_chunk = hfx_nu_grid_chunk_padded(
-                            nu_source,
-                            start,
-                            chunk_size,
-                            n_omega=n_grad_channels,
-                            dtype=matrix_dtype,
-                        )
-                        e = jnp.einsum(
-                            "gp,pq->gq",
-                            ao_chunk,
-                            density_half,
-                            precision=Precision.HIGHEST,
-                        )
-                        fxx = jnp.einsum(
-                            "wgbc,gc->wgb",
-                            nu_chunk,
-                            e,
-                            precision=Precision.HIGHEST,
-                        )
-                        grad_chunk = -0.5 * jnp.einsum(
-                            "pq,gp,wgq->gw",
-                            vmat_cotangent,
-                            ao_chunk,
-                            fxx,
-                            precision=Precision.HIGHEST,
-                        )
-                        return grad_chunk
-
-                    def body(_carry: None, chunk_idx: Array) -> tuple[None, Array]:
-                        start = chunk_idx * chunk_size
-                        return None, grad_chunk_from_start(start)
-
-                    _, grad_chunks = jax.lax.scan(body, None, jnp.arange(n_chunks))
-                    grad_grid = grad_chunks.reshape(
-                        n_chunks * chunk_size,
-                        n_grad_channels,
-                    )[:ngrid]
-                    return (grad_grid,)
-
-                hfx_fock_from_feature_gradients.defvjp(hfx_fock_fwd, hfx_fock_bwd)
-                return hfx_fock_from_feature_gradients(grad), True
-            else:
-                nu = jnp.asarray(nu_source, dtype=matrix_dtype)[:n_grad_channels]
-                e = jnp.einsum("gp,pq->gq", ao, density_half, precision=Precision.HIGHEST)
-                fxx = jnp.einsum("wgbc,gc->wgb", nu, e, precision=Precision.HIGHEST)
-                aow = -0.5 * fxx * jnp.transpose(grad, (1, 0))[:, :, None]
-                vmat = jnp.einsum("gp,wgq->pq", ao, aow, precision=Precision.HIGHEST)
-        correction = vmat + vmat.T
-        correction = jnp.nan_to_num(correction, nan=0.0, posinf=0.0, neginf=0.0)
-        return 0.5 * (correction + correction.T), True
+        rdm1 = jnp.asarray(molecule.rdm1, dtype=matrix_dtype)
+        if rdm1.ndim == 2:
+            density_a = density_b = 0.5 * rdm1
+        elif rdm1.ndim == 3 and rdm1.shape[0] == 2:
+            density_a, density_b = rdm1[0], rdm1[1]
+        else:
+            raise ValueError(
+                "Unrestricted HFX Fock contraction expects rdm1 with shape "
+                "(nao, nao) or (2, nao, nao)."
+            )
+        return (
+            self._contract_hfx_feature_gradients_to_fock_from_density(
+                ao=ao,
+                matrix_dtype=matrix_dtype,
+                density=density_a,
+                grad=grad_a,
+                nu_source=nu_source,
+                ngrid=ngrid,
+                n_grad_channels=n_grad_channels,
+            ),
+            self._contract_hfx_feature_gradients_to_fock_from_density(
+                ao=ao,
+                matrix_dtype=matrix_dtype,
+                density=density_b,
+                grad=grad_b,
+                nu_source=nu_source,
+                ngrid=ngrid,
+                n_grad_channels=n_grad_channels,
+            ),
+            True,
+        )
 
     def _explicit_hfx_fock_from_components(
         self,
@@ -997,7 +1289,8 @@ class NeuralXCBindingMixin:
         pt2_projected: Array | None,
         grid_weights: Array,
         hfx_fxx: Array | None = None,
-    ) -> tuple[Array, bool]:
+        unrestricted: bool = False,
+    ) -> tuple[Array, bool] | tuple[Array, Array, bool]:
         if (
             not self._uses_hfx_channel()
             or (
@@ -1006,7 +1299,10 @@ class NeuralXCBindingMixin:
                 and getattr(molecule, "hfx_fxx", None) is None
             )
         ):
-            return self._zero_hfx_fock(molecule), False
+            zero = self._zero_hfx_fock(molecule)
+            if unrestricted:
+                return zero, zero, False
+            return zero, False
         grad_a, grad_b = self._grid_hfx_feature_gradients(
             params,
             features,
@@ -1017,12 +1313,54 @@ class NeuralXCBindingMixin:
             pt2_projected=pt2_projected,
             grid_weights=grid_weights,
         )
+        if unrestricted:
+            return self._contract_hfx_feature_gradients_to_unrestricted_fock(
+                molecule,
+                grad_a,
+                grad_b,
+            )
         return self._contract_hfx_feature_gradients_to_restricted_fock(
             molecule,
             grad_a,
             grad_b,
             hfx_fxx=hfx_fxx,
         )
+
+    def _explicit_pt2_fock_from_components(
+        self,
+        params: PyTree,
+        molecule: Any,
+        *,
+        features: RestrictedFeatureBundle,
+        semilocal_channels: Array,
+        hf_projected: Array,
+        hfx_feature_a: Array,
+        hfx_feature_b: Array,
+        pt2_projected: Array | None,
+        grid_weights: Array,
+        unrestricted: bool = False,
+    ) -> tuple[Array, bool] | tuple[Array, Array, bool]:
+        if not self.uses_explicit_pt2_fock_for_scf(molecule):
+            zero = self._zero_hfx_fock(molecule)
+            if unrestricted:
+                return zero, zero, False
+            return zero, False
+        grad = self._grid_pt2_feature_gradient(
+            params,
+            features,
+            semilocal_channels,
+            hf_projected,
+            hfx_feature_a,
+            hfx_feature_b,
+            pt2_projected,
+            grid_weights=grid_weights,
+        )
+        if unrestricted:
+            return self._contract_pt2_feature_gradient_to_unrestricted_fock(
+                molecule,
+                grad,
+            )
+        return self._contract_pt2_feature_gradient_to_restricted_fock(molecule, grad)
 
     def _explicit_hfx_fock_from_molecule(
         self,
@@ -1620,7 +1958,8 @@ class NeuralXCBindingMixin:
         self,
         params: PyTree,
         molecule: Any,
-    ) -> tuple[Array, Array, Array, Array, Array, Array]:
+    ) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
+        self._raise_if_variational_pt2_scf_is_required(molecule)
         features, grad_a, grad_b = grid_features_with_spin_gradients_for_molecule(molecule)
         semilocal_channels = self.semilocal_energy_density_channels(features)
         semilocal = jnp.sum(semilocal_channels, axis=-1)
@@ -1677,8 +2016,9 @@ class NeuralXCBindingMixin:
             hf_projected,
             pt2_projected=pt2_projected,
             hf_spin_energy_density=(hfx_feature_a, hfx_feature_b),
+            include_hf_basis=uses_explicit_hfx_fock,
         )
-        hfx_fock, uses_explicit_hfx_fock = self._explicit_hfx_fock_from_components(
+        hfx_fock_a, hfx_fock_b, uses_explicit_hfx_fock = self._explicit_hfx_fock_from_components(
             params,
             molecule,
             features=features,
@@ -1688,12 +2028,33 @@ class NeuralXCBindingMixin:
             hfx_feature_b=hfx_feature_b,
             pt2_projected=pt2_projected,
             grid_weights=grid_weights,
+            unrestricted=True,
+        )
+        pt2_fock_a, pt2_fock_b, _uses_explicit_pt2_fock = self._explicit_pt2_fock_from_components(
+            params,
+            molecule,
+            features=features,
+            semilocal_channels=semilocal_channels,
+            hf_projected=hf_projected,
+            hfx_feature_a=hfx_feature_a,
+            hfx_feature_b=hfx_feature_b,
+            pt2_projected=pt2_projected,
+            grid_weights=grid_weights,
+            unrestricted=True,
         )
         alpha = self._alpha_for_scf_fock(
             alpha,
             uses_explicit_hfx_fock=uses_explicit_hfx_fock,
         )
-        return v_rho_a, v_rho_b, v_grad_a, v_grad_b, alpha, hfx_fock
+        return (
+            v_rho_a,
+            v_rho_b,
+            v_grad_a,
+            v_grad_b,
+            alpha,
+            hfx_fock_a + pt2_fock_a,
+            hfx_fock_b + pt2_fock_b,
+        )
 
     def scf_potential_components_and_alpha(
         self,
@@ -1719,7 +2080,8 @@ class NeuralXCBindingMixin:
             v_grad_a,
             v_grad_b,
             alpha,
-            hfx_fock,
+            hfx_fock_a,
+            hfx_fock_b,
         ) = self._unrestricted_scf_binding_payload(params, molecule)
         return (
             v_rho_a,
@@ -1728,13 +2090,14 @@ class NeuralXCBindingMixin:
             v_grad_b,
             self._response_feature_kind_label(),
             alpha,
-            hfx_fock,
-            hfx_fock,
+            hfx_fock_a,
+            hfx_fock_b,
         )
 
     def bind_to_molecule_for_scf(self, params: PyTree, molecule: Any) -> BoundNeuralXCFunctional:
         """SCF-only binding that avoids constructing strict f_xc response terms."""
         spin_values = spin_gradients = None
+        spin_hfx_fock = None
         if has_explicit_spin_axis(molecule):
             (
                 v_rho_a,
@@ -1742,13 +2105,16 @@ class NeuralXCBindingMixin:
                 v_grad_a,
                 v_grad_b,
                 alpha,
-                hfx_fock,
+                hfx_fock_a,
+                hfx_fock_b,
             ) = self._unrestricted_scf_binding_payload(params, molecule)
             projected_vrho = 0.5 * (v_rho_a + v_rho_b)
             projected_vgrad = 0.5 * (v_grad_a + v_grad_b)
             projected_vtau = projected_vlapl = jnp.zeros_like(projected_vrho)
+            hfx_fock = 0.5 * (hfx_fock_a + hfx_fock_b)
             spin_values = (v_rho_a, v_rho_b)
             spin_gradients = (v_grad_a, v_grad_b)
+            spin_hfx_fock = (hfx_fock_a, hfx_fock_b)
         else:
             (
                 projected_vrho,
@@ -1774,9 +2140,7 @@ class NeuralXCBindingMixin:
             unrestricted_local_potential_values=spin_values,
             unrestricted_local_potential_gradient_values=spin_gradients,
             explicit_hfx_fock_value=hfx_fock,
-            unrestricted_explicit_hfx_fock_values=(
-                (hfx_fock, hfx_fock) if spin_values is not None else None
-            ),
+            unrestricted_explicit_hfx_fock_values=spin_hfx_fock,
             projected_energy_density_values=None,
             local_hf_fraction_values=None,
             response_feature_kind=self._response_feature_kind_label(),

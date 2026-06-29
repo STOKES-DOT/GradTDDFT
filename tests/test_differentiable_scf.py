@@ -265,7 +265,7 @@ def test_unrestricted_scf_components_prefer_direct_hfx_fock_path():
     assert np.allclose(np.asarray(extra_b), np.asarray(extra))
 
 
-def test_restricted_iteration_molecule_drops_cached_hfx_when_nu_is_present():
+def test_restricted_iteration_molecule_preserves_fixed_hfx_fxx_when_nu_is_present():
     molecule = _make_toy_restricted_reference()
     cached_hfx = jnp.asarray(
         [
@@ -275,7 +275,8 @@ def test_restricted_iteration_molecule_drops_cached_hfx_when_nu_is_present():
         dtype=jnp.float32,
     )
     molecule.hfx_local = cached_hfx
-    molecule.hfx_fxx = jnp.ones((1, molecule.ao.shape[0], molecule.ao.shape[1]), dtype=jnp.float32)
+    cached_fxx = jnp.ones((1, molecule.ao.shape[0], molecule.ao.shape[1]), dtype=jnp.float32)
+    molecule.hfx_fxx = cached_fxx
     molecule.hfx_nu = jnp.ones(
         (1, molecule.ao.shape[0], molecule.ao.shape[1], molecule.ao.shape[1]),
         dtype=jnp.float32,
@@ -295,7 +296,7 @@ def test_restricted_iteration_molecule_drops_cached_hfx_when_nu_is_present():
     )
 
     assert molecule_iter.hfx_local is None
-    assert molecule_iter.hfx_fxx is None
+    assert jnp.allclose(molecule_iter.hfx_fxx, cached_fxx)
 
 
 def test_restricted_iteration_molecule_does_not_materialize_hfx_from_chunked_nu_api():
@@ -311,7 +312,8 @@ def test_restricted_iteration_molecule_does_not_materialize_hfx_from_chunked_nu_
         dtype=jnp.float32,
     )
     molecule.hfx_local = None
-    molecule.hfx_fxx = jnp.ones((1, molecule.ao.shape[0], molecule.ao.shape[1]), dtype=jnp.float32)
+    cached_fxx = jnp.ones((1, molecule.ao.shape[0], molecule.ao.shape[1]), dtype=jnp.float32)
+    molecule.hfx_fxx = cached_fxx
     molecule.hfx_nu = None
     molecule.hfx_nu_api = ChunkedHFXNu.from_dense(dense_nu, chunk_size=1)
     density = 2.0 * jnp.eye(2, dtype=jnp.float32)
@@ -329,7 +331,7 @@ def test_restricted_iteration_molecule_does_not_materialize_hfx_from_chunked_nu_
     )
 
     assert molecule_iter.hfx_local is None
-    assert molecule_iter.hfx_fxx is None
+    assert jnp.allclose(molecule_iter.hfx_fxx, cached_fxx)
 
 
 def test_differentiable_scf_fixed_density_returns_same_density():

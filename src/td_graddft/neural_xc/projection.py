@@ -51,6 +51,10 @@ class NeuralXCProjectionMixin:
         if hasattr(molecule, "neural_xc_grid_payload"):
             updates["neural_xc_grid_payload"] = None
         if self._uses_hfx_channel():
+            hf_mode_probe = getattr(self, "_ground_state_hf_mode_for_molecule", None)
+            ground_state_hf_mode = (
+                str(hf_mode_probe(molecule)) if callable(hf_mode_probe) else "nograd"
+            )
             for name in ("hfx_nu", "hfx_nu_api"):
                 if hasattr(molecule, name):
                     updates[name] = getattr(molecule, name)
@@ -58,12 +62,23 @@ class NeuralXCProjectionMixin:
             if hasattr(molecule, "hfx_local") and nu_source is not None:
                 updates["hfx_local"] = None
             if hasattr(molecule, "hfx_fxx"):
-                if nu_source is not None:
+                if nu_source is not None and ground_state_hf_mode != "nograd":
                     updates["hfx_fxx"] = None
                 else:
                     fxx_ref = getattr(molecule, "hfx_fxx", None)
                     if fxx_ref is not None:
                         updates["hfx_fxx"] = jax.lax.stop_gradient(jnp.asarray(fxx_ref))
+        if self.include_pt2_channel:
+            pt2_mode_probe = getattr(self, "_ground_state_pt2_mode_for_molecule", None)
+            ground_state_pt2_mode = (
+                str(pt2_mode_probe(molecule)) if callable(pt2_mode_probe) else "nograd"
+            )
+            if ground_state_pt2_mode == "nograd":
+                for name in ("pt2_local", "pt2_fock_response"):
+                    if hasattr(molecule, name):
+                        value = getattr(molecule, name)
+                        if value is not None:
+                            updates[name] = jax.lax.stop_gradient(jnp.asarray(value))
         if is_dataclass(molecule):
             molecule_fields = {field.name for field in fields(molecule)}
             replace_updates = {
@@ -518,10 +533,16 @@ class NeuralXCProjectionMixin:
         cached = getattr(molecule, "pt2_local", None)
         if cached is None:
             raise ValueError(
-                "ground_state_pt2_mode='frozen' requires molecule.pt2_local "
+                "ground_state_pt2_mode='nograd' requires molecule.pt2_local "
                 "so the PT2 channel remains fixed during SCF."
             )
-        return jnp.nan_to_num(jnp.asarray(cached), nan=0.0, posinf=0.0, neginf=0.0)
+        cached_pt2 = jnp.nan_to_num(
+            jnp.asarray(cached),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        return jax.lax.stop_gradient(cached_pt2)
 
     def projected_pt2_grid_contribution(
         self,
@@ -541,10 +562,10 @@ class NeuralXCProjectionMixin:
         to the canonical MP2 energy, but it preserves the unprojected spatial
         profile.
         """
-        configured = self._configured_ground_state_pt2_mode()
+        configured = self._ground_state_pt2_mode_for_molecule(molecule)
         if configured == "off":
             return self._zero_pt2_grid_contribution(molecule, features=features)
-        if configured == "frozen":
+        if configured == "nograd":
             return self._cached_pt2_grid_contribution(molecule)
         use_cached = configured != "scf"
         try:
@@ -925,12 +946,22 @@ class NeuralXCProjectionMixin:
         molecule: Any,
         density: Array,
     ) -> Array:
-        """DM21-style explicit local-HFX contribution to the SCF Fock."""
+        """Explicit handwritten local-channel contribution to the SCF Fock."""
+
+        molecule_iter = self.scf_molecule_with_density(molecule, density)
+        pt2_guard = getattr(self, "_raise_if_variational_pt2_scf_is_required", None)
+        if callable(pt2_guard):
+            pt2_guard(molecule_iter)
+        uses_explicit_pt2 = getattr(self, "uses_explicit_pt2_fock_for_scf", None)
+        if callable(uses_explicit_pt2) and uses_explicit_pt2(molecule_iter):
+            direct_payload = getattr(self, "_restricted_scf_direct_fock_payload", None)
+            if callable(direct_payload):
+                *_, extra_fock, _xc_energy = direct_payload(params, molecule_iter)
+                return extra_fock
 
         if not self._uses_hfx_channel():
             density_arr = jnp.asarray(density)
             return jnp.zeros_like(density_arr)
-        molecule_iter = self.scf_molecule_with_density(molecule, density)
         if (
             not has_hfx_nu_source(molecule_iter)
             and getattr(molecule_iter, "hfx_fxx", None) is None

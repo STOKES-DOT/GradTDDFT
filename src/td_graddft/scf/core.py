@@ -10,6 +10,38 @@ from jaxtyping import Array
 from ..data.molecule import MoleculeSpec
 
 
+_EIGH_DEGENERACY_TOL = 1e-6
+_EIGH_BROADENING = 1e-10
+
+
+@jax.custom_vjp
+def _safe_symmetric_eigh(matrix: Array) -> tuple[Array, Array]:
+    values, vectors = jnp.linalg.eigh(matrix)
+    return values, vectors
+
+
+def _safe_symmetric_eigh_fwd(matrix: Array) -> tuple[tuple[Array, Array], tuple[Array, Array]]:
+    values, vectors = _safe_symmetric_eigh(matrix)
+    return (values, vectors), (values, vectors)
+
+
+def _safe_symmetric_eigh_bwd(res: tuple[Array, Array], cotangent: tuple[Array, Array]) -> tuple[Array]:
+    values, vectors = res
+    grad_values, grad_vectors = cotangent
+    value_diff = values[None, :] - values[:, None]
+    nondegenerate = jnp.abs(value_diff) >= _EIGH_DEGENERACY_TOL
+    regular_gap = jnp.nan_to_num(1.0 / value_diff, nan=0.0, posinf=0.0, neginf=0.0)
+    broadened_gap = value_diff / (value_diff * value_diff + _EIGH_BROADENING)
+    response = jnp.where(nondegenerate, regular_gap, broadened_gap)
+    response = response.at[jnp.diag_indices_from(response)].set(0.0)
+    inner = jnp.diag(grad_values) + response * (vectors.T @ grad_vectors)
+    grad_matrix = vectors @ inner @ vectors.T
+    return (0.5 * (grad_matrix + grad_matrix.T),)
+
+
+_safe_symmetric_eigh.defvjp(_safe_symmetric_eigh_fwd, _safe_symmetric_eigh_bwd)
+
+
 def _contains_jax_tracer(value: Any) -> bool:
     if isinstance(value, jax.core.Tracer):
         return True
@@ -28,7 +60,7 @@ def _host_float_unless_traced(value: Any) -> Any:
 
 
 def _orthogonalizer(overlap: Array, eps: float) -> Array:
-    eigvals, eigvecs = jnp.linalg.eigh(overlap)
+    eigvals, eigvecs = _safe_symmetric_eigh(overlap)
     clipped = jnp.maximum(eigvals, eps)
     return eigvecs @ jnp.diag(clipped ** -0.5) @ eigvecs.T
 
@@ -43,7 +75,7 @@ def _diagonalize_fock(
     if eigenvalue_jitter != 0.0:
         shift = jnp.arange(f_ortho.shape[0], dtype=f_ortho.dtype) * eigenvalue_jitter
         f_ortho = f_ortho + jnp.diag(shift)
-    mo_energy, coeff_ortho = jnp.linalg.eigh(f_ortho)
+    mo_energy, coeff_ortho = _safe_symmetric_eigh(f_ortho)
     mo_coeff = x @ coeff_ortho
     return mo_energy, mo_coeff
 

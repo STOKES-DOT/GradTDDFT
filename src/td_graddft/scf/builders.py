@@ -13,7 +13,7 @@ from ..data.molecule import MoleculeSpec
 from ..xc_backend.jax_libxc import hybrid_coeff, parse_xc
 from ..neural_xc.inputs import (
     _local_hfx_features_from_basis_dm,
-    _local_pt2_feature_from_restricted_orbitals,
+    _local_pt2_feature_and_fock_response_from_restricted_orbitals,
     _local_pt2_feature_from_unrestricted_orbitals,
 )
 from .core import _contains_jax_tracer, _host_float_unless_traced
@@ -206,7 +206,9 @@ def restricted_molecule_from_spec_with_jax_rks(
     mo_energy = _host_array(rks.mo_energy)
     hfx_local = None
     hfx_nu = None
+    hfx_fxx = None
     pt2_local = None
+    pt2_fock_response = None
     reference_eri_pair_matrix = None
     if compute_local_hfx_features:
         hfx_result = _local_hfx_features_from_basis_dm(
@@ -217,11 +219,12 @@ def restricted_molecule_from_spec_with_jax_rks(
             omega_values=tuple(float(omega) for omega in hfx_omega_values),
             chunk_size=hfx_chunk_size,
             return_nu=bool(compute_local_hfx_aux),
+            return_fxx=True,
         )
         if compute_local_hfx_aux:
-            hfx_local, hfx_nu = hfx_result
+            hfx_local, hfx_nu, hfx_fxx = hfx_result
         else:
-            hfx_local = hfx_result
+            hfx_local, hfx_fxx = hfx_result
     mf_energy = (
         _host_float_unless_traced(rks.total_energy)
         if energy_target is None
@@ -248,17 +251,19 @@ def restricted_molecule_from_spec_with_jax_rks(
             rep_tensor = jnp.asarray(eri)
 
     if compute_local_pt2_features:
-        pt2_local = _local_pt2_feature_from_restricted_orbitals(
-            ao,
-            mo_coeff,
-            mo_occ,
-            mo_energy,
-            rep_tensor=rep_tensor,
-            eri_ovov=eri_ovov,
-            eri_pair_matrix=eri_pair_matrix,
-            df_factors=df_factors,
-            nocc=nocc,
-            density_floor=cfg.density_floor,
+        pt2_local, pt2_fock_response = (
+            _local_pt2_feature_and_fock_response_from_restricted_orbitals(
+                ao,
+                mo_coeff,
+                mo_occ,
+                mo_energy,
+                rep_tensor=rep_tensor,
+                eri_ovov=eri_ovov,
+                eri_pair_matrix=eri_pair_matrix,
+                df_factors=df_factors,
+                nocc=nocc,
+                density_floor=cfg.density_floor,
+            )
         )
 
     reference_arrays = _restricted_reference_array_packaging(
@@ -299,8 +304,10 @@ def restricted_molecule_from_spec_with_jax_rks(
             else None
         ),
         hfx_local=hfx_local,
+        hfx_fxx=hfx_fxx,
         hfx_nu=hfx_nu,
         pt2_local=pt2_local,
+        pt2_fock_response=pt2_fock_response,
         df_factors=reference_arrays["df_factors"],
         eri_pair_matrix=reference_eri_pair_matrix,
         eri_ovov=eri_ovov,
@@ -517,6 +524,7 @@ def unrestricted_molecule_from_spec_with_jax_uks(
 
     hfx_local = None
     hfx_nu = None
+    hfx_fxx = None
     pt2_local = None
     if compute_local_hfx_features:
         hfx_result = _local_hfx_features_from_basis_dm(
@@ -527,11 +535,12 @@ def unrestricted_molecule_from_spec_with_jax_uks(
             omega_values=tuple(float(omega) for omega in hfx_omega_values),
             chunk_size=hfx_chunk_size,
             return_nu=bool(compute_local_hfx_aux),
+            return_fxx=True,
         )
         if compute_local_hfx_aux:
-            hfx_local, hfx_nu = hfx_result
+            hfx_local, hfx_nu, hfx_fxx = hfx_result
         else:
-            hfx_local = hfx_result
+            hfx_local, hfx_fxx = hfx_result
     if compute_local_pt2_features:
         pt2_local = _local_pt2_feature_from_unrestricted_orbitals(
             ao,
@@ -575,6 +584,7 @@ def unrestricted_molecule_from_spec_with_jax_uks(
             else None
         ),
         hfx_local=hfx_local,
+        hfx_fxx=hfx_fxx,
         hfx_nu=hfx_nu,
         pt2_local=pt2_local,
         df_factors=scf_inputs.df_factors,

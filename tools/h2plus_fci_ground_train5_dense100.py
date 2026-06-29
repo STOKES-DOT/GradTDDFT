@@ -340,6 +340,7 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
         input_feature_mode=str(args.input_feature_mode),
         include_pt2_channel=False,
         include_hfx_channel=bool(args.include_hfx_channel),
+        ground_state_hf_mode="scf" if bool(args.include_hfx_channel) else "off",
         name="neural_xc_h2plus_fci_ground",
     )
     coefficient_prior = neural_xc.resolve_coefficient_prior_values(

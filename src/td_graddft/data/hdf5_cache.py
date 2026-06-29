@@ -28,6 +28,7 @@ _ARRAY_FIELDS = (
     "hfx_fxx",
     "hfx_nu",
     "pt2_local",
+    "pt2_fock_response",
     "scf_initial_density",
     "df_factors",
     "response_df_factors_j",
@@ -300,6 +301,7 @@ def read_unrestricted_molecule(
         hfx_nu=kwargs.pop("hfx_nu"),
         hfx_nu_api=hfx_nu_api,
         pt2_local=kwargs.pop("pt2_local"),
+        pt2_fock_response=kwargs.pop("pt2_fock_response"),
         scf_initial_density=kwargs.pop("scf_initial_density"),
         df_factors=kwargs.pop("df_factors"),
     )
