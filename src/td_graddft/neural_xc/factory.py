@@ -32,9 +32,9 @@ def _make_neural_xc_hybrid_functional(
     input_feature_mode: Literal["enhanced", "canonical"] = DEFAULT_INPUT_FEATURE_MODE,
     hf_input_mode: Literal["total_only", "spin_resolved"] = "spin_resolved",
     include_hfx_channel: bool = False,
-    ground_state_hf_mode: Literal["off", "frozen", "scf"] | None = None,
+    ground_state_hf_mode: Literal["off", "nograd", "scf"] | None = None,
     include_pt2_channel: bool = False,
-    ground_state_pt2_mode: Literal["off", "frozen", "scf"] | None = None,
+    ground_state_pt2_mode: Literal["off", "nograd", "scf"] | None = None,
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected",
     response_hf_mode: Literal["approx", "strict"] = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     response_pt2_mode: Literal["approx", "strict"] = "approx",
@@ -55,17 +55,21 @@ def _make_neural_xc_hybrid_functional(
 ) -> NeuralXCFunctional:
     if ground_state_hf_mode is not None:
         ground_state_hf_mode = str(ground_state_hf_mode).lower()  # type: ignore[assignment]
-        if ground_state_hf_mode not in {"off", "frozen", "scf"}:
+        if ground_state_hf_mode == "frozen":
+            ground_state_hf_mode = "nograd"  # type: ignore[assignment]
+        if ground_state_hf_mode not in {"off", "nograd", "scf"}:
             raise ValueError(
-                "ground_state_hf_mode must be 'off', 'frozen', or 'scf'; "
+                "ground_state_hf_mode must be 'off', 'nograd', or 'scf'; "
                 f"got {ground_state_hf_mode!r}."
             )
         include_hfx_channel = ground_state_hf_mode != "off"
     if ground_state_pt2_mode is not None:
         ground_state_pt2_mode = str(ground_state_pt2_mode).lower()  # type: ignore[assignment]
-        if ground_state_pt2_mode not in {"off", "frozen", "scf"}:
+        if ground_state_pt2_mode == "frozen":
+            ground_state_pt2_mode = "nograd"  # type: ignore[assignment]
+        if ground_state_pt2_mode not in {"off", "nograd", "scf"}:
             raise ValueError(
-                "ground_state_pt2_mode must be 'off', 'frozen', or 'scf'; "
+                "ground_state_pt2_mode must be 'off', 'nograd', or 'scf'; "
                 f"got {ground_state_pt2_mode!r}."
             )
         include_pt2_channel = ground_state_pt2_mode != "off"
@@ -154,9 +158,9 @@ def make_neural_xc_functional(
     input_feature_mode: Literal["enhanced", "canonical"] = DEFAULT_INPUT_FEATURE_MODE,
     hf_input_mode: Literal["total_only", "spin_resolved"] = "spin_resolved",
     include_hfx_channel: bool = False,
-    ground_state_hf_mode: Literal["off", "frozen", "scf"] | None = None,
+    ground_state_hf_mode: Literal["off", "nograd", "scf"] | None = None,
     include_pt2_channel: bool = False,
-    ground_state_pt2_mode: Literal["off", "frozen", "scf"] | None = None,
+    ground_state_pt2_mode: Literal["off", "nograd", "scf"] | None = None,
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected",
     response_hf_mode: Literal["approx", "strict"] = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     response_pt2_mode: Literal["approx", "strict"] = "approx",

@@ -46,6 +46,7 @@ _GRID_PAYLOAD_DEPENDENCY_FIELDS = frozenset(
         "hfx_nu",
         "hfx_nu_api",
         "pt2_local",
+        "pt2_fock_response",
     )
 )
 
@@ -670,12 +671,9 @@ def _restricted_iteration_molecule(
             if local_ref is not None:
                 updates["hfx_local"] = jax.lax.stop_gradient(jnp.asarray(local_ref))
     if hasattr(molecule, "hfx_fxx"):
-        if nu_source is not None:
-            updates["hfx_fxx"] = None
-        else:
-            fxx_ref = getattr(molecule, "hfx_fxx", None)
-            if fxx_ref is not None:
-                updates["hfx_fxx"] = jax.lax.stop_gradient(jnp.asarray(fxx_ref))
+        fxx_ref = getattr(molecule, "hfx_fxx", None)
+        if fxx_ref is not None:
+            updates["hfx_fxx"] = jax.lax.stop_gradient(jnp.asarray(fxx_ref))
     return _replace_molecule(molecule, **updates)
 
 
@@ -1042,10 +1040,12 @@ class DifferentiableSCF:
         ground_state_hf_mode = (
             str(hf_mode_probe(molecule))
             if callable(hf_mode_probe)
-            else ("scf" if uses_explicit_hfx_fock else "frozen")
+            else ("nograd" if uses_explicit_hfx_fock else "off")
         )
         hfx_nu_for_scf = (
-            hfx_nu_source(molecule) if ground_state_hf_mode == "scf" else None
+            hfx_nu_source(molecule)
+            if ground_state_hf_mode in {"nograd", "scf"}
+            else None
         )
         pt2_mode_probe = getattr(xc_functional, "_configured_ground_state_pt2_mode", None)
         ground_state_pt2_mode = pt2_mode_probe() if callable(pt2_mode_probe) else None
@@ -1063,7 +1063,7 @@ class DifferentiableSCF:
             mo_occ_stacked=_restricted_stacked_occupations_from_total(mo_occ_total),
             hfx_nu=hfx_nu_for_scf,
             uses_explicit_hfx_fock=uses_explicit_hfx_fock,
-            preserve_pt2_local=str(ground_state_pt2_mode).lower() == "frozen",
+            preserve_pt2_local=str(ground_state_pt2_mode).lower() in {"frozen", "nograd"},
         )
 
     def _restricted_response_jk(
@@ -1251,7 +1251,7 @@ class DifferentiableSCF:
                 "eri_oovv",
             )
             if not preserve_pt2_local:
-                stale_field_names = (*stale_field_names, "pt2_local")
+                stale_field_names = (*stale_field_names, "pt2_local", "pt2_fock_response")
             updates.update(
                 {
                     name: None
@@ -1267,6 +1267,7 @@ class DifferentiableSCF:
             })
             if not preserve_pt2_local:
                 updates["pt2_local"] = None
+                updates["pt2_fock_response"] = None
         return _replace_molecule(molecule, **updates)
 
     def _run_restricted_scf_core(
@@ -1721,45 +1722,42 @@ class DifferentiableSCF:
             )
             return fock_spin
 
-        def _density_from_fock(
-            fock_spin: Array,
-            args: tuple[Any, ...] | None,
-        ) -> tuple[Array, Array, Array]:
+        def _residual(
+            density_spin: Array,
+            params_local: PyTree,
+            args: tuple[Any, ...] | None = fixed_point_args,
+        ) -> Array:
             (
                 _molecule_base,
                 _h1e_local,
                 _rep_tensor_local,
                 _df_factors_local,
                 _weights_local,
-                _overlap_local,
-                x_local,
-                _mo_coeff_ref_local,
-                mo_occ_fixed_local,
-                _mo_energy_ref_local,
+                overlap_local,
+                *_,
             ) = _unrestricted_args(args)
-            mo_energy_new, mo_coeff_new = jax.vmap(
-                lambda fock: _diagonalize_fock(
-                    _safe_symmetric_matrix(fock),
-                    x_local,
-                    eigenvalue_jitter=self.config.eigenvalue_jitter,
-                )
-            )(fock_spin)
-            density_new = jax.vmap(_build_density_from_occ)(
-                jnp.nan_to_num(mo_coeff_new, nan=0.0, posinf=0.0, neginf=0.0),
-                mo_occ_fixed_local,
-            )
-            density_new = jnp.nan_to_num(density_new, nan=0.0, posinf=0.0, neginf=0.0)
-            return density_new, mo_coeff_new, mo_energy_new
-
-        def _fixed_point_density_impl(
-            density_spin: Array,
-            params_local: PyTree,
-            args: tuple[Any, ...] | None = fixed_point_args,
-        ) -> Array:
             density_spin = jnp.nan_to_num(density_spin, nan=0.0, posinf=0.0, neginf=0.0)
             fock_spin = _fock_from_density(density_spin, params_local, args)
-            density_new, _mo_coeff_new, _mo_energy_new = _density_from_fock(fock_spin, args)
-            return density_new
+            residual_spin = jnp.stack(
+                [
+                    fock_spin[0] @ density_spin[0] @ overlap_local
+                    - overlap_local @ density_spin[0] @ fock_spin[0],
+                    fock_spin[1] @ density_spin[1] @ overlap_local
+                    - overlap_local @ density_spin[1] @ fock_spin[1],
+                ],
+                axis=0,
+            )
+            residual_spin = jnp.nan_to_num(
+                residual_spin,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+            return jnp.clip(
+                residual_spin,
+                -self.config.implicit_diff_clip,
+                self.config.implicit_diff_clip,
+            )
 
         implicit_cfg = ImplicitFixedPointConfig(
             solver_name="neumann",
@@ -1774,14 +1772,14 @@ class DifferentiableSCF:
                 density_spin: Array,
                 params_local: PyTree,
             ) -> Array:
-                return _fixed_point_density_impl(density_spin, params_local)
+                return density_spin + _residual(density_spin, params_local)
         else:
             def _fixed_point_density(
                 density_spin: Array,
                 params_local: PyTree,
                 args: tuple[Any, ...],
             ) -> Array:
-                return _fixed_point_density_impl(density_spin, params_local, args)
+                return density_spin + _residual(density_spin, params_local, args)
 
         density_spin_implicit = implicit_fixed_point_solution(
             xc_params,
@@ -1790,17 +1788,9 @@ class DifferentiableSCF:
             fixed_point_args=fixed_point_args,
             config=implicit_cfg,
         )
-        fock_spin_implicit = _fock_from_density(density_spin_implicit, xc_params)
-        _density_spin_final, mo_coeff_spin_implicit, mo_energy_spin_implicit = _density_from_fock(
-            fock_spin_implicit,
-            None,
-        )
         molecule_final = _replace_molecule(
             forward_molecule,
             rdm1=density_spin_implicit,
-            mo_coeff=mo_coeff_spin_implicit,
-            mo_occ=mo_occ_spin_fixed,
-            mo_energy=mo_energy_spin_implicit,
         )
         return molecule_final, replace(forward_info, mode="self_consistent_implicit")
 

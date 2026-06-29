@@ -227,6 +227,45 @@ def test_restricted_reference_df_backend_stores_df_without_packed_eri(monkeypatc
     assert molecule.df_factors.shape == (2, 2, 2)
 
 
+def test_restricted_reference_caches_pt2_fock_response_for_nograd(monkeypatch):
+    ao0 = np.asarray([[1.0, 0.25], [0.4, 1.1]], dtype=np.float64)
+    ao1 = np.stack([ao0, ao0, ao0, ao0], axis=0)
+    fake_numint = types.SimpleNamespace(
+        eval_ao=lambda mol, coords, deriv=0: ao0 if deriv == 0 else ao1
+    )
+    fake_dft = types.ModuleType("pyscf.dft")
+    fake_dft.numint = fake_numint
+    fake_pyscf = types.ModuleType("pyscf")
+    fake_pyscf.dft = fake_dft
+    monkeypatch.setitem(sys.modules, "pyscf", fake_pyscf)
+    monkeypatch.setitem(sys.modules, "pyscf.dft", fake_dft)
+
+    class _ConsistentClosedShellMF(_FakeMF):
+        def make_rdm1(self):
+            return np.asarray([[2.0, 0.0], [0.0, 0.0]], dtype=np.float64)
+
+    molecule = reference_module.restricted_reference_from_pyscf(
+        _ConsistentClosedShellMF(),
+        compute_local_pt2_features=True,
+        array_backend="host",
+    )
+
+    assert isinstance(molecule.pt2_local, np.ndarray)
+    assert isinstance(molecule.pt2_fock_response, np.ndarray)
+    assert molecule.pt2_fock_response.shape == (2, 2, 2)
+    assert np.all(np.isfinite(molecule.pt2_fock_response))
+    assert np.allclose(
+        molecule.pt2_fock_response,
+        np.swapaxes(molecule.pt2_fock_response, -1, -2),
+    )
+    reconstructed = np.einsum(
+        "pq,gpq->g",
+        _ConsistentClosedShellMF().make_rdm1(),
+        molecule.pt2_fock_response,
+    )
+    assert np.allclose(reconstructed, molecule.pt2_local, atol=1e-10)
+
+
 def test_restricted_reference_uses_chunked_hfx_nu_api_for_more_than_three_atoms(monkeypatch):
     fake_numint = types.SimpleNamespace(
         eval_ao=lambda mol, coords, deriv=0: (
@@ -294,11 +333,13 @@ def test_unrestricted_reference_host_backend_keeps_hfx_cache_on_host(monkeypatch
     def fake_local_hfx(mol, ao, dm_spin, coords, **kwargs):
         del mol, ao, coords
         assert kwargs["return_nu"] is True
+        assert kwargs["return_fxx"] is True
         assert dm_spin[0].shape == (2, 2)
         assert dm_spin[1].shape == (2, 2)
         return (
             np.zeros((2, 2, 2), dtype=np.float64),
             np.zeros((2, 2, 2, 2), dtype=np.float64),
+            np.zeros((2, 2, 2), dtype=np.float64),
         )
 
     monkeypatch.setattr(reference_module, "_local_hfx_features_from_dm", fake_local_hfx)
@@ -318,3 +359,4 @@ def test_unrestricted_reference_host_backend_keeps_hfx_cache_on_host(monkeypatch
     assert molecule.nocc_beta == 0
     assert isinstance(molecule.hfx_local, np.ndarray)
     assert isinstance(molecule.hfx_nu, np.ndarray)
+    assert isinstance(molecule.hfx_fxx, np.ndarray)

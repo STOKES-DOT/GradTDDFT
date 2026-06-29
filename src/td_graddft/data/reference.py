@@ -13,6 +13,7 @@ from td_graddft.scf.features import (
 from td_graddft.neural_xc.inputs import (
     ChunkedHFXNu,
     _local_hfx_features_from_dm,
+    _local_pt2_feature_and_fock_response_from_restricted_orbitals,
     _local_pt2_feature_from_unrestricted_orbitals,
 )
 from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule, UnrestrictedMolecule
@@ -181,6 +182,7 @@ def restricted_reference_from_pyscf(
     hfx_nu = None
     hfx_nu_api = None
     pt2_local = None
+    pt2_fock_response = None
     if compute_local_hfx_features:
         use_chunked_hfx_nu = bool(compute_local_hfx_aux) and _use_chunked_hfx_nu(
             mf.mol,
@@ -212,22 +214,26 @@ def restricted_reference_from_pyscf(
         hfx_local = _backend_array(hfx_local_np, array_backend=array_backend)
         hfx_fxx = _backend_array(hfx_fxx_np, array_backend=array_backend)
     if compute_local_pt2_features:
-        from td_graddft.neural_xc.inputs import _local_pt2_feature_from_restricted_orbitals
-
-        pt2_local_jax = _local_pt2_feature_from_restricted_orbitals(
-            jnp.asarray(ao_np),
-            jnp.asarray(mo_coeff_np),
-            jnp.asarray(mo_occ_np),
-            jnp.asarray(mo_energy_np),
-            rep_tensor=jnp.zeros((0, 0, 0, 0), dtype=integral_dtype),
-            eri_ovov=None,
-            eri_pair_matrix=(
-                None if eri_pair_matrix_np is None else jnp.asarray(eri_pair_matrix_np)
-            ),
-            df_factors=None if df_factors_np is None else jnp.asarray(df_factors_np),
-            nocc=nocc,
+        pt2_local_jax, pt2_fock_response_jax = (
+            _local_pt2_feature_and_fock_response_from_restricted_orbitals(
+                jnp.asarray(ao_np),
+                jnp.asarray(mo_coeff_np),
+                jnp.asarray(mo_occ_np),
+                jnp.asarray(mo_energy_np),
+                rep_tensor=jnp.zeros((0, 0, 0, 0), dtype=integral_dtype),
+                eri_ovov=None,
+                eri_pair_matrix=(
+                    None if eri_pair_matrix_np is None else jnp.asarray(eri_pair_matrix_np)
+                ),
+                df_factors=None if df_factors_np is None else jnp.asarray(df_factors_np),
+                nocc=nocc,
+            )
         )
         pt2_local = _backend_array(pt2_local_jax, array_backend=array_backend)
+        pt2_fock_response = _backend_array(
+            pt2_fock_response_jax,
+            array_backend=array_backend,
+        )
 
     ao = _backend_array(ao_np, array_backend=array_backend)
     ao_deriv1 = _backend_array(ao_deriv1_np, array_backend=array_backend)
@@ -304,6 +310,7 @@ def restricted_reference_from_pyscf(
         hfx_nu=hfx_nu,
         hfx_nu_api=hfx_nu_api,
         pt2_local=pt2_local,
+        pt2_fock_response=pt2_fock_response,
         df_factors=df_factors,
         response_df_factors_j=response_df_factors_j,
         response_df_factors_k=response_df_factors_k,
@@ -377,6 +384,7 @@ def unrestricted_reference_from_pyscf(
         dipole_integrals_np = np.asarray(mf.mol.intor_symmetric("int1e_r", comp=3))
 
     hfx_local = None
+    hfx_fxx = None
     hfx_nu = None
     hfx_nu_api = None
     pt2_local = None
@@ -393,12 +401,13 @@ def unrestricted_reference_from_pyscf(
             omega_values=tuple(float(omega) for omega in hfx_omega_values),
             chunk_size=hfx_chunk_size,
             return_nu=bool(compute_local_hfx_aux) and not use_chunked_hfx_nu,
+            return_fxx=True,
         )
         if compute_local_hfx_aux and not use_chunked_hfx_nu:
-            hfx_local_np, hfx_nu_np = hfx_result
+            hfx_local_np, hfx_nu_np, hfx_fxx_np = hfx_result
             hfx_nu = _backend_array(hfx_nu_np, array_backend=array_backend)
         else:
-            hfx_local_np = hfx_result
+            hfx_local_np, hfx_fxx_np = hfx_result
             if use_chunked_hfx_nu:
                 hfx_nu_api = ChunkedHFXNu.from_pyscf_mol(
                     mf.mol,
@@ -408,6 +417,7 @@ def unrestricted_reference_from_pyscf(
                     chunk_size=int(hfx_chunk_size),
                 )
         hfx_local = _backend_array(hfx_local_np, array_backend=array_backend)
+        hfx_fxx = _backend_array(hfx_fxx_np, array_backend=array_backend)
     if compute_local_pt2_features:
         pt2_local_jax = _local_pt2_feature_from_unrestricted_orbitals(
             jnp.asarray(ao_np),
@@ -455,6 +465,7 @@ def unrestricted_reference_from_pyscf(
             else None
         ),
         hfx_local=hfx_local,
+        hfx_fxx=hfx_fxx,
         hfx_nu=hfx_nu,
         hfx_nu_api=hfx_nu_api,
         pt2_local=pt2_local,

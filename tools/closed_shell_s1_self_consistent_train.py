@@ -252,6 +252,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--eval-interval", type=int, default=50)
     p.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=0,
+        help="Write streaming training parameter checkpoints every N steps; 0 disables periodic checkpoints.",
+    )
+    p.add_argument(
         "--skip-final-evaluation",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -1113,6 +1119,10 @@ def _train_streaming(
         grad_abs_max_val = float(np.max(grad_abs_maxes))
         nonfinite_grad_fraction_val = float(np.mean(nonfinite_fracs))
         update_norm_val = float(np.mean(update_norms))
+        checkpoint_train_loss = train_loss_val
+        checkpoint_train_s1_mae = train_s1_mae_val
+        checkpoint_val_loss = float("nan")
+        checkpoint_val_s1_mae = float("nan")
 
         history_steps.append(step)
         loss_history.append(train_loss_val)
@@ -1151,6 +1161,10 @@ def _train_streaming(
             eval_train_s1_mae_history.append(eval_train_metrics["s1_mae"])
             eval_val_loss_history.append(eval_val_loss)
             eval_val_s1_mae_history.append(eval_val_metrics["s1_mae"])
+            checkpoint_train_loss = float(eval_train_loss)
+            checkpoint_train_s1_mae = float(eval_train_metrics["s1_mae"])
+            checkpoint_val_loss = float(eval_val_loss)
+            checkpoint_val_s1_mae = float(eval_val_metrics["s1_mae"])
             score = _ground_only_best_score(
                 args,
                 train_loss=float(eval_train_loss),
@@ -1188,6 +1202,58 @@ def _train_streaming(
                 f"lr={current_lr:.8e} "
                 "eval=skipped"
             )
+        checkpoint_interval = max(0, int(getattr(args, "checkpoint_interval", 0)))
+        if checkpoint_interval > 0 and step % checkpoint_interval == 0:
+            checkpoint_dir = Path(str(args.outdir)) / "checkpoints"
+            checkpoint_path = checkpoint_dir / f"neural_xc_params_step{step:06d}.msgpack"
+            checkpoint_path, checkpoint_meta_path = save_params_checkpoint(
+                checkpoint_path,
+                state.params,
+                metadata={
+                    "step": int(step),
+                    "steps": int(args.steps),
+                    "reference_csv": str(args.reference_csv),
+                    "basis": str(args.basis),
+                    "xc": str(args.xc),
+                    "training_mode": str(args.training_mode),
+                    "include_hfx_channel": bool(args.include_hfx_channel),
+                    "response_hf_mode": str(args.response_hf_mode),
+                    "stream_train": bool(args.stream_train),
+                    "stream_update_mode": str(args.stream_update_mode),
+                    "learning_rate": float(current_lr),
+                    "train_loss": float(checkpoint_train_loss),
+                    "train_s1_mae": float(checkpoint_train_s1_mae),
+                    "val_loss": float(checkpoint_val_loss),
+                    "val_s1_mae": float(checkpoint_val_s1_mae),
+                    "grad_norm": float(grad_norm_val),
+                    "update_norm": float(update_norm_val),
+                },
+            )
+            progress = {
+                "step": int(step),
+                "steps": int(args.steps),
+                "checkpoint": str(checkpoint_path),
+                "checkpoint_meta": str(checkpoint_meta_path)
+                if checkpoint_meta_path is not None
+                else None,
+                "train_loss": float(checkpoint_train_loss),
+                "train_s1_mae": float(checkpoint_train_s1_mae),
+                "val_loss": float(checkpoint_val_loss),
+                "val_s1_mae": float(checkpoint_val_s1_mae),
+                "grad_norm": float(grad_norm_val),
+                "update_norm": float(update_norm_val),
+                "learning_rate": float(current_lr),
+            }
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            (checkpoint_dir / "latest_checkpoint.txt").write_text(
+                str(checkpoint_path) + "\n",
+                encoding="utf-8",
+            )
+            (checkpoint_dir / "latest_progress.json").write_text(
+                json.dumps(progress, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            logger.log(f"[checkpoint] step={step:4d} wrote {checkpoint_path}")
 
     elapsed_s = time.perf_counter() - t0
     if bool(args.skip_final_evaluation):

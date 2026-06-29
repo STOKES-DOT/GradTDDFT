@@ -171,6 +171,8 @@ def _normalize_scf_gradient_mode(value: str) -> str:
 def _normalize_args(args: argparse.Namespace) -> argparse.Namespace:
     args.input_feature_mode = _normalize_input_feature_mode(args.input_feature_mode)
     args.scf_gradient_mode = _normalize_scf_gradient_mode(args.scf_gradient_mode)
+    if args.ground_state_hf_mode is not None:
+        args.ground_state_hf_mode = str(args.ground_state_hf_mode).strip().lower()
     return args
 
 
@@ -231,6 +233,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Add a projected local exact-exchange channel to the Neural_xc basis.",
+    )
+    p.add_argument(
+        "--ground-state-hf-mode",
+        choices=("off", "nograd", "scf"),
+        default=None,
+        help="Ground-state HFX channel mode passed to Neural_xc.",
     )
     p.add_argument(
         "--semilocal-xc",
@@ -816,6 +824,7 @@ def train_functional(
         input_feature_mode=str(args.input_feature_mode),
         include_pt2_channel=bool(args.include_pt2_channel),
         include_hfx_channel=bool(args.include_hfx_channel),
+        ground_state_hf_mode=args.ground_state_hf_mode,
         name=f"neural_xc_h2_fci_{str(args.training_mode)}",
     )
     coefficient_prior = neural_xc.resolve_coefficient_prior_values(
@@ -833,7 +842,8 @@ def train_functional(
         "[init] coefficient_prior="
         f"{None if coefficient_prior is None else tuple(float(x) for x in coefficient_prior)} "
         f"include_pt2_channel={bool(args.include_pt2_channel)} "
-        f"include_hfx_channel={bool(args.include_hfx_channel)}"
+        f"include_hfx_channel={bool(args.include_hfx_channel)} "
+        f"ground_state_hf_mode={args.ground_state_hf_mode}"
     )
     gs_training = GroundStateTrainingConfig.from_parts(
         core=GroundStateCoreTrainingConfig(
@@ -1580,6 +1590,8 @@ def main() -> None:
         f"steps={args.steps}, lr={args.learning_rate}, "
         f"training_mode={args.training_mode}, "
         f"include_pt2_channel={bool(args.include_pt2_channel)}, "
+        f"include_hfx_channel={bool(args.include_hfx_channel)}, "
+        f"ground_state_hf_mode={args.ground_state_hf_mode}, "
         f"density_constraint_weight={args.density_constraint_weight}, "
         f"grid_ao_backend={args.grid_ao_backend}, integral_backend={args.integral_backend}, "
         f"jk_backend={args.jk_backend}"

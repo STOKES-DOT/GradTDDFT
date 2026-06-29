@@ -55,6 +55,7 @@ class RestrictedMolecule:
     hfx_nu: jnp.ndarray | None = None
     hfx_nu_api: Any | None = None
     pt2_local: jnp.ndarray | None = None
+    pt2_fock_response: jnp.ndarray | None = None
     neural_xc_grid_payload: Any | None = None
     scf_initial_density: jnp.ndarray | None = None
     df_factors: jnp.ndarray | None = None
@@ -111,6 +112,7 @@ class UnrestrictedMolecule:
     hfx_nu: jnp.ndarray | None = None
     hfx_nu_api: Any | None = None
     pt2_local: jnp.ndarray | None = None
+    pt2_fock_response: jnp.ndarray | None = None
     scf_initial_density: jnp.ndarray | None = None
     df_factors: jnp.ndarray | None = None
     runtime_scf_backend: str | None = None

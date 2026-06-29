@@ -58,7 +58,7 @@ def test_neural_xc_config_exposes_ground_state_pt2_mode():
     config = neural_xc.Config(
         channels=neural_xc.ChannelSpec(
             pt2="local_exact",
-            ground_state_pt2="frozen",
+            ground_state_pt2="nograd",
         ),
         network=neural_xc.NetworkSpec(hidden_dims=(8,)),
     )
@@ -66,7 +66,7 @@ def test_neural_xc_config_exposes_ground_state_pt2_mode():
     functional = neural_xc.Functional(config=config)
 
     assert functional.include_pt2_channel is True
-    assert functional.ground_state_pt2_mode == "frozen"
+    assert functional.ground_state_pt2_mode == "nograd"
     assert functional.pt2_channel_mode == "local_exact"
 
 

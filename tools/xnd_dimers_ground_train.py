@@ -246,6 +246,7 @@ def build_reference(row: XNDDimerRow, *, args: argparse.Namespace) -> ReferenceP
             compute_local_hfx_features=compute_hfx,
             compute_local_hfx_aux=compute_hfx,
             compute_local_pt2_features=compute_pt2,
+            hfx_nu_storage="chunked",
             jk_backend=str(args.jk_backend),
             array_backend=("host" if bool(args.reference_only) else "jax"),
         )

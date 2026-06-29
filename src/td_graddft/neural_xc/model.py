@@ -123,14 +123,16 @@ class AssemblyMixin:
     def _uses_pt2_channel(self) -> bool:
         return bool(getattr(self, "include_pt2_channel", False))
 
-    def _configured_ground_state_hf_mode(self) -> Literal["off", "frozen", "scf"] | None:
+    def _configured_ground_state_hf_mode(self) -> Literal["off", "nograd", "scf"] | None:
         mode = getattr(self, "ground_state_hf_mode", None)
         if mode is None:
             return None
         mode = str(mode).lower()
-        if mode not in {"off", "frozen", "scf"}:
+        if mode == "frozen":
+            mode = "nograd"
+        if mode not in {"off", "nograd", "scf"}:
             raise ValueError(
-                "ground_state_hf_mode must be 'off', 'frozen', or 'scf'; "
+                "ground_state_hf_mode must be 'off', 'nograd', or 'scf'; "
                 f"got {mode!r}."
             )
         return mode  # type: ignore[return-value]
@@ -138,24 +140,24 @@ class AssemblyMixin:
     def _ground_state_hf_mode_for_molecule(
         self,
         molecule: Any,
-    ) -> Literal["off", "frozen", "scf"]:
+    ) -> Literal["off", "nograd", "scf"]:
         configured = self._configured_ground_state_hf_mode()
         if configured is not None:
             return configured
         if not self._uses_hfx_channel():
             return "off"
-        if has_hfx_nu_source(molecule) or getattr(molecule, "hfx_fxx", None) is not None:
-            return "scf"
-        return "frozen"
+        return "nograd"
 
-    def _configured_ground_state_pt2_mode(self) -> Literal["off", "frozen", "scf"] | None:
+    def _configured_ground_state_pt2_mode(self) -> Literal["off", "nograd", "scf"] | None:
         mode = getattr(self, "ground_state_pt2_mode", None)
         if mode is None:
             return None
         mode = str(mode).lower()
-        if mode not in {"off", "frozen", "scf"}:
+        if mode == "frozen":
+            mode = "nograd"
+        if mode not in {"off", "nograd", "scf"}:
             raise ValueError(
-                "ground_state_pt2_mode must be 'off', 'frozen', or 'scf'; "
+                "ground_state_pt2_mode must be 'off', 'nograd', or 'scf'; "
                 f"got {mode!r}."
             )
         return mode  # type: ignore[return-value]
@@ -163,13 +165,13 @@ class AssemblyMixin:
     def _ground_state_pt2_mode_for_molecule(
         self,
         molecule: Any,
-    ) -> Literal["off", "frozen", "scf"]:
+    ) -> Literal["off", "nograd", "scf"]:
         configured = self._configured_ground_state_pt2_mode()
         if configured is not None:
             return configured
         if not self._uses_pt2_channel():
             return "off"
-        return "frozen" if getattr(molecule, "pt2_local", None) is not None else "scf"
+        return "nograd" if getattr(molecule, "pt2_local", None) is not None else "scf"
 
     def _response_hf_mode(self) -> Literal["approx", "strict"]:
         mode = str(getattr(self, "response_hf_mode", DEFAULT_NEURAL_XC_RESPONSE_HF_MODE)).lower()
@@ -800,6 +802,7 @@ class ResponseMixin:
         *,
         pt2_point: Array | None = None,
         response_pt2_mode: Literal["approx", "strict"] | None = None,
+        include_hf_basis: bool = False,
     ) -> Array:
         pt2_mode = self.response_pt2_mode if response_pt2_mode is None else response_pt2_mode
         point_features = self._feature_bundle_from_restricted_response_variables(variables)
@@ -810,7 +813,7 @@ class ResponseMixin:
         )
         semilocal_total = jnp.sum(semilocal_channels, axis=-1)
         hf_input = jax.lax.stop_gradient(hf_point)
-        hf_basis = jnp.zeros_like(hf_input)
+        hf_basis = hf_input if include_hf_basis else jnp.zeros_like(hf_input)
         hf_spin_inputs: tuple[Array, Array] | None = (
             jax.lax.stop_gradient(hf_point_a),
             jax.lax.stop_gradient(hf_point_b),
@@ -863,6 +866,7 @@ class ResponseMixin:
         *,
         pt2_point: Array | None = None,
         response_pt2_mode: Literal["approx", "strict"] | None = None,
+        include_hf_basis: bool = False,
     ) -> Array:
         pt2_mode = self.response_pt2_mode if response_pt2_mode is None else response_pt2_mode
         point_features = self._feature_bundle_from_unrestricted_variables(variables)
@@ -873,7 +877,7 @@ class ResponseMixin:
         )
         semilocal_total = jnp.sum(semilocal_channels, axis=-1)
         hf_input = jax.lax.stop_gradient(hf_point)
-        hf_basis = jnp.zeros_like(hf_input)
+        hf_basis = hf_input if include_hf_basis else jnp.zeros_like(hf_input)
         hf_spin_inputs = (
             jax.lax.stop_gradient(hf_point_a),
             jax.lax.stop_gradient(hf_point_b),
@@ -925,6 +929,7 @@ class ResponseMixin:
         pt2_projected: Array | None = None,
         hf_spin_energy_density: tuple[Array, Array] | None = None,
         response_pt2_mode: Literal["approx", "strict"] | None = None,
+        include_hf_basis: bool = False,
         strict_payload: tuple[Array, Array, Array, Array, Array] | None = None,
     ) -> tuple[Array, Array, Array, Array]:
         if strict_payload is None:
@@ -956,6 +961,7 @@ class ResponseMixin:
                 hf_point_b,
                 pt2_point=pt2_point,
                 response_pt2_mode=response_pt2_mode,
+                include_hf_basis=include_hf_basis,
             )
 
         gradients = jax.vmap(point_gradients)(
@@ -984,6 +990,7 @@ class ResponseMixin:
         pt2_projected: Array | None = None,
         hf_spin_energy_density: tuple[Array, Array],
         response_pt2_mode: Literal["approx", "strict"] | None = None,
+        include_hf_basis: bool = False,
     ) -> tuple[Array, Array, Array, Array]:
         response_variables, active = self._unrestricted_response_variables(
             features,
@@ -1016,6 +1023,7 @@ class ResponseMixin:
                 hf_point_b,
                 pt2_point=pt2_point,
                 response_pt2_mode=response_pt2_mode,
+                include_hf_basis=include_hf_basis,
             )
 
         gradients = jax.vmap(point_gradients)(
@@ -1244,9 +1252,9 @@ class NeuralXCModel(
     input_feature_mode: Literal["enhanced", "canonical"] = DEFAULT_INPUT_FEATURE_MODE
     hf_input_mode: Literal["total_only", "spin_resolved"] = "spin_resolved"
     include_hfx_channel: bool = False
-    ground_state_hf_mode: Literal["off", "frozen", "scf"] | None = None
+    ground_state_hf_mode: Literal["off", "nograd", "scf"] | None = None
     include_pt2_channel: bool = False
-    ground_state_pt2_mode: Literal["off", "frozen", "scf"] | None = None
+    ground_state_pt2_mode: Literal["off", "nograd", "scf"] | None = None
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected"
     response_hf_mode: Literal["approx", "strict"] = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE
     response_pt2_mode: Literal["approx", "strict"] = "approx"
