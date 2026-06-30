@@ -28,7 +28,10 @@
   "outputs": {
     "run_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_pt2_vs_nopt2_dense100_comparison_20260624/h2_nopt2_s1_tda_e1_total_dissociation_paper_style.pdf",
     "run_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_pt2_vs_nopt2_dense100_comparison_20260624/h2_nopt2_s1_tda_e1_total_dissociation_paper_style.png",
-    "run_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_pt2_vs_nopt2_dense100_comparison_20260624/h2_nopt2_s1_tda_e1_total_dissociation_paper_style.svg"
+    "run_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_pt2_vs_nopt2_dense100_comparison_20260624/h2_nopt2_s1_tda_e1_total_dissociation_paper_style.svg",
+    "paper_pdf": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2_nopt2_s1_tda_e1_total_dissociation_paper_style.pdf",
+    "paper_png": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2_nopt2_s1_tda_e1_total_dissociation_paper_style.png",
+    "paper_svg": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/paper/tdgraddft-paper/figures/h2_nopt2_s1_tda_e1_total_dissociation_paper_style.svg"
   },
   "visualization_csv": "/Users/jiaoyuan/Documents/GitHub/TD-GradDFT/benchmark/h2_pt2_vs_nopt2_dense100_comparison_20260624/h2_nopt2_s1_tda_e1_total_dissociation_paper_style_visualization_data.csv"
 }

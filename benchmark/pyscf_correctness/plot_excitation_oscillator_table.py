@@ -54,15 +54,14 @@ def as_float(value: str) -> float:
 
 
 def fmt_energy(value: float) -> str:
-    text = f"{value:.2g}"
-    if "." not in text and "e" not in text and value < 10:
-        text += ".0"
-    return text
+    return f"{value:.2f}"
 
 
 def fmt_osc_tex(value: float) -> str:
     if value == 0.0:
         return r"\(0\)"
+    if 1.0e-3 <= abs(value) < 1.0e3:
+        return f"{value:.2g}"
     exponent = math.floor(math.log10(abs(value)))
     mantissa = value / (10.0**exponent)
     return rf"\({mantissa:.1f}\times 10^{{{exponent}}}\)"
@@ -129,11 +128,13 @@ def write_latex_table(rows: list[dict[str, float | str]]) -> Path:
     lines = [
         r"\begin{table}[t]",
         r"\centering",
-        r"\caption{B3LYP/def2-SVP S$_1$ excitation energies and oscillator strengths from matched PySCF and GradTDDFT calculations. Each entry reports \(\Omega_1\) in eV followed by \(f_1\).}",
+        r"\caption{B3LYP/def2-SVP S$_1$ excitation energies \(\Omega_1\) and oscillator strengths \(f_1\) from matched PySCF and GradTDDFT calculations. Excitation energies are reported in eV, while oscillator strengths are dimensionless.}",
         r"\label{tab:b3lyp-s1-excitation-oscillator}",
-        r"\begin{tabular}{llcc}",
+        r"\begin{tabular}{llcccc}",
         r"\toprule",
-        r"Molecule & Solver & PySCF & GradTDDFT \\",
+        r"\multirow{2}{*}{Molecule} & \multirow{2}{*}{Solver} & \multicolumn{2}{c}{PySCF} & \multicolumn{2}{c}{GradTDDFT} \\",
+        r"\cmidrule(lr){3-4} \cmidrule(lr){5-6}",
+        r" & & \(\Omega_1\) (eV) & \(f_1\) & \(\Omega_1\) (eV) & \(f_1\) \\",
         r"\midrule",
     ]
     for row in rows:
@@ -142,8 +143,10 @@ def write_latex_table(rows: list[dict[str, float | str]]) -> Path:
                 [
                     str(row["molecule_tex"]),
                     str(row["solver"]),
-                    result_cell(float(row["pyscf_omega_ev"]), float(row["pyscf_f"]), tex=True),
-                    result_cell(float(row["graddft_omega_ev"]), float(row["graddft_f"]), tex=True),
+                    fmt_energy(float(row["pyscf_omega_ev"])),
+                    fmt_osc_tex(float(row["pyscf_f"])),
+                    fmt_energy(float(row["graddft_omega_ev"])),
+                    fmt_osc_tex(float(row["graddft_f"])),
                 ]
             )
             + r" \\"

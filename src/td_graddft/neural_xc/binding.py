@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import copy
+from dataclasses import dataclass, fields, is_dataclass, replace
 from typing import Any, Callable
 
 import jax
@@ -319,7 +320,10 @@ class NeuralXCBindingMixin:
     def uses_explicit_pt2_fock_for_scf(self, molecule: Any) -> bool:
         if not self.include_pt2_channel:
             return False
-        if self._ground_state_pt2_mode_for_molecule(molecule) != "nograd":
+        mode = self._ground_state_pt2_mode_for_molecule(molecule)
+        if mode == "scf":
+            return not self._uses_unrestricted_pt2_projection(molecule)
+        if mode != "nograd":
             return False
         return self._pt2_fock_response_source(molecule) is not None
 
@@ -336,12 +340,14 @@ class NeuralXCBindingMixin:
             )
         if mode != "scf":
             return
+        if not self._uses_unrestricted_pt2_projection(molecule):
+            return
         raise NotImplementedError(
-            "PT2 scf mode is not variationally consistent in the self-consistent "
-            "Fock path: the local PT2 channel depends on the current orbitals and "
-            "orbital energies, but the required variational PT2 Fock/OEP response "
-            "term is not implemented. Use ground_state_pt2_mode='nograd' or disable "
-            "the PT2 channel for SCF."
+            "PT2 scf mode for unrestricted/open-shell molecules is not variationally "
+            "consistent in the self-consistent Fock path: the local PT2 channel "
+            "depends on spin-dependent current orbitals and orbital energies, but "
+            "the unrestricted AD orbital-response Fock term is not implemented. Use "
+            "ground_state_pt2_mode='nograd' or disable the PT2 channel for open-shell SCF."
         )
 
     def _restricted_grid_features(
@@ -480,8 +486,8 @@ class NeuralXCBindingMixin:
                     f"(got {(nao, nao2)} vs {(ao.shape[1], ao.shape[1])})."
                 )
             dm_a, dm_b = self._restricted_spin_density_blocks(molecule)
-            dm_a = jax.lax.stop_gradient(jnp.asarray(dm_a, dtype=ao.dtype))
-            dm_b = jax.lax.stop_gradient(jnp.asarray(dm_b, dtype=ao.dtype))
+            dm_a = jnp.asarray(dm_a, dtype=ao.dtype)
+            dm_b = jnp.asarray(dm_b, dtype=ao.dtype)
             if is_chunked_hfx_nu(nu_source):
                 chunk_size = min(
                     max(1, int(getattr(nu_source, "chunk_size", 512))),
@@ -532,11 +538,6 @@ class NeuralXCBindingMixin:
                 e_hf_b = -0.5 * jnp.einsum("gq,gq->g", e_b, fxx_b, precision=Precision.HIGHEST)
                 if include_fxx:
                     current_hfx_fxx = 0.5 * (fxx_a + fxx_b)[None, :, :]
-            e_hf_a = jax.lax.stop_gradient(e_hf_a)
-            e_hf_b = jax.lax.stop_gradient(e_hf_b)
-            if current_hfx_fxx is not None:
-                current_hfx_fxx = jax.lax.stop_gradient(current_hfx_fxx)
-
         e_hf = e_hf_a + e_hf_b
         return (
             jnp.nan_to_num(e_hf, nan=0.0, posinf=0.0, neginf=0.0),
@@ -951,6 +952,140 @@ class NeuralXCBindingMixin:
         fock = 0.5 * (fock + jnp.swapaxes(fock, -1, -2))
         return fock[0], fock[1], True
 
+    @staticmethod
+    def _replace_molecule_for_pt2_scf_orbitals(
+        molecule: Any,
+        *,
+        mo_coeff: Array,
+        mo_energy: Array,
+    ) -> Any:
+        updates: dict[str, Any] = {
+            "mo_coeff": jnp.stack([mo_coeff, mo_coeff], axis=0),
+            "mo_energy": jnp.stack([mo_energy, mo_energy], axis=0),
+        }
+        for name, value in (
+            ("pt2_local", None),
+            ("pt2_fock_response", None),
+            ("neural_xc_grid_payload", None),
+        ):
+            if hasattr(molecule, name):
+                updates[name] = value
+        if is_dataclass(molecule):
+            molecule_fields = {field.name for field in fields(molecule)}
+            replace_updates = {
+                key: value for key, value in updates.items() if key in molecule_fields
+            }
+            molecule_out = replace(molecule, **replace_updates)
+            for key, value in updates.items():
+                if key not in molecule_fields:
+                    setattr(molecule_out, key, value)
+            return molecule_out
+        molecule_out = copy.copy(molecule)
+        for key, value in updates.items():
+            setattr(molecule_out, key, value)
+        return molecule_out
+
+    def _contract_pt2_scf_feature_gradient_to_restricted_fock(
+        self,
+        molecule: Any,
+        grad: Array,
+        *,
+        features: RestrictedFeatureBundle,
+        dtype: Any | None = None,
+    ) -> tuple[Array, bool]:
+        ao = jnp.asarray(molecule.ao)
+        matrix_dtype = ao.dtype if dtype is None else dtype
+        mo_coeff = jnp.asarray(molecule.mo_coeff, dtype=matrix_dtype)
+        mo_occ = jnp.asarray(molecule.mo_occ)
+        mo_energy = jnp.asarray(molecule.mo_energy, dtype=matrix_dtype)
+        if mo_coeff.ndim == 3:
+            mo_coeff = mo_coeff[0]
+        if mo_occ.ndim == 2:
+            mo_occ = mo_occ[0]
+        if mo_energy.ndim == 2:
+            mo_energy = mo_energy[0]
+
+        nocc = getattr(molecule, "nocc", None)
+        if nocc is None:
+            nocc = int(jnp.count_nonzero(mo_occ > 1e-8))
+        else:
+            nocc = int(nocc)
+        nmo = int(mo_coeff.shape[1])
+        if nocc <= 0 or nocc >= nmo:
+            return self._zero_hfx_fock(molecule, matrix_dtype), False
+
+        grad_grid = jax.lax.stop_gradient(jnp.asarray(grad, dtype=matrix_dtype))
+        grad_grid = jnp.nan_to_num(grad_grid, nan=0.0, posinf=0.0, neginf=0.0)
+
+        def weighted_pt2_from_orbitals(coeff_arg: Array, energy_arg: Array) -> Array:
+            molecule_arg = self._replace_molecule_for_pt2_scf_orbitals(
+                molecule,
+                mo_coeff=coeff_arg,
+                mo_energy=energy_arg,
+            )
+            pt2_arg = self.projected_pt2_grid_contribution(
+                molecule_arg,
+                features=features,
+            )
+            return jnp.tensordot(grad_grid, pt2_arg, axes=(0, 0))
+
+        _, (coeff_grad, energy_grad) = jax.value_and_grad(
+            weighted_pt2_from_orbitals,
+            argnums=(0, 1),
+        )(mo_coeff, mo_energy)
+        coeff_grad = jnp.nan_to_num(
+            jnp.asarray(coeff_grad, dtype=matrix_dtype),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+        energy_grad = jnp.nan_to_num(
+            jnp.asarray(energy_grad, dtype=matrix_dtype),
+            nan=0.0,
+            posinf=0.0,
+            neginf=0.0,
+        )
+
+        coeff_occ = mo_coeff[:, :nocc]
+        coeff_vir = mo_coeff[:, nocc:]
+        grad_occ = coeff_grad[:, :nocc]
+        grad_vir = coeff_grad[:, nocc:]
+        orbital_gradient = (
+            jnp.einsum("pa,pi->ai", coeff_vir, grad_occ, precision=Precision.HIGHEST)
+            - jnp.einsum("pi,pa->ia", coeff_occ, grad_vir, precision=Precision.HIGHEST).T
+        )
+        fock_mo = jnp.zeros((nmo, nmo), dtype=matrix_dtype)
+        ov_block = 0.25 * orbital_gradient
+        fock_mo = fock_mo.at[nocc:, :nocc].set(ov_block)
+        fock_mo = fock_mo.at[:nocc, nocc:].set(ov_block.T)
+        fock_mo = fock_mo + jnp.diag(energy_grad)
+        overlap = getattr(molecule, "overlap_matrix", None)
+        if overlap is None:
+            ao_transform = mo_coeff
+        else:
+            overlap_arr = jnp.asarray(overlap, dtype=matrix_dtype)
+            if overlap_arr.shape != (mo_coeff.shape[0], mo_coeff.shape[0]):
+                raise ValueError(
+                    "PT2 scf AD Fock overlap_matrix shape must match AO dimension "
+                    f"(got {overlap_arr.shape} vs {(mo_coeff.shape[0], mo_coeff.shape[0])})."
+                )
+            overlap_arr = 0.5 * (overlap_arr + overlap_arr.T)
+            ao_transform = jnp.einsum(
+                "pq,qi->pi",
+                overlap_arr,
+                mo_coeff,
+                precision=Precision.HIGHEST,
+            )
+        fock_ao = jnp.einsum(
+            "pi,ij,qj->pq",
+            ao_transform,
+            fock_mo,
+            ao_transform,
+            precision=Precision.HIGHEST,
+        )
+        fock_ao = jnp.nan_to_num(fock_ao, nan=0.0, posinf=0.0, neginf=0.0)
+        return 0.5 * (fock_ao + fock_ao.T), True
+
     def _response_hf_grid_contribution_components(
         self,
         molecule: Any,
@@ -1340,6 +1475,7 @@ class NeuralXCBindingMixin:
         grid_weights: Array,
         unrestricted: bool = False,
     ) -> tuple[Array, bool] | tuple[Array, Array, bool]:
+        pt2_mode = self._ground_state_pt2_mode_for_molecule(molecule)
         if not self.uses_explicit_pt2_fock_for_scf(molecule):
             zero = self._zero_hfx_fock(molecule)
             if unrestricted:
@@ -1359,6 +1495,12 @@ class NeuralXCBindingMixin:
             return self._contract_pt2_feature_gradient_to_unrestricted_fock(
                 molecule,
                 grad,
+            )
+        if pt2_mode == "scf":
+            return self._contract_pt2_scf_feature_gradient_to_restricted_fock(
+                molecule,
+                grad,
+                features=features,
             )
         return self._contract_pt2_feature_gradient_to_restricted_fock(molecule, grad)
 

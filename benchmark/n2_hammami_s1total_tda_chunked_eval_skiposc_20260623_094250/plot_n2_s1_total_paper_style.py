@@ -20,6 +20,8 @@ PAPER_FIG_DIRS = [
 ]
 EV_PER_H = 27.211386245988
 KCAL_PER_MOL_TO_MEV = 43.3641153087705
+PANEL_FIGSIZE = (3.27, 3.80)
+COMPARISON_FIGSIZE = (2.0 * PANEL_FIGSIZE[0], PANEL_FIGSIZE[1])
 TRAIN_R_VALUES = [0.8, 1.1, 1.6, 2.0, 2.2, 2.5, 3.0]
 
 CASES = [
@@ -329,7 +331,7 @@ def make_single(case: dict[str, object], rows: list[dict[str, float]], metrics: 
     fig, (ax_top, ax_bottom) = plt.subplots(
         2,
         1,
-        figsize=(3.05, 3.55),
+        figsize=PANEL_FIGSIZE,
         sharex=True,
         gridspec_kw={"height_ratios": [2.45, 1.0], "hspace": 0.08},
     )
@@ -347,7 +349,7 @@ def make_single(case: dict[str, object], rows: list[dict[str, float]], metrics: 
 
 def make_combined(case_data: list[tuple[dict[str, object], list[dict[str, float]], dict[str, object]]]) -> dict[str, object]:
     out_stem = "n2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style"
-    fig = plt.figure(figsize=(6.70, 3.80))
+    fig = plt.figure(figsize=COMPARISON_FIGSIZE)
     grid = fig.add_gridspec(2, 2, height_ratios=[2.45, 1.0], hspace=0.08, wspace=0.26)
     axes = [
         (fig.add_subplot(grid[0, 0]), fig.add_subplot(grid[1, 0])),

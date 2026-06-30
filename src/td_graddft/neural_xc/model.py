@@ -252,11 +252,13 @@ class AssemblyMixin:
                 molecule,
                 features=features,
             )
-        pt2_projected = (
-            self.projected_pt2_grid_contribution(molecule, features=features)
-            if self.include_pt2_channel
-            else None
-        )
+        pt2_projected = None
+        if self.include_pt2_channel:
+            pt2_projected = (
+                self._zero_pt2_grid_contribution(molecule, features=features)
+                if self._ground_state_pt2_mode_for_molecule(molecule) == "scf"
+                else self.projected_pt2_grid_contribution(molecule, features=features)
+            )
         hf_spin_inputs: tuple[Array, Array] | None = (hf_projected_a, hf_projected_b)
         if (
             self._uses_hfx_channel()

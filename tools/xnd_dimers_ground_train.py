@@ -5,6 +5,7 @@ import csv
 import gc
 import json
 import os
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 import sys
@@ -51,6 +52,10 @@ from td_graddft.training import (
 HARTREE_TO_EV = 27.211386245988
 _DEFAULT_SEMILOCAL_XC = ("lda_x", "gga_x_b88", "lda_c_vwn_rpa", "gga_c_lyp")
 _TRAIN_SCF_SAFETY_MAX_CYCLE = 512
+
+
+class ReferenceBuildTimeout(TimeoutError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -303,12 +308,36 @@ def get_or_build_reference(
                     )
         except Exception as exc:
             logger.log(f"[ref_cache] read error row={row.row_index}: {exc!r}; rebuilding")
+    timeout_s = float(getattr(args, "reference_timeout_seconds", 0.0) or 0.0)
+    logger.log(
+        f"[ref] start row={row.row_index} {row.atom1}-{row.atom2} "
+        f"R={row.bond_distance_angstrom:.6f} spin={row.spin} timeout_s={timeout_s:.1f}"
+    )
+    started = time.perf_counter()
     try:
-        point = build_reference(row, args=args)
+        if timeout_s > 0.0:
+            previous_handler = signal.getsignal(signal.SIGALRM)
+
+            def _timeout_handler(signum: int, frame: Any) -> None:
+                raise ReferenceBuildTimeout(
+                    f"reference build exceeded {timeout_s:.1f} seconds"
+                )
+
+            signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.setitimer(signal.ITIMER_REAL, timeout_s)
+            try:
+                point = build_reference(row, args=args)
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0.0)
+                signal.signal(signal.SIGALRM, previous_handler)
+        else:
+            point = build_reference(row, args=args)
     except Exception as exc:
+        elapsed = time.perf_counter() - started
         logger.log(
             f"[ref] failed row={row.row_index} {row.atom1}-{row.atom2} "
-            f"R={row.bond_distance_angstrom:.6f} spin={row.spin}: {exc!r}"
+            f"R={row.bond_distance_angstrom:.6f} spin={row.spin} "
+            f"elapsed_s={elapsed:.2f}: {exc!r}"
         )
         if bool(args.fail_on_build_error):
             raise
@@ -321,7 +350,7 @@ def get_or_build_reference(
     logger.log(
         f"[ref] built row={row.row_index} {row.atom1}-{row.atom2} "
         f"R={row.bond_distance_angstrom:.6f} spin={row.spin} "
-        f"target={row.target_energy_h:.10f} Eh"
+        f"target={row.target_energy_h:.10f} Eh elapsed_s={time.perf_counter() - started:.2f}"
     )
     return point
 
@@ -800,6 +829,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--reference-scf-damping", type=float, default=0.25)
     p.add_argument("--reference-scf-level-shift", type=float, default=0.0)
     p.add_argument("--reference-scf-potential-clip", type=float, default=20.0)
+    p.add_argument("--reference-timeout-seconds", type=float, default=0.0)
     p.add_argument("--steps", type=int, default=1000)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--learning-rate", type=float, default=1e-3)
