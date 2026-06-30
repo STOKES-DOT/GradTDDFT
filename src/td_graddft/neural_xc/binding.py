@@ -486,8 +486,8 @@ class NeuralXCBindingMixin:
                     f"(got {(nao, nao2)} vs {(ao.shape[1], ao.shape[1])})."
                 )
             dm_a, dm_b = self._restricted_spin_density_blocks(molecule)
-            dm_a = jax.lax.stop_gradient(jnp.asarray(dm_a, dtype=ao.dtype))
-            dm_b = jax.lax.stop_gradient(jnp.asarray(dm_b, dtype=ao.dtype))
+            dm_a = jnp.asarray(dm_a, dtype=ao.dtype)
+            dm_b = jnp.asarray(dm_b, dtype=ao.dtype)
             if is_chunked_hfx_nu(nu_source):
                 chunk_size = min(
                     max(1, int(getattr(nu_source, "chunk_size", 512))),
@@ -538,11 +538,6 @@ class NeuralXCBindingMixin:
                 e_hf_b = -0.5 * jnp.einsum("gq,gq->g", e_b, fxx_b, precision=Precision.HIGHEST)
                 if include_fxx:
                     current_hfx_fxx = 0.5 * (fxx_a + fxx_b)[None, :, :]
-            e_hf_a = jax.lax.stop_gradient(e_hf_a)
-            e_hf_b = jax.lax.stop_gradient(e_hf_b)
-            if current_hfx_fxx is not None:
-                current_hfx_fxx = jax.lax.stop_gradient(current_hfx_fxx)
-
         e_hf = e_hf_a + e_hf_b
         return (
             jnp.nan_to_num(e_hf, nan=0.0, posinf=0.0, neginf=0.0),

@@ -298,6 +298,7 @@ def read_unrestricted_molecule(
         ao_laplacian=kwargs.pop("ao_laplacian"),
         hfx_omega_values=kwargs.pop("hfx_omega_values"),
         hfx_local=kwargs.pop("hfx_local"),
+        hfx_fxx=kwargs.pop("hfx_fxx"),
         hfx_nu=kwargs.pop("hfx_nu"),
         hfx_nu_api=hfx_nu_api,
         pt2_local=kwargs.pop("pt2_local"),

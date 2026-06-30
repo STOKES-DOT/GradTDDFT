@@ -1646,7 +1646,7 @@ def test_ground_state_hfx_extra_fock_includes_graddft_coefficient_input_branch()
     assert jnp.allclose(actual, expected, atol=1e-8)
 
 
-def test_approx_explicit_hfx_fock_stops_density_response_but_keeps_param_grad():
+def test_approx_explicit_hfx_fock_keeps_density_response_and_param_grad():
     molecule = _make_toy_molecule()
     molecule.hfx_nu = jnp.zeros((2, 2, 2, 2), dtype=jnp.float32)
     molecule.hfx_nu = molecule.hfx_nu.at[0, 0, 0, 0].set(1.0)
@@ -1695,9 +1695,48 @@ def test_approx_explicit_hfx_fock_stops_density_response_but_keeps_param_grad():
 
     assert not jnp.allclose(callback_loss(density), callback_loss(density_shifted))
     assert not jnp.allclose(direct_loss(density), direct_loss(density_shifted))
-    assert jnp.allclose(callback_grad, jnp.zeros_like(callback_grad), atol=1e-8)
-    assert jnp.allclose(direct_grad, jnp.zeros_like(direct_grad), atol=1e-8)
+    assert jnp.linalg.norm(callback_grad) > 1e-8
+    assert jnp.linalg.norm(direct_grad) > 1e-8
     assert param_grad_norm > 0.0
+
+
+def test_scf_explicit_hfx_fock_matches_density_energy_gradient():
+    molecule = _make_toy_molecule()
+    molecule.hfx_nu = jnp.zeros((2, 2, 2, 2), dtype=jnp.float32)
+    molecule.hfx_nu = molecule.hfx_nu.at[0, 0, 0, 0].set(1.0)
+    molecule.hfx_nu = molecule.hfx_nu.at[0, 1, 1, 1].set(0.8)
+    molecule.hfx_nu = molecule.hfx_nu.at[1, 0, 0, 0].set(0.5)
+    molecule.hfx_nu = molecule.hfx_nu.at[1, 1, 1, 1].set(0.4)
+    functional = NeuralXCFunctional(
+        model=_HFParametricConstantChannelModel(),
+        semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
+        include_hfx_channel=True,
+        ground_state_hf_mode="scf",
+        input_feature_mode="canonical",
+        hf_input_mode="spin_resolved",
+        response_hf_mode="approx",
+        hfx_channels=2,
+        name="toy_scf_hfx_fock_density_gradient",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(246), molecule)
+    density = jnp.asarray(molecule.rdm1).sum(axis=0)
+
+    def energy_for_density(density_arg):
+        return functional.scf_xc_energy_for_density(params, molecule, density_arg)
+
+    energy_grad = jax.grad(energy_for_density)(density)
+    molecule_at_density = functional.scf_molecule_with_density(molecule, density)
+    vxc_matrix, alpha, extra_fock, _xc_energy = functional.scf_xc_fock_terms(
+        params,
+        molecule_at_density,
+        weights=molecule.grid.weights,
+        functional_dtype=jnp.float64,
+        vxc_clip=20.0,
+    )
+
+    assert jnp.allclose(alpha, 0.0, atol=1e-12)
+    assert jnp.linalg.norm(extra_fock) > 0.0
+    assert jnp.allclose(energy_grad, vxc_matrix + extra_fock, atol=1e-8)
 
 
 def test_neural_xc_scf_density_energy_matches_rebuilt_molecule_energy():
@@ -3407,7 +3446,7 @@ def test_response_hf_strict_tddft_fails_fast_until_chi_response_is_implemented()
         )
 
 
-def test_scf_energy_callback_matches_refreshed_hfx_basis_with_explicit_hfx_fock():
+def test_scf_energy_callback_includes_refreshed_hfx_basis_gradient():
     molecule = _make_three_grid_pt2_toy_molecule()
     molecule.rep_tensor = jnp.zeros_like(molecule.rep_tensor)
     molecule.hfx_local = jnp.asarray(
@@ -3472,7 +3511,6 @@ def test_scf_energy_callback_matches_refreshed_hfx_basis_with_explicit_hfx_fock(
         molecule=molecule,
         density=density,
         xc_energy_fn=functional.scf_xc_energy_and_alpha_for_density,
-        extra_fock_matrix=extra_fock,
         has_aux=True,
     )
     frozen = xc_energy_and_potential_from_density(
@@ -3488,9 +3526,10 @@ def test_scf_energy_callback_matches_refreshed_hfx_basis_with_explicit_hfx_fock(
     )
     _, _, _, _, _, alpha, direct_extra_fock = components
 
-    assert jnp.allclose(with_nu.vxc_matrix, frozen.vxc_matrix, atol=1e-10)
+    assert jnp.allclose(with_nu.vxc_matrix, frozen.vxc_matrix + direct_extra_fock, atol=1e-10)
     assert jnp.allclose(with_nu.xc_energy, frozen.xc_energy, atol=1e-10)
-    assert jnp.allclose(direct_extra_fock, with_nu.extra_fock_matrix, atol=1e-10)
+    assert jnp.allclose(direct_extra_fock, extra_fock, atol=1e-10)
+    assert jnp.allclose(with_nu.extra_fock_matrix, 0.0, atol=1e-10)
     assert jnp.allclose(alpha, with_nu.aux, atol=1e-10)
     assert jnp.isfinite(with_nu.xc_energy)
     vxc_matrix = with_nu.vxc_matrix

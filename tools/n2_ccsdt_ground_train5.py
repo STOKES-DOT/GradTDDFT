@@ -96,9 +96,14 @@ class RunLogger:
             handle.write(line + "\n")
 
 
-def build_n2_atom(r_angstrom: float) -> str:
+def build_diatomic_atom(atom_symbol: str, r_angstrom: float) -> str:
     half = 0.5 * float(r_angstrom)
-    return f"N 0.0 0.0 {-half:.10f}; N 0.0 0.0 {half:.10f}"
+    symbol = str(atom_symbol)
+    return f"{symbol} 0.0 0.0 {-half:.10f}; {symbol} 0.0 0.0 {half:.10f}"
+
+
+def build_n2_atom(r_angstrom: float) -> str:
+    return build_diatomic_atom("N", r_angstrom)
 
 
 def _xlsx_first_sheet_rows(path: Path):
@@ -260,6 +265,7 @@ def _run_rks(
     max_cycle: int,
     conv_tol: float,
     reference_scf_device: str,
+    jk_backend: str,
 ) -> dft.rks.RKS:
     attempts = (
         dict(init_guess="minao", damping=0.20, level_shift=0.0, newton=False),
@@ -270,6 +276,8 @@ def _run_rks(
     for opts in attempts:
         mf = dft.RKS(mol)
         mf.xc = str(xc)
+        if str(jk_backend) == "df":
+            mf = mf.density_fit()
         mf.grids.level = int(grids_level)
         mf.conv_tol = float(conv_tol)
         mf.max_cycle = int(max_cycle)
@@ -372,7 +380,7 @@ def build_reference_point(
     graddft_target_energy_h: float | None = None,
 ) -> ReferencePoint:
     mol = gto.M(
-        atom=build_n2_atom(float(r_angstrom)),
+        atom=build_diatomic_atom(str(args.atom_symbol), float(r_angstrom)),
         basis=str(args.basis),
         unit="Angstrom",
         spin=0,
@@ -420,6 +428,7 @@ def build_reference_point(
         max_cycle=int(args.reference_scf_max_cycle),
         conv_tol=float(args.reference_scf_conv_tol),
         reference_scf_device=str(args.reference_scf_device),
+        jk_backend=str(args.jk_backend),
     )
     reference = restricted_reference_from_pyscf(
         mf_ref,
@@ -430,6 +439,8 @@ def build_reference_point(
             str(args.input_feature_mode) == "canonical" or bool(args.include_hfx_channel)
         ),
         compute_local_pt2_features=bool(args.include_pt2_channel),
+        hfx_nu_storage=str(args.hfx_nu_storage),
+        jk_backend=str(args.jk_backend),
     )
     if str(args.reference_method) == "graddft_data":
         mf_energy = float(mf_ref.e_tot)
@@ -479,13 +490,17 @@ def _cache_base_group_name(args: argparse.Namespace) -> str:
             f"thr={float(args.avas_threshold):.3g}"
         )
     return (
-        f"n2_ground/ref={str(args.reference_method)}/"
+        f"{str(args.atom_symbol).lower()}2_ground/ref={str(args.reference_method)}/"
         f"active={active}/"
         f"basis={str(args.basis).replace('/', '_')}/"
         f"grid={int(args.grids_level)}/"
+        f"jk={str(args.jk_backend)}/"
         f"{pt2}/"
         f"{hfx}/"
-        f"pt2mode={str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else 'none'}"
+        f"hfmode={str(args.ground_state_hf_mode)}/"
+        f"pt2mode={str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else 'none'}_"
+        f"{str(args.ground_state_pt2_mode)}/"
+        f"hfxnu={str(args.hfx_nu_storage)}"
     )
 
 
@@ -533,8 +548,15 @@ def _write_reference_point(group: Any, point: ReferencePoint) -> None:
     write_restricted_molecule(group.require_group("molecule"), point.molecule)
 
 
-def _read_reference_point(group: Any) -> ReferencePoint:
-    molecule = read_restricted_molecule(group["molecule"])
+def _read_reference_point(
+    group: Any,
+    *,
+    hfx_nu_storage: str = "array",
+) -> ReferencePoint:
+    molecule = read_restricted_molecule(
+        group["molecule"],
+        hfx_nu_storage=("chunked" if str(hfx_nu_storage) == "chunked" else "array"),
+    )
     target_density_matrix = (
         group["target_density_matrix"][()]
         if "target_density_matrix" in group
@@ -586,11 +608,19 @@ def _save_reference_points_hdf5(path: Path, group_name: str, points: list[Refere
             _write_reference_point(group.create_group(f"point_{idx:04d}"), point)
 
 
-def _load_reference_points_hdf5(path: Path, group_name: str) -> list[ReferencePoint]:
+def _load_reference_points_hdf5(
+    path: Path,
+    group_name: str,
+    *,
+    hfx_nu_storage: str = "array",
+) -> list[ReferencePoint]:
     with h5py.File(path, "r") as handle:
         group = handle[group_name]
         count = int(group.attrs["count"])
-        return [_read_reference_point(group[f"point_{idx:04d}"]) for idx in range(count)]
+        return [
+            _read_reference_point(group[f"point_{idx:04d}"], hfx_nu_storage=hfx_nu_storage)
+            for idx in range(count)
+        ]
 
 
 def _save_reference_point_hdf5(path: Path, group_name: str, point: ReferencePoint) -> None:
@@ -601,9 +631,14 @@ def _save_reference_point_hdf5(path: Path, group_name: str, point: ReferencePoin
         _write_reference_point(handle.create_group(group_name), point)
 
 
-def _load_reference_point_hdf5(path: Path, group_name: str) -> ReferencePoint:
+def _load_reference_point_hdf5(
+    path: Path,
+    group_name: str,
+    *,
+    hfx_nu_storage: str = "array",
+) -> ReferencePoint:
     with h5py.File(path, "r") as handle:
-        return _read_reference_point(handle[group_name])
+        return _read_reference_point(handle[group_name], hfx_nu_storage=hfx_nu_storage)
 
 
 def load_or_build_reference_point(
@@ -619,7 +654,11 @@ def load_or_build_reference_point(
         and _has_hdf5_group(cache_path, point_group)
         and not bool(args.rebuild_reference_cache)
     ):
-        return _load_reference_point_hdf5(cache_path, point_group), "cache"
+        return _load_reference_point_hdf5(
+            cache_path,
+            point_group,
+            hfx_nu_storage=str(args.hfx_nu_storage),
+        ), "cache"
     point = build_reference_point(
         float(r_value),
         args=args,
@@ -627,6 +666,12 @@ def load_or_build_reference_point(
     )
     if cache_path is not None:
         _save_reference_point_hdf5(cache_path, point_group, point)
+        if str(args.hfx_nu_storage) == "chunked":
+            point = _load_reference_point_hdf5(
+                cache_path,
+                point_group,
+                hfx_nu_storage="chunked",
+            )
     return point, "built"
 
 
@@ -709,6 +754,8 @@ def build_functional_and_training_config(
         input_feature_mode=str(args.input_feature_mode),
         include_pt2_channel=bool(args.include_pt2_channel),
         include_hfx_channel=bool(args.include_hfx_channel),
+        ground_state_hf_mode=str(args.ground_state_hf_mode),
+        ground_state_pt2_mode=str(args.ground_state_pt2_mode),
         pt2_channel_mode=str(args.pt2_channel_mode),
         response_pt2_mode="approx",
         allow_experimental_jax_xc=bool(args.allow_experimental_jax_xc),
@@ -1498,6 +1545,7 @@ def plot_outputs(
     pred_rows: list[dict[str, float]],
     *,
     reference_label: str,
+    bond_label: str = "N-N",
 ) -> None:
     import matplotlib
 
@@ -1529,13 +1577,13 @@ def plot_outputs(
     fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.8))
     axes[0].plot(r, target, "o-", label=reference_label)
     axes[0].plot(r, pred, "s-", label="Neural XC")
-    axes[0].set_xlabel("N-N distance (Angstrom)")
+    axes[0].set_xlabel(f"{bond_label} distance (Angstrom)")
     axes[0].set_ylabel("total energy (Hartree)")
     axes[0].grid(alpha=0.25)
     axes[0].legend(frameon=False)
     axes[1].plot(r, np.maximum(err, 1e-16), "o-")
     axes[1].set_yscale("log")
-    axes[1].set_xlabel("N-N distance (Angstrom)")
+    axes[1].set_xlabel(f"{bond_label} distance (Angstrom)")
     axes[1].set_ylabel("absolute error (eV)")
     axes[1].grid(alpha=0.25)
     fig.tight_layout()
@@ -1545,6 +1593,7 @@ def plot_outputs(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train Neural XC on N2 ground-state dissociation points.")
+    p.add_argument("--atom-symbol", default="N")
     p.add_argument("--basis", default="def2-svp")
     p.add_argument("--xc", default="b3lyp")
     p.add_argument("--r-min", type=float, default=0.05)
@@ -1608,6 +1657,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--reference-scf-max-cycle", type=int, default=160)
     p.add_argument("--reference-scf-conv-tol", type=float, default=1e-10)
     p.add_argument("--reference-scf-device", choices=("cpu", "gpu"), default="cpu")
+    p.add_argument("--jk-backend", choices=("full", "df"), default="full")
+    p.add_argument("--hfx-nu-storage", choices=("auto", "dense", "chunked"), default="auto")
+    p.add_argument("--ground-state-hf-mode", choices=("off", "nograd", "scf"), default="off")
+    p.add_argument("--ground-state-pt2-mode", choices=("off", "nograd", "scf"), default="off")
     p.add_argument(
         "--reference-method",
         choices=("ccsd_t", "casscf", "casscf_nevpt2", "graddft_data"),
@@ -1788,12 +1841,20 @@ def run_eval_only_checkpoint_streaming(
     ]
     write_per_point_history_csv(per_point_history_csv, eval_history, eval_points)
     try:
-        plot_outputs(outdir, eval_history, pred_rows, reference_label=reference_label)
+        plot_outputs(
+            outdir,
+            eval_history,
+            pred_rows,
+            reference_label=reference_label,
+            bond_label=f"{args.atom_symbol}-{args.atom_symbol}",
+        )
     except Exception as exc:
         logger.log(f"[plot] skipped after error: {exc!r}")
     summary = {
-        "molecule": "N2",
+        "molecule": f"{args.atom_symbol}2",
         "basis": str(args.basis),
+        "jk_backend": str(args.jk_backend),
+        "hfx_nu_storage": str(args.hfx_nu_storage),
         "reference": reference_label,
         "reference_method": str(args.reference_method),
         "graddft_dissociation_xlsx": str(args.graddft_dissociation_xlsx)
@@ -1807,6 +1868,8 @@ def run_eval_only_checkpoint_streaming(
         "eval_only_checkpoint": str(args.eval_only_checkpoint),
         "include_pt2_channel": bool(args.include_pt2_channel),
         "include_hfx_channel": bool(args.include_hfx_channel),
+        "ground_state_hf_mode": str(args.ground_state_hf_mode),
+        "ground_state_pt2_mode": str(args.ground_state_pt2_mode),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
         "density_constraint_weight": float(args.density_constraint_weight),
         "density_matrix_constraint_weight": float(args.density_matrix_constraint_weight),
@@ -1906,13 +1969,16 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
     logger = RunLogger(outdir / "run.log")
     logger.log(
         "Config: "
-        f"molecule=N2 basis={args.basis} xc={args.xc} "
+        f"molecule={args.atom_symbol}2 basis={args.basis} xc={args.xc} "
         f"R=[{args.r_min},{args.r_max}] train_points={args.train_points} "
         f"r_values={args.r_values if args.r_values is not None else 'linspace'} "
         f"steps={args.steps} lr={args.learning_rate} "
         f"lr_decay_every={args.lr_decay_every} lr_decay_factor={args.lr_decay_factor} "
+        f"jk_backend={args.jk_backend} hfx_nu_storage={args.hfx_nu_storage} "
         f"include_pt2_channel={bool(args.include_pt2_channel)} "
         f"include_hfx_channel={bool(args.include_hfx_channel)} "
+        f"ground_state_hf_mode={args.ground_state_hf_mode} "
+        f"ground_state_pt2_mode={args.ground_state_pt2_mode} "
         f"pt2_channel_mode={args.pt2_channel_mode if bool(args.include_pt2_channel) else 'none'} "
         f"training_mode={args.training_mode} "
         f"density_constraint_weight={args.density_constraint_weight} "
@@ -1958,7 +2024,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         and not bool(args.rebuild_reference_cache)
     ):
         logger.log(f"[ref] loading cached references from {cache_path}:{cache_group}")
-        points = _load_reference_points_hdf5(cache_path, cache_group)
+        points = _load_reference_points_hdf5(
+            cache_path,
+            cache_group,
+            hfx_nu_storage=str(args.hfx_nu_storage),
+        )
         logger.log(f"[ref] loaded {len(points)} cached references")
     else:
         points = []
@@ -1970,7 +2040,11 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 and _has_hdf5_group(cache_path, point_group)
                 and not bool(args.rebuild_reference_cache)
             ):
-                point = _load_reference_point_hdf5(cache_path, point_group)
+                point = _load_reference_point_hdf5(
+                    cache_path,
+                    point_group,
+                    hfx_nu_storage=str(args.hfx_nu_storage),
+                )
                 source = "cache"
             else:
                 point = build_reference_point(
@@ -1981,6 +2055,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 source = "built"
                 if cache_path is not None:
                     _save_reference_point_hdf5(cache_path, point_group, point)
+                    if str(args.hfx_nu_storage) == "chunked":
+                        point = _load_reference_point_hdf5(
+                            cache_path,
+                            point_group,
+                            hfx_nu_storage="chunked",
+                        )
             points.append(point)
             logger.log(
                 f"[ref] {idx:3d}/{len(r_values):3d} {source} "
@@ -2036,12 +2116,20 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         write_history_csv(history_csv, eval_history)
         write_per_point_history_csv(per_point_history_csv, eval_history, points)
         try:
-            plot_outputs(outdir, eval_history, pred_rows, reference_label=reference_label)
+            plot_outputs(
+                outdir,
+                eval_history,
+                pred_rows,
+                reference_label=reference_label,
+                bond_label=f"{args.atom_symbol}-{args.atom_symbol}",
+            )
         except Exception as exc:
             logger.log(f"[plot] skipped after error: {exc!r}")
         summary = {
-            "molecule": "N2",
+            "molecule": f"{args.atom_symbol}2",
             "basis": str(args.basis),
+            "jk_backend": str(args.jk_backend),
+            "hfx_nu_storage": str(args.hfx_nu_storage),
             "reference": reference_label,
             "reference_method": str(args.reference_method),
             "graddft_dissociation_xlsx": str(args.graddft_dissociation_xlsx)
@@ -2055,6 +2143,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "eval_only_checkpoint": str(args.eval_only_checkpoint),
             "include_pt2_channel": bool(args.include_pt2_channel),
             "include_hfx_channel": bool(args.include_hfx_channel),
+            "ground_state_hf_mode": str(args.ground_state_hf_mode),
+            "ground_state_pt2_mode": str(args.ground_state_pt2_mode),
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
             "density_constraint_weight": float(args.density_constraint_weight),
             "density_matrix_constraint_weight": float(args.density_matrix_constraint_weight),
@@ -2169,8 +2259,10 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         outdir / "neural_xc_params.msgpack",
         training["best_params"],
         metadata={
-            "molecule": "N2",
+            "molecule": f"{args.atom_symbol}2",
             "basis": str(args.basis),
+            "jk_backend": str(args.jk_backend),
+            "hfx_nu_storage": str(args.hfx_nu_storage),
             "reference": reference_label,
             "reference_method": str(args.reference_method),
             "graddft_dissociation_xlsx": str(args.graddft_dissociation_xlsx)
@@ -2188,6 +2280,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "lr_decay_factor": float(args.lr_decay_factor),
             "include_pt2_channel": bool(args.include_pt2_channel),
             "include_hfx_channel": bool(args.include_hfx_channel),
+            "ground_state_hf_mode": str(args.ground_state_hf_mode),
+            "ground_state_pt2_mode": str(args.ground_state_pt2_mode),
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
             "density_constraint_weight": float(args.density_constraint_weight),
             "density_matrix_constraint_weight": float(args.density_matrix_constraint_weight),
@@ -2200,12 +2294,20 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         },
     )
     try:
-        plot_outputs(outdir, training["history"], pred_rows, reference_label=reference_label)
+        plot_outputs(
+            outdir,
+            training["history"],
+            pred_rows,
+            reference_label=reference_label,
+            bond_label=f"{args.atom_symbol}-{args.atom_symbol}",
+        )
     except Exception as exc:
         logger.log(f"[plot] skipped after error: {exc!r}")
     summary = {
-        "molecule": "N2",
+        "molecule": f"{args.atom_symbol}2",
         "basis": str(args.basis),
+        "jk_backend": str(args.jk_backend),
+        "hfx_nu_storage": str(args.hfx_nu_storage),
         "reference": reference_label,
         "reference_method": str(args.reference_method),
         "graddft_dissociation_xlsx": str(args.graddft_dissociation_xlsx)
@@ -2217,6 +2319,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "nelecas": int(args.nelecas) if uses_active_space else None,
         "include_pt2_channel": bool(args.include_pt2_channel),
         "include_hfx_channel": bool(args.include_hfx_channel),
+        "ground_state_hf_mode": str(args.ground_state_hf_mode),
+        "ground_state_pt2_mode": str(args.ground_state_pt2_mode),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
         "training_mode": str(args.training_mode),
         "density_constraint_weight": float(args.density_constraint_weight),

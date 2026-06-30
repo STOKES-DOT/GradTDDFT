@@ -1,4 +1,4 @@
-%aipnum4-2.bst 2019-01-14 (MD) hand-edited version of apsrev4-1.bst
+%merlin.mbs aipnum4-1.bst 2010-07-25 4.21a (PWD, AO, DPC) hacked
 %Control: key (0)
 %Control: author (8) initials jnrlst
 %Control: editor formatted (1) identically to author
@@ -38,7 +38,7 @@
 \providecommand \@url [1]{\endgroup\@href {#1}{\urlprefix }}%
 \providecommand \urlprefix  [0]{URL }%
 \providecommand \Eprint [0]{\href }%
-\providecommand \doibase [0]{https://doi.org/}%
+\providecommand \doibase [0]{http://dx.doi.org/}%
 \providecommand \selectlanguage [0]{\@gobble}%
 \providecommand \bibinfo  [0]{\@secondoftwo}%
 \providecommand \bibfield  [0]{\@secondoftwo}%
@@ -70,14 +70,14 @@
   {Wang}(2020)}]{Xie2020DominantEigensolverAD}%
   \BibitemOpen
   \bibfield  {author} {\bibinfo {author} {\bibfnamefont {H.}~\bibnamefont
-  {Xie}}, \bibinfo {author} {\bibfnamefont {J.-G.}\ \bibnamefont {Liu}},\ and\
+  {Xie}}, \bibinfo {author} {\bibfnamefont {J.-G.}\ \bibnamefont {Liu}}, \ and\
   \bibinfo {author} {\bibfnamefont {L.}~\bibnamefont {Wang}},\ }\bibfield
   {title} {\enquote {\bibinfo {title} {Automatic differentiation of dominant
-  eigensolver and its applications in quantum physics},}\ }\href
-  {https://doi.org/10.1103/PhysRevB.101.245139} {\bibfield  {journal} {\bibinfo
-   {journal} {Phys. Rev. B}\ }\textbf {\bibinfo {volume} {101}},\ \bibinfo
-  {pages} {245139} (\bibinfo {year} {2020})},\ \Eprint
-  {https://arxiv.org/abs/2001.04121} {arXiv:2001.04121 [cond-mat.str-el]}
+  eigensolver and its applications in quantum physics},}\ }\href {\doibase
+  10.1103/PhysRevB.101.245139} {\bibfield  {journal} {\bibinfo  {journal}
+  {Phys. Rev. B}\ }\textbf {\bibinfo {volume} {101}},\ \bibinfo {pages}
+  {245139} (\bibinfo {year} {2020})},\ \Eprint
+  {http://arxiv.org/abs/2001.04121} {arXiv:2001.04121 [cond-mat.str-el]}
   \BibitemShut {NoStop}%
 \bibitem [{\citenamefont {Ekstr{\"o}m}\ \emph {et~al.}(2010)\citenamefont
   {Ekstr{\"o}m}, \citenamefont {Visscher}, \citenamefont {Bast}, \citenamefont
@@ -86,26 +86,26 @@
   \bibfield  {author} {\bibinfo {author} {\bibfnamefont {U.}~\bibnamefont
   {Ekstr{\"o}m}}, \bibinfo {author} {\bibfnamefont {L.}~\bibnamefont
   {Visscher}}, \bibinfo {author} {\bibfnamefont {R.}~\bibnamefont {Bast}},
-  \bibinfo {author} {\bibfnamefont {A.~J.}\ \bibnamefont {Thorvaldsen}},\ and\
+  \bibinfo {author} {\bibfnamefont {A.~J.}\ \bibnamefont {Thorvaldsen}}, \ and\
   \bibinfo {author} {\bibfnamefont {K.}~\bibnamefont {Ruud}},\ }\bibfield
   {title} {\enquote {\bibinfo {title} {Arbitrary-order density functional
-  response theory from automatic differentiation},}\ }\href
-  {https://doi.org/10.1021/ct100117s} {\bibfield  {journal} {\bibinfo
-  {journal} {J. Chem. Theory Comput.}\ }\textbf {\bibinfo {volume} {6}},\
-  \bibinfo {pages} {1971--1980} (\bibinfo {year} {2010})}\BibitemShut {NoStop}%
+  response theory from automatic differentiation},}\ }\href {\doibase
+  10.1021/ct100117s} {\bibfield  {journal} {\bibinfo  {journal} {J. Chem.
+  Theory Comput.}\ }\textbf {\bibinfo {volume} {6}},\ \bibinfo {pages}
+  {1971--1980} (\bibinfo {year} {2010})}\BibitemShut {NoStop}%
 \bibitem [{\citenamefont {Head-Gordon}\ \emph {et~al.}(1994)\citenamefont
   {Head-Gordon}, \citenamefont {Rico}, \citenamefont {Oumi},\ and\
   \citenamefont {Lee}}]{HeadGordonCISD1994}%
   \BibitemOpen
   \bibfield  {author} {\bibinfo {author} {\bibfnamefont {M.}~\bibnamefont
   {Head-Gordon}}, \bibinfo {author} {\bibfnamefont {R.~J.}\ \bibnamefont
-  {Rico}}, \bibinfo {author} {\bibfnamefont {M.}~\bibnamefont {Oumi}},\ and\
+  {Rico}}, \bibinfo {author} {\bibfnamefont {M.}~\bibnamefont {Oumi}}, \ and\
   \bibinfo {author} {\bibfnamefont {T.~J.}\ \bibnamefont {Lee}},\ }\bibfield
   {title} {\enquote {\bibinfo {title} {A doubles correction to electronic
   excited states from configuration interaction in the space of single
-  substitutions},}\ }\href {https://doi.org/10.1016/0009-2614(94)00070-0}
-  {\bibfield  {journal} {\bibinfo  {journal} {Chem. Phys. Lett.}\ }\textbf
-  {\bibinfo {volume} {219}},\ \bibinfo {pages} {21--29} (\bibinfo {year}
+  substitutions},}\ }\href {\doibase 10.1016/0009-2614(94)00070-0} {\bibfield
+  {journal} {\bibinfo  {journal} {Chem. Phys. Lett.}\ }\textbf {\bibinfo
+  {volume} {219}},\ \bibinfo {pages} {21--29} (\bibinfo {year}
   {1994})}\BibitemShut {NoStop}%
 \bibitem [{\citenamefont {Grimme}\ and\ \citenamefont
   {Neese}(2007)}]{GrimmeNeeseDoubleHybrid2007}%
@@ -114,9 +114,9 @@
   {Grimme}}\ and\ \bibinfo {author} {\bibfnamefont {F.}~\bibnamefont {Neese}},\
   }\bibfield  {title} {\enquote {\bibinfo {title} {Double-hybrid density
   functional theory for excited electronic states of molecules},}\ }\href
-  {https://doi.org/10.1063/1.2772854} {\bibfield  {journal} {\bibinfo
-  {journal} {J. Chem. Phys.}\ }\textbf {\bibinfo {volume} {127}},\ \bibinfo
-  {pages} {154116} (\bibinfo {year} {2007})}\BibitemShut {NoStop}%
+  {\doibase 10.1063/1.2772854} {\bibfield  {journal} {\bibinfo  {journal} {J.
+  Chem. Phys.}\ }\textbf {\bibinfo {volume} {127}},\ \bibinfo {pages} {154116}
+  (\bibinfo {year} {2007})}\BibitemShut {NoStop}%
 \bibitem [{\citenamefont {{Sail Science Group}}(2023)}]{JAXXC}%
   \BibitemOpen
   \bibfield  {author} {\bibinfo {author} {\bibnamefont {{Sail Science
@@ -130,11 +130,11 @@
   \BibitemOpen
   \bibfield  {author} {\bibinfo {author} {\bibfnamefont {N.}~\bibnamefont
   {Kov{\'a}cs}}, \bibinfo {author} {\bibfnamefont {S.}~\bibnamefont
-  {{\'S}miga}}, \bibinfo {author} {\bibfnamefont {M.}~\bibnamefont {Kaupp}},\
+  {{\'S}miga}}, \bibinfo {author} {\bibfnamefont {M.}~\bibnamefont {Kaupp}}, \
   and\ \bibinfo {author} {\bibfnamefont {A.}~\bibnamefont {Wody{\'n}ski}},\
   }\bibfield  {title} {\enquote {\bibinfo {title} {Toward doubly local double
   hybrid functionals using neural-network local mixing functions},}\ }\href
-  {https://doi.org/10.1021/acs.jctc.5c01952} {\bibfield  {journal} {\bibinfo
+  {\doibase 10.1021/acs.jctc.5c01952} {\bibfield  {journal} {\bibinfo
   {journal} {J. Chem. Theory Comput.}\ }\textbf {\bibinfo {volume} {22}},\
   \bibinfo {pages} {3268--3281} (\bibinfo {year} {2026})}\BibitemShut {NoStop}%
 \bibitem [{\citenamefont {Heek}\ \emph {et~al.}(2024)\citenamefont {Heek},
@@ -147,7 +147,7 @@
   \bibinfo {author} {\bibfnamefont {A.}~\bibnamefont {Oliver}}, \bibinfo
   {author} {\bibfnamefont {M.}~\bibnamefont {Ritter}}, \bibinfo {author}
   {\bibfnamefont {B.}~\bibnamefont {Rondepierre}}, \bibinfo {author}
-  {\bibfnamefont {A.}~\bibnamefont {Steiner}},\ and\ \bibinfo {author}
+  {\bibfnamefont {A.}~\bibnamefont {Steiner}}, \ and\ \bibinfo {author}
   {\bibfnamefont {M.}~\bibnamefont {van {Z}ee}},\ }\href
   {http://github.com/google/flax} {\enquote {\bibinfo {title} {{F}lax: A neural
   network library and ecosystem for {JAX}},}\ } (\bibinfo {year}

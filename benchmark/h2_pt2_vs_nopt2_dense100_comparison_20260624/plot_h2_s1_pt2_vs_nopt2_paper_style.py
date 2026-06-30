@@ -22,6 +22,8 @@ PAPER_FIG_DIR = ROOT / "paper/tdgraddft-paper/figures"
 
 EV_PER_H = 27.211386245988
 KCAL_PER_MOL_TO_MEV = 43.3641153087705
+PANEL_FIGSIZE = (3.27, 3.80)
+COMPARISON_FIGSIZE = (2.0 * PANEL_FIGSIZE[0], PANEL_FIGSIZE[1])
 TRAIN_R_VALUES = [0.4, 0.74, 1.1, 1.6, 2.2, 3.5, 6.0]
 COMBINED_OUT_STEM = "h2_s1_tda_e1_total_pt2_nopt2_dissociation_paper_style"
 
@@ -343,7 +345,7 @@ def make_single(case: dict[str, str], rows: list[dict[str, float]], metrics: dic
     fig, (ax_top, ax_bottom) = plt.subplots(
         2,
         1,
-        figsize=(3.05, 3.55),
+        figsize=PANEL_FIGSIZE,
         sharex=True,
         gridspec_kw={"height_ratios": [2.45, 1.0], "hspace": 0.08},
     )
@@ -353,14 +355,14 @@ def make_single(case: dict[str, str], rows: list[dict[str, float]], metrics: dic
     draw_case(ax_top, ax_bottom, rows, case, metrics)
     fig.align_ylabels([ax_top, ax_bottom])
     fig.subplots_adjust(left=0.30, right=0.985, top=0.985, bottom=0.155)
-    metrics["outputs"] = save_figure(fig, str(case["out_stem"]), include_paper=False)
+    metrics["outputs"] = save_figure(fig, str(case["out_stem"]), include_paper=True)
     plt.close(fig)
     write_visualization_csv(rows, case, metrics)
     (RUN_DIR / f"{case['out_stem']}_metrics.json").write_text(json.dumps(metrics, indent=2))
 
 
 def make_combined(case_data: list[tuple[dict[str, str], list[dict[str, float]], dict[str, object]]]) -> dict[str, object]:
-    fig = plt.figure(figsize=(6.70, 3.80))
+    fig = plt.figure(figsize=COMPARISON_FIGSIZE)
     grid = fig.add_gridspec(2, 2, height_ratios=[2.45, 1.0], hspace=0.08, wspace=0.26)
     axes = [
         (fig.add_subplot(grid[0, 0]), fig.add_subplot(grid[1, 0])),
