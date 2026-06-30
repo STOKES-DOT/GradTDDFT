@@ -46,6 +46,7 @@ GroundStateTrainingConfig = None
 create_train_state_from_molecule = None
 ground_state_mse_loss_pointwise_dataset = None
 load_params_checkpoint = None
+make_ground_state_loss_and_grad = None
 make_ground_state_train_step = None
 save_params_checkpoint = None
 predict_excitation_energies = None
@@ -78,6 +79,7 @@ def _load_runtime_dependencies(logger: "RunLogger | None" = None) -> None:
     global create_train_state_from_molecule
     global ground_state_mse_loss_pointwise_dataset
     global load_params_checkpoint
+    global make_ground_state_loss_and_grad
     global make_ground_state_train_step
     global save_params_checkpoint
     global predict_excitation_energies
@@ -106,6 +108,7 @@ def _load_runtime_dependencies(logger: "RunLogger | None" = None) -> None:
         create_train_state_from_molecule as _create_train_state_from_molecule,
         ground_state_mse_loss_pointwise_dataset as _ground_state_mse_loss_pointwise_dataset,
         load_params_checkpoint as _load_params_checkpoint,
+        make_ground_state_loss_and_grad as _make_ground_state_loss_and_grad,
         make_ground_state_train_step as _make_ground_state_train_step,
         make_ground_state_predictor as _make_ground_state_predictor,
         save_params_checkpoint as _save_params_checkpoint,
@@ -125,6 +128,7 @@ def _load_runtime_dependencies(logger: "RunLogger | None" = None) -> None:
     create_train_state_from_molecule = _create_train_state_from_molecule
     ground_state_mse_loss_pointwise_dataset = _ground_state_mse_loss_pointwise_dataset
     load_params_checkpoint = _load_params_checkpoint
+    make_ground_state_loss_and_grad = _make_ground_state_loss_and_grad
     make_ground_state_train_step = _make_ground_state_train_step
     save_params_checkpoint = _save_params_checkpoint
     predict_excitation_energies = _predict_excitation_energies
@@ -348,6 +352,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Attempt to JIT the self-consistent train step. Enabled by default.",
     )
     p.add_argument(
+        "--jit-train-mode",
+        choices=("full", "pointwise"),
+        default="full",
+        help=(
+            "JIT strategy for training: full compiles the whole dataset step; "
+            "pointwise compiles one datum loss/grad and averages gradients in Python."
+        ),
+    )
+    p.add_argument(
         "--skip-final-evaluation",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -421,6 +434,37 @@ def _tree_all_finite(tree: Any) -> bool:
     if not leaves:
         return True
     return all(bool(jnp.all(jnp.isfinite(jnp.asarray(leaf)))) for leaf in leaves)
+
+
+def _tree_l2_norm(tree: Any) -> jnp.ndarray:
+    leaves = jax.tree_util.tree_leaves(tree)
+    if not leaves:
+        return jnp.asarray(0.0, dtype=jnp.float32)
+    total = jnp.asarray(0.0, dtype=jnp.float32)
+    for leaf in leaves:
+        arr = jnp.nan_to_num(jnp.asarray(leaf), nan=0.0, posinf=0.0, neginf=0.0)
+        total = total + jnp.sum(jnp.square(arr.astype(jnp.float32)))
+    return jnp.sqrt(total)
+
+
+def _tree_abs_max(tree: Any) -> jnp.ndarray:
+    leaves = jax.tree_util.tree_leaves(tree)
+    if not leaves:
+        return jnp.asarray(0.0, dtype=jnp.float32)
+    max_value = jnp.asarray(0.0, dtype=jnp.float32)
+    for leaf in leaves:
+        arr = jnp.nan_to_num(jnp.asarray(leaf), nan=0.0, posinf=0.0, neginf=0.0)
+        max_value = jnp.maximum(max_value, jnp.max(jnp.abs(arr.astype(jnp.float32))))
+    return max_value
+
+
+def _tree_add(left: Any, right: Any) -> Any:
+    return jax.tree_util.tree_map(lambda a, b: a + b, left, right)
+
+
+def _tree_scale(tree: Any, scale: Any) -> Any:
+    scale_arr = jnp.asarray(scale)
+    return jax.tree_util.tree_map(lambda leaf: leaf * scale_arr.astype(jnp.asarray(leaf).dtype), tree)
 
 
 def _run_restricted_hf(
@@ -822,6 +866,72 @@ def build_training_data(
     )
 
 
+def _make_pointwise_jit_train_step(
+    functional: Any,
+    training_data: tuple[Any, ...],
+    *,
+    training_config: Any,
+    use_jit: bool,
+    logger: RunLogger,
+):
+    loss_and_grad = make_ground_state_loss_and_grad(
+        functional,
+        training_config=training_config,
+        loss_fn=ground_state_mse_loss_pointwise_dataset,
+    )
+    single_loss_and_grad = jax.jit(loss_and_grad) if bool(use_jit) else loss_and_grad
+    if bool(use_jit):
+        logger.log("[train] compiling pointwise JIT loss/grad kernel")
+
+        def compile_first(params):
+            return single_loss_and_grad.lower(params, training_data[0]).compile()
+
+    else:
+        compile_first = None
+    compiled_single_cache = None
+
+    def train_step(state):
+        nonlocal compiled_single_cache
+        compiled_single = single_loss_and_grad
+        if compile_first is not None:
+            if compiled_single_cache is None:
+                compiled_single_cache = compile_first(state.params)
+            compiled_single = compiled_single_cache
+        total_weight = jnp.asarray(0.0, dtype=jnp.float64)
+        weighted_loss = jnp.asarray(0.0, dtype=jnp.float64)
+        weighted_grads = None
+        metric_values: dict[str, list[Any]] = {}
+        for datum in training_data:
+            loss_i, metrics_i, grads_i = compiled_single(state.params, datum)
+            weight_i = jnp.asarray(getattr(datum, "weight", 1.0), dtype=jnp.asarray(loss_i).dtype)
+            weighted_loss = weighted_loss + jnp.asarray(loss_i, dtype=jnp.float64) * weight_i
+            total_weight = total_weight + jnp.asarray(weight_i, dtype=jnp.float64)
+            scaled_grads = _tree_scale(grads_i, weight_i)
+            weighted_grads = scaled_grads if weighted_grads is None else _tree_add(weighted_grads, scaled_grads)
+            for key, value in metrics_i.items():
+                arr = jnp.asarray(value)
+                if int(arr.size) > 0:
+                    metric_values.setdefault(key, []).append(jnp.ravel(arr))
+        inv_weight = 1.0 / jnp.maximum(total_weight, jnp.asarray(1.0, dtype=total_weight.dtype))
+        avg_grads = _tree_scale(weighted_grads, inv_weight)
+        new_state = state.apply_gradients(grads=avg_grads)
+        param_delta = jax.tree_util.tree_map(lambda new, old: new - old, new_state.params, state.params)
+        loss = weighted_loss * inv_weight
+        metrics: dict[str, Any] = {
+            key: jnp.concatenate(values) for key, values in metric_values.items()
+        }
+        metrics["loss"] = jnp.asarray(loss)
+        metrics["grad_norm"] = jnp.asarray([_tree_l2_norm(avg_grads)], dtype=jnp.asarray(loss).dtype)
+        metrics["grad_abs_max"] = jnp.asarray([_tree_abs_max(avg_grads)], dtype=jnp.asarray(loss).dtype)
+        metrics["param_update_norm"] = jnp.asarray(
+            [_tree_l2_norm(param_delta)],
+            dtype=jnp.asarray(loss).dtype,
+        )
+        return new_state, metrics
+
+    return train_step
+
+
 def train_functional(
     train_points: list[ReferencePoint],
     *,
@@ -931,7 +1041,16 @@ def train_functional(
     compiled_eval = jax.jit(eval_fn) if bool(args.jit_eval) else eval_fn
     compiled_train_step = eager_train_step
     train_step_mode = "eager"
-    if bool(args.jit_train):
+    if bool(args.jit_train) and str(args.jit_train_mode) == "pointwise":
+        compiled_train_step = _make_pointwise_jit_train_step(
+            functional,
+            training_data,
+            training_config=gs_training,
+            use_jit=True,
+            logger=logger,
+        )
+        train_step_mode = "pointwise_jit"
+    elif bool(args.jit_train):
         candidate_train_step = jax.jit(eager_train_step)
         try:
             _ = candidate_train_step.lower(state).compile()

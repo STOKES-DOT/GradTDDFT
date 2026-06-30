@@ -917,7 +917,6 @@ class DifferentiableSCF:
             selected_idx = best_idx
         elif self.config.iterate_selection == "first_converged":
             selected_idx = jnp.where(has_density_converged, first_converged_idx, best_idx)
-        selected_idx = jnp.where(jnp.asarray(converged), selected_idx, final_idx)
         return DifferentiableSCFInfo(
             mode=mode,
             converged=converged,

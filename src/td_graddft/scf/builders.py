@@ -526,6 +526,7 @@ def unrestricted_molecule_from_spec_with_jax_uks(
     hfx_nu = None
     hfx_fxx = None
     pt2_local = None
+    pt2_fock_response = None
     if compute_local_hfx_features:
         hfx_result = _local_hfx_features_from_basis_dm(
             basis_cart,
@@ -542,13 +543,14 @@ def unrestricted_molecule_from_spec_with_jax_uks(
         else:
             hfx_local, hfx_fxx = hfx_result
     if compute_local_pt2_features:
-        pt2_local = _local_pt2_feature_from_unrestricted_orbitals(
+        pt2_local, pt2_fock_response = _local_pt2_feature_from_unrestricted_orbitals(
             ao,
             jnp.stack([uks.mo_coeff_alpha, uks.mo_coeff_beta], axis=0),
             jnp.stack([uks.mo_occ_alpha, uks.mo_occ_beta], axis=0),
             jnp.stack([uks.mo_energy_alpha, uks.mo_energy_beta], axis=0),
             rep_tensor=jnp.asarray(eri),
             density_floor=cfg.density_floor,
+            return_fock_response=True,
         )
 
     mf_energy = (
@@ -587,6 +589,7 @@ def unrestricted_molecule_from_spec_with_jax_uks(
         hfx_fxx=hfx_fxx,
         hfx_nu=hfx_nu,
         pt2_local=pt2_local,
+        pt2_fock_response=pt2_fock_response,
         df_factors=scf_inputs.df_factors,
     )
 

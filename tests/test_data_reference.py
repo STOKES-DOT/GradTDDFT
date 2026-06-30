@@ -360,3 +360,29 @@ def test_unrestricted_reference_host_backend_keeps_hfx_cache_on_host(monkeypatch
     assert isinstance(molecule.hfx_local, np.ndarray)
     assert isinstance(molecule.hfx_nu, np.ndarray)
     assert isinstance(molecule.hfx_fxx, np.ndarray)
+
+
+def test_unrestricted_reference_caches_spin_pt2_fock_response(monkeypatch):
+    fake_numint = types.SimpleNamespace(
+        eval_ao=lambda mol, coords, deriv=0: (
+            np.ones((2, 2), dtype=np.float64)
+            if deriv == 0
+            else np.ones((4, 2, 2), dtype=np.float64)
+        )
+    )
+    fake_dft = types.ModuleType("pyscf.dft")
+    fake_dft.numint = fake_numint
+    fake_pyscf = types.ModuleType("pyscf")
+    fake_pyscf.dft = fake_dft
+    monkeypatch.setitem(sys.modules, "pyscf", fake_pyscf)
+    monkeypatch.setitem(sys.modules, "pyscf.dft", fake_dft)
+
+    molecule = reference_module.unrestricted_reference_from_pyscf(
+        _FakeUKSMF(),
+        compute_local_pt2_features=True,
+        array_backend="host",
+    )
+
+    assert isinstance(molecule.pt2_local, np.ndarray)
+    assert isinstance(molecule.pt2_fock_response, np.ndarray)
+    assert molecule.pt2_fock_response.shape == (2, 2, 2, 2)

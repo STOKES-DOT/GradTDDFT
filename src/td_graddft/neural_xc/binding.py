@@ -322,12 +322,12 @@ class NeuralXCBindingMixin:
             return False
         mode = self._ground_state_pt2_mode_for_molecule(molecule)
         if mode == "scf":
-            return not self._uses_unrestricted_pt2_projection(molecule)
+            return False
         if mode != "nograd":
             return False
         return self._pt2_fock_response_source(molecule) is not None
 
-    def _raise_if_variational_pt2_scf_is_required(self, molecule: Any) -> None:
+    def _raise_if_pt2_scf_derivative_is_unimplemented(self, molecule: Any) -> None:
         if not self.include_pt2_channel:
             return
         mode = self._ground_state_pt2_mode_for_molecule(molecule)
@@ -340,14 +340,12 @@ class NeuralXCBindingMixin:
             )
         if mode != "scf":
             return
-        if not self._uses_unrestricted_pt2_projection(molecule):
-            return
         raise NotImplementedError(
-            "PT2 scf mode for unrestricted/open-shell molecules is not variationally "
-            "consistent in the self-consistent Fock path: the local PT2 channel "
-            "depends on spin-dependent current orbitals and orbital energies, but "
-            "the unrestricted AD orbital-response Fock term is not implemented. Use "
-            "ground_state_pt2_mode='nograd' or disable the PT2 channel for open-shell SCF."
+            "PT2 scf mode in the ground-state self-consistent Fock path requires "
+            "a complete orbital derivative Fock term for the current PT2 local "
+            "channel. The existing fixed pt2_fock_response cache is only valid "
+            "for ground_state_pt2_mode='nograd'. Use ground_state_pt2_mode='nograd' "
+            "or disable the PT2 channel for SCF until this derivative is implemented."
         )
 
     def _restricted_grid_features(
@@ -410,12 +408,13 @@ class NeuralXCBindingMixin:
             mode == "scf"
             and configured_mode == "scf"
             and nu_source is None
-            and cached_fxx is None
         ):
             raise ValueError(
                 "ground_state_hf_mode='scf' requires molecule.hfx_nu, "
-                "molecule.hfx_nu_api, or molecule.hfx_fxx so the HF channel can be "
-                "updated during SCF."
+                "or molecule.hfx_nu_api so the HF channel can be updated from "
+                "the current density during SCF. molecule.hfx_fxx is a fixed "
+                "reference derivative cache and is only valid for "
+                "ground_state_hf_mode='nograd'."
             )
         current_hfx_fxx = None
         if mode == "nograd" and cached_fxx is not None:
@@ -567,7 +566,7 @@ class NeuralXCBindingMixin:
         params: PyTree,
         molecule: Any,
     ) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
-        self._raise_if_variational_pt2_scf_is_required(molecule)
+        self._raise_if_pt2_scf_derivative_is_unimplemented(molecule)
         features, total_gradient, semilocal_channels, semilocal = (
             self._restricted_grid_payload(molecule)
         )
@@ -924,12 +923,11 @@ class NeuralXCBindingMixin:
         matrix_dtype = ao.dtype if dtype is None else dtype
         response_arr = jax.lax.stop_gradient(jnp.asarray(response, dtype=matrix_dtype))
         if response_arr.ndim == 3:
-            fock, used = self._contract_pt2_feature_gradient_to_restricted_fock(
-                molecule,
-                grad,
-                dtype=matrix_dtype,
+            raise ValueError(
+                "Unrestricted PT2 Fock response cache must be spin-resolved with "
+                "shape (2, ngrids, nao, nao); restricted (ngrids, nao, nao) "
+                "response cannot define separate alpha/beta Fock terms."
             )
-            return fock, fock, used
         if response_arr.ndim != 4 or int(response_arr.shape[0]) != 2:
             raise ValueError(
                 "Unrestricted PT2 Fock response cache must have shape "
@@ -993,98 +991,13 @@ class NeuralXCBindingMixin:
         features: RestrictedFeatureBundle,
         dtype: Any | None = None,
     ) -> tuple[Array, bool]:
-        ao = jnp.asarray(molecule.ao)
-        matrix_dtype = ao.dtype if dtype is None else dtype
-        mo_coeff = jnp.asarray(molecule.mo_coeff, dtype=matrix_dtype)
-        mo_occ = jnp.asarray(molecule.mo_occ)
-        mo_energy = jnp.asarray(molecule.mo_energy, dtype=matrix_dtype)
-        if mo_coeff.ndim == 3:
-            mo_coeff = mo_coeff[0]
-        if mo_occ.ndim == 2:
-            mo_occ = mo_occ[0]
-        if mo_energy.ndim == 2:
-            mo_energy = mo_energy[0]
-
-        nocc = getattr(molecule, "nocc", None)
-        if nocc is None:
-            nocc = int(jnp.count_nonzero(mo_occ > 1e-8))
-        else:
-            nocc = int(nocc)
-        nmo = int(mo_coeff.shape[1])
-        if nocc <= 0 or nocc >= nmo:
-            return self._zero_hfx_fock(molecule, matrix_dtype), False
-
-        grad_grid = jax.lax.stop_gradient(jnp.asarray(grad, dtype=matrix_dtype))
-        grad_grid = jnp.nan_to_num(grad_grid, nan=0.0, posinf=0.0, neginf=0.0)
-
-        def weighted_pt2_from_orbitals(coeff_arg: Array, energy_arg: Array) -> Array:
-            molecule_arg = self._replace_molecule_for_pt2_scf_orbitals(
-                molecule,
-                mo_coeff=coeff_arg,
-                mo_energy=energy_arg,
-            )
-            pt2_arg = self.projected_pt2_grid_contribution(
-                molecule_arg,
-                features=features,
-            )
-            return jnp.tensordot(grad_grid, pt2_arg, axes=(0, 0))
-
-        _, (coeff_grad, energy_grad) = jax.value_and_grad(
-            weighted_pt2_from_orbitals,
-            argnums=(0, 1),
-        )(mo_coeff, mo_energy)
-        coeff_grad = jnp.nan_to_num(
-            jnp.asarray(coeff_grad, dtype=matrix_dtype),
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
+        del molecule, grad, features, dtype
+        raise NotImplementedError(
+            "PT2 scf mode in the ground-state self-consistent Fock path requires "
+            "a complete orbital derivative Fock term for the current PT2 local "
+            "channel. The previous heuristic coefficient/orbital-energy mapping "
+            "is not exposed as a valid SCF derivative."
         )
-        energy_grad = jnp.nan_to_num(
-            jnp.asarray(energy_grad, dtype=matrix_dtype),
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0,
-        )
-
-        coeff_occ = mo_coeff[:, :nocc]
-        coeff_vir = mo_coeff[:, nocc:]
-        grad_occ = coeff_grad[:, :nocc]
-        grad_vir = coeff_grad[:, nocc:]
-        orbital_gradient = (
-            jnp.einsum("pa,pi->ai", coeff_vir, grad_occ, precision=Precision.HIGHEST)
-            - jnp.einsum("pi,pa->ia", coeff_occ, grad_vir, precision=Precision.HIGHEST).T
-        )
-        fock_mo = jnp.zeros((nmo, nmo), dtype=matrix_dtype)
-        ov_block = 0.25 * orbital_gradient
-        fock_mo = fock_mo.at[nocc:, :nocc].set(ov_block)
-        fock_mo = fock_mo.at[:nocc, nocc:].set(ov_block.T)
-        fock_mo = fock_mo + jnp.diag(energy_grad)
-        overlap = getattr(molecule, "overlap_matrix", None)
-        if overlap is None:
-            ao_transform = mo_coeff
-        else:
-            overlap_arr = jnp.asarray(overlap, dtype=matrix_dtype)
-            if overlap_arr.shape != (mo_coeff.shape[0], mo_coeff.shape[0]):
-                raise ValueError(
-                    "PT2 scf AD Fock overlap_matrix shape must match AO dimension "
-                    f"(got {overlap_arr.shape} vs {(mo_coeff.shape[0], mo_coeff.shape[0])})."
-                )
-            overlap_arr = 0.5 * (overlap_arr + overlap_arr.T)
-            ao_transform = jnp.einsum(
-                "pq,qi->pi",
-                overlap_arr,
-                mo_coeff,
-                precision=Precision.HIGHEST,
-            )
-        fock_ao = jnp.einsum(
-            "pi,ij,qj->pq",
-            ao_transform,
-            fock_mo,
-            ao_transform,
-            precision=Precision.HIGHEST,
-        )
-        fock_ao = jnp.nan_to_num(fock_ao, nan=0.0, posinf=0.0, neginf=0.0)
-        return 0.5 * (fock_ao + fock_ao.T), True
 
     def _response_hf_grid_contribution_components(
         self,
@@ -1112,16 +1025,22 @@ class NeuralXCBindingMixin:
         e_hf = jnp.nan_to_num(e_hf_a + e_hf_b, nan=0.0, posinf=0.0, neginf=0.0)
         return e_hf, e_hf_a, e_hf_b
 
-    def uses_explicit_hfx_fock_for_scf(self, molecule: Any) -> bool:
-        if self._ground_state_hf_mode_for_molecule(molecule) not in {"nograd", "scf"}:
+    def uses_explicit_hfx_fock_for_scf(
+        self,
+        molecule: Any,
+        *,
+        unrestricted: bool = False,
+    ) -> bool:
+        mode = self._ground_state_hf_mode_for_molecule(molecule)
+        if mode not in {"nograd", "scf"}:
             return False
-        return (
-            self._uses_hfx_channel()
-            and (
-                has_hfx_nu_source(molecule)
-                or getattr(molecule, "hfx_fxx", None) is not None
-            )
-        )
+        if not self._uses_hfx_channel():
+            return False
+        if unrestricted:
+            return has_hfx_nu_source(molecule)
+        if mode == "scf":
+            return has_hfx_nu_source(molecule)
+        return has_hfx_nu_source(molecule) or getattr(molecule, "hfx_fxx", None) is not None
 
     def _hfx_gradient_contraction_inputs(
         self,
@@ -1362,13 +1281,8 @@ class NeuralXCBindingMixin:
     ) -> tuple[Array, Array, bool]:
         nu_source = hfx_nu_source(molecule)
         if nu_source is None:
-            fallback, used = self._contract_hfx_feature_gradients_to_restricted_fock(
-                molecule,
-                grad_a,
-                grad_b,
-                dtype=dtype,
-            )
-            return fallback, fallback, used
+            zero = self._zero_hfx_fock(molecule, dtype)
+            return zero, zero, False
 
         ao, matrix_dtype, ngrid, n_grad_channels, grad_a, grad_b, _ = (
             self._hfx_gradient_contraction_inputs(
@@ -1428,6 +1342,7 @@ class NeuralXCBindingMixin:
     ) -> tuple[Array, bool] | tuple[Array, Array, bool]:
         if (
             not self._uses_hfx_channel()
+            or (unrestricted and not has_hfx_nu_source(molecule))
             or (
                 not has_hfx_nu_source(molecule)
                 and hfx_fxx is None
@@ -2101,7 +2016,7 @@ class NeuralXCBindingMixin:
         params: PyTree,
         molecule: Any,
     ) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
-        self._raise_if_variational_pt2_scf_is_required(molecule)
+        self._raise_if_pt2_scf_derivative_is_unimplemented(molecule)
         features, grad_a, grad_b = grid_features_with_spin_gradients_for_molecule(molecule)
         semilocal_channels = self.semilocal_energy_density_channels(features)
         semilocal = jnp.sum(semilocal_channels, axis=-1)
@@ -2129,7 +2044,10 @@ class NeuralXCBindingMixin:
             else None
         )
         grid_weights = jnp.asarray(molecule.grid.weights)
-        uses_explicit_hfx_fock = self.uses_explicit_hfx_fock_for_scf(molecule)
+        uses_explicit_hfx_fock = self.uses_explicit_hfx_fock_for_scf(
+            molecule,
+            unrestricted=True,
+        )
         if uses_explicit_hfx_fock:
             alpha = jnp.asarray(0.0, dtype=grid_weights.dtype)
         else:

@@ -147,8 +147,14 @@ def build_reference_point(
         ),
         grid_ao_backend="jax",
         integral_backend=str(args.integral_backend),
-        compute_local_hfx_features=(str(args.input_feature_mode) == "canonical"),
-        compute_local_hfx_aux=(str(args.input_feature_mode) == "canonical"),
+        compute_local_hfx_features=(
+            str(args.input_feature_mode) == "canonical"
+            or bool(getattr(args, "include_hfx_channel", False))
+        ),
+        compute_local_hfx_aux=(
+            str(args.input_feature_mode) == "canonical"
+            or bool(getattr(args, "include_hfx_channel", False))
+        ),
         verbose=0,
     )
     ao = np.asarray(reference.ao, dtype=np.float64)
@@ -340,7 +346,7 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
         input_feature_mode=str(args.input_feature_mode),
         include_pt2_channel=False,
         include_hfx_channel=bool(args.include_hfx_channel),
-        ground_state_hf_mode="scf" if bool(args.include_hfx_channel) else "off",
+        ground_state_hf_mode=str(args.ground_state_hf_mode),
         name="neural_xc_h2plus_fci_ground",
     )
     coefficient_prior = neural_xc.resolve_coefficient_prior_values(
@@ -645,6 +651,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--network-architecture", choices=("simple_mlp", "graddft_residual"), default=DEFAULT_NETWORK_ARCHITECTURE)
     p.add_argument("--input-feature-mode", choices=("enhanced", "canonical", "dm21_original"), default=DEFAULT_INPUT_FEATURE_MODE)
     p.add_argument("--include-hfx-channel", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--ground-state-hf-mode", choices=("off", "nograd", "scf"), default="off")
     p.add_argument("--semilocal-xc", nargs="+", default=list(_DEFAULT_SEMILOCAL_XC))
     p.add_argument("--energy-mse-weight", type=float, default=1.0)
     p.add_argument("--energy-mae-weight", type=float, default=1.0)
@@ -678,6 +685,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = p.parse_args(argv)
     if args.input_feature_mode == "dm21_original":
         args.input_feature_mode = "canonical"
+    args.ground_state_hf_mode = str(args.ground_state_hf_mode).strip().lower()
+    if bool(args.include_hfx_channel) and args.ground_state_hf_mode == "off":
+        args.ground_state_hf_mode = "nograd"
+    if not bool(args.include_hfx_channel):
+        args.ground_state_hf_mode = "off"
     return args
 
 
@@ -741,6 +753,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "steps": int(args.steps),
             "density_constraint_weight": float(args.density_constraint_weight),
             "integral_backend": str(args.integral_backend),
+            "include_hfx_channel": bool(args.include_hfx_channel),
+            "ground_state_hf_mode": str(args.ground_state_hf_mode),
         },
     )
     try:
@@ -757,6 +771,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "lr_decay_factor": float(args.lr_decay_factor),
         "density_constraint_weight": float(args.density_constraint_weight),
         "integral_backend": str(args.integral_backend),
+        "include_hfx_channel": bool(args.include_hfx_channel),
+        "ground_state_hf_mode": str(args.ground_state_hf_mode),
         "elapsed_s": float(training["elapsed_s"]),
         "final_loss": float(training["final_loss"]),
         "final_energy_mae_ev": float(training["final_energy_mae_h"]) * HARTREE_TO_EV,

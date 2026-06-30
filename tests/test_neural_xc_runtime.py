@@ -542,6 +542,33 @@ def test_ground_state_hf_mode_nograd_uses_fixed_fxx_as_graddft_chi():
     assert jnp.allclose(hf_total, expected_total)
 
 
+def test_unrestricted_nograd_hfx_fock_requires_spin_resolved_nu():
+    molecule = _make_open_shell_toy_molecule()
+    dense_nu = _toy_hfx_nu_cache()
+    _, hfx_fxx = _toy_hfx_local_and_fxx(molecule, dense_nu)
+    molecule.hfx_nu = None
+    molecule.hfx_fxx = hfx_fxx
+    functional = make_neural_xc_functional(
+        semilocal_xc=("gga_x_pbe", "gga_c_pbe"),
+        include_hfx_channel=True,
+        ground_state_hf_mode="nograd",
+        hidden_dims=(8,),
+    )
+    grad_a = jnp.asarray([[0.2], [0.4]], dtype=dense_nu.dtype)
+    grad_b = jnp.asarray([[0.3], [0.1]], dtype=dense_nu.dtype)
+
+    fock_a, fock_b, used = functional._contract_hfx_feature_gradients_to_unrestricted_fock(
+        molecule,
+        grad_a,
+        grad_b,
+    )
+
+    assert used is False
+    assert jnp.allclose(fock_a, 0.0)
+    assert jnp.allclose(fock_b, 0.0)
+    assert not functional.uses_explicit_hfx_fock_for_scf(molecule, unrestricted=True)
+
+
 def test_nograd_local_potential_includes_fixed_hf_basis_semilocal_derivative():
     molecule = _make_toy_molecule()
     dense_nu = _toy_hfx_nu_cache()
@@ -817,11 +844,8 @@ def test_scf_direct_hfx_reuses_precontracted_fxx_without_second_chunk_read(monke
     assert count["padded"] == 1
 
 
-def test_scf_direct_hfx_uses_cached_fxx_without_hfx_nu_for_fixed_density():
-    dense_molecule = _make_toy_molecule()
+def test_ground_state_hf_mode_scf_rejects_cached_fxx_without_hfx_nu():
     dense_nu = _toy_hfx_nu_cache()
-    dense_molecule.hfx_local = None
-    dense_molecule.hfx_nu = dense_nu
 
     cached_molecule = _make_toy_molecule()
     hfx_local, hfx_fxx = _toy_hfx_local_and_fxx(cached_molecule, dense_nu)
@@ -838,34 +862,18 @@ def test_scf_direct_hfx_uses_cached_fxx_without_hfx_nu_for_fixed_density():
         hf_input_mode="spin_resolved",
         response_hf_mode="approx",
         hfx_channels=1,
-        name="toy_scf_cached_fxx",
+        name="toy_scf_reject_cached_fxx",
     )
     params = functional.init_from_molecule(jax.random.PRNGKey(247), cached_molecule)
 
-    dense_components = functional.scf_potential_components_and_alpha(
-        params,
-        dense_molecule,
-    )
-    cached_components = functional.scf_potential_components_and_alpha(
-        params,
-        cached_molecule,
-    )
+    assert not functional.uses_explicit_hfx_fock_for_scf(cached_molecule)
     density = cached_molecule.rdm1.sum(axis=0)
-    dense_extra_fock = functional.scf_extra_fock_for_density(
-        params,
-        dense_molecule,
-        density,
-    )
-    cached_extra_fock = functional.scf_extra_fock_for_density(
-        params,
-        cached_molecule,
-        density,
-    )
+    molecule_at_density = functional.scf_molecule_with_density(cached_molecule, density)
+    assert getattr(molecule_at_density, "hfx_local", None) is None
+    assert getattr(molecule_at_density, "hfx_fxx", None) is None
 
-    assert jnp.allclose(cached_components[-1], dense_components[-1], atol=1e-8)
-    assert jnp.linalg.norm(cached_components[-1]) > 0.0
-    assert jnp.allclose(cached_extra_fock, dense_extra_fock, atol=1e-8)
-    assert jnp.linalg.norm(cached_extra_fock) > 0.0
+    with pytest.raises(ValueError, match="ground_state_hf_mode='scf'.*hfx_nu"):
+        functional.scf_potential_components_and_alpha(params, cached_molecule)
 
 
 def _make_pt2_toy_molecule():
@@ -2645,7 +2653,7 @@ def test_ground_state_pt2_mode_scf_init_does_not_require_static_integrals():
     assert params is not None
 
 
-def test_ground_state_pt2_mode_scf_fock_includes_ad_pt2_response():
+def test_ground_state_pt2_mode_scf_rejects_unimplemented_orbital_derivative_fock():
     molecule = _make_pt2_toy_molecule()
     semilocal_zero = lambda features: jnp.zeros_like(features.rho)
     functional = NeuralXCFunctional(
@@ -2654,26 +2662,22 @@ def test_ground_state_pt2_mode_scf_fock_includes_ad_pt2_response():
         include_pt2_channel=True,
         ground_state_pt2_mode="scf",
         pt2_channel_mode="local_exact",
-        name="pt2_scf_ad_variational_fock",
+        name="pt2_scf_orbital_derivative_unimplemented",
     )
     params = functional.init_from_molecule(jax.random.PRNGKey(241), molecule)
 
-    _vxc_matrix, alpha, extra_fock, xc_energy = functional.scf_xc_fock_terms(
-        params,
-        molecule,
-        weights=molecule.grid.weights,
-        functional_dtype=jnp.float64,
-        vxc_clip=20.0,
-    )
-
-    assert jnp.allclose(alpha, 0.0, atol=1e-12)
-    assert jnp.isfinite(xc_energy)
-    assert jnp.all(jnp.isfinite(extra_fock))
-    assert jnp.allclose(extra_fock, extra_fock.T, atol=1e-12)
-    assert jnp.linalg.norm(extra_fock) > 0.0
+    assert not functional.uses_explicit_pt2_fock_for_scf(molecule)
+    with pytest.raises(NotImplementedError, match="PT2 scf.*orbital derivative"):
+        functional.scf_xc_fock_terms(
+            params,
+            molecule,
+            weights=molecule.grid.weights,
+            functional_dtype=jnp.float64,
+            vxc_clip=20.0,
+        )
 
 
-def test_ground_state_pt2_mode_scf_ad_fock_uses_overlap_metric(monkeypatch):
+def test_ground_state_pt2_mode_scf_derivative_fock_is_not_exposed(monkeypatch):
     molecule = _make_pt2_toy_molecule()
     overlap = jnp.asarray([[1.2, 0.2], [0.2, 0.9]], dtype=jnp.float64)
     evals, evecs = jnp.linalg.eigh(overlap)
@@ -2710,19 +2714,13 @@ def test_ground_state_pt2_mode_scf_ad_fock_uses_overlap_metric(monkeypatch):
     grad = jnp.asarray([0.5, -0.25], dtype=jnp.float64)
     features = restricted_grid_features(molecule)
 
-    fock, used = functional._contract_pt2_scf_feature_gradient_to_restricted_fock(
-        molecule,
-        grad,
-        features=features,
-        dtype=jnp.float64,
-    )
-
-    energy_grad = jnp.asarray([grad[0] - grad[1], 2.0 * grad[0] + grad[1]])
-    transform = overlap @ mo_coeff
-    expected = transform @ jnp.diag(energy_grad) @ transform.T
-    assert used
-    assert jnp.allclose(fock, expected, atol=1e-12)
-    assert not jnp.allclose(fock, mo_coeff @ jnp.diag(energy_grad) @ mo_coeff.T)
+    with pytest.raises(NotImplementedError, match="PT2 scf.*orbital derivative"):
+        functional._contract_pt2_scf_feature_gradient_to_restricted_fock(
+            molecule,
+            grad,
+            features=features,
+            dtype=jnp.float64,
+        )
 
 
 def test_ground_state_pt2_mode_nograd_fock_requires_handwritten_response_cache():
@@ -2784,6 +2782,51 @@ def test_ground_state_pt2_mode_nograd_contracts_handwritten_response_to_fock():
     assert jnp.allclose(alpha, 0.0, atol=1e-12)
     assert jnp.allclose(extra_fock, expected_fock, atol=1e-12)
     assert jnp.allclose(xc_energy, expected_energy, atol=1e-12)
+
+
+def test_unrestricted_pt2_response_cache_is_spin_resolved_and_reconstructs_local():
+    molecule = _make_pt2_toy_molecule()
+
+    pt2_local, response = _local_pt2_feature_from_unrestricted_orbitals(
+        molecule.ao,
+        molecule.mo_coeff,
+        molecule.mo_occ,
+        molecule.mo_energy,
+        rep_tensor=molecule.rep_tensor,
+        return_fock_response=True,
+    )
+    reconstructed = jnp.einsum(
+        "spq,sgpq->g",
+        molecule.rdm1,
+        response,
+    )
+
+    assert response.shape == (
+        2,
+        molecule.ao.shape[0],
+        molecule.ao.shape[1],
+        molecule.ao.shape[1],
+    )
+    assert jnp.allclose(reconstructed, pt2_local, atol=1e-10)
+
+
+def test_unrestricted_pt2_fock_rejects_restricted_response_cache():
+    molecule = _make_pt2_toy_molecule()
+    molecule.pt2_fock_response = jnp.ones((2, 2, 2), dtype=jnp.float64)
+    functional = NeuralXCFunctional(
+        model=_ConstantChannelModel((0.0, 0.5)),
+        semilocal_energy_density_fn=lambda features: jnp.zeros_like(features.rho),
+        include_pt2_channel=True,
+        ground_state_pt2_mode="nograd",
+        pt2_channel_mode="local_exact",
+        name="pt2_unrestricted_reject_restricted_response",
+    )
+
+    with pytest.raises(ValueError, match="spin-resolved"):
+        functional._contract_pt2_feature_gradient_to_unrestricted_fock(
+            molecule,
+            jnp.ones((2,), dtype=jnp.float64),
+        )
 
 
 def test_restricted_scf_preserves_pt2_local_only_for_nograd_mode():
