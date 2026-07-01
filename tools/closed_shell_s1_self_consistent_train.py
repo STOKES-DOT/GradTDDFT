@@ -53,6 +53,7 @@ from td_graddft.training import (
     predict_excitation_energies,
     predict_ground_state_molecule,
     predict_ground_state_total_energy,
+    load_params_checkpoint,
     save_params_checkpoint,
 )
 
@@ -251,6 +252,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="In streaming mode, start step 1 without a pre-training full-dataset eval.",
     )
     p.add_argument("--eval-interval", type=int, default=50)
+    p.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="Optional parameter checkpoint used to initialize training.",
+    )
+    p.add_argument(
+        "--start-step",
+        type=int,
+        default=0,
+        help="Global training step already completed by --init-checkpoint.",
+    )
     p.add_argument(
         "--checkpoint-interval",
         type=int,
@@ -1032,16 +1044,17 @@ def _train_streaming(
             has_validation=bool(val_dataset),
         )
     best_params = state.params
-    best_step = 0
+    start_step = max(0, int(getattr(args, "start_step", 0)))
+    best_step = start_step
 
-    history_steps = [0]
+    history_steps = [start_step]
     loss_history = [initial_train_loss]
     s1_mae_history = [initial_train_metrics["s1_mae"]]
     grad_norm_history = [float("nan")]
     grad_abs_max_history = [float("nan")]
     param_update_norm_history = [float("nan")]
     nonfinite_grad_fraction_history = [0.0]
-    eval_steps = [0]
+    eval_steps = [start_step]
     eval_train_loss_history = [initial_train_loss]
     eval_train_s1_mae_history = [initial_train_metrics["s1_mae"]]
     eval_val_loss_history = [initial_val_loss]
@@ -1051,13 +1064,14 @@ def _train_streaming(
         "[train] "
         f"steps={int(args.steps)} mode={str(args.training_mode)} "
         f"objective=s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'} "
+        f"start_step={start_step} "
         f"train_step_mode=stream_single_molecule update_mode={stream_update_mode} "
         f"train_size={len(train_dataset)} "
         f"val_size={len(val_dataset)}"
     )
 
     t0 = time.perf_counter()
-    for step in range(1, int(args.steps) + 1):
+    for step in range(start_step + 1, int(args.steps) + 1):
         losses: list[float] = []
         s1_maes: list[float] = []
         grad_norms: list[float] = []
@@ -1366,7 +1380,16 @@ def _train(
             decay_rate=float(args.lr_decay_factor),
             staircase=True,
         )
-        base_optimizer = optax.adam(lr_schedule)
+        optimizer_lr_schedule = lr_schedule
+        start_step = max(0, int(getattr(args, "start_step", 0)))
+        if start_step > 0:
+            schedule_offset = _stream_lr_schedule_index(
+                args,
+                step=start_step + 1,
+                train_size=len(train_dataset),
+            )
+            optimizer_lr_schedule = lambda count: lr_schedule(count + schedule_offset)
+        base_optimizer = optax.adam(optimizer_lr_schedule)
     else:
         lr_schedule = None
         base_optimizer = optax.adam(float(args.learning_rate))
@@ -1381,6 +1404,13 @@ def _train(
         init_molecule,
         optimizer,
     )
+    if args.init_checkpoint is not None:
+        checkpoint_params = load_params_checkpoint(args.init_checkpoint, template=state.params)
+        state = state.replace(params=checkpoint_params)
+        logger.log(
+            "[train_init] loaded initial params checkpoint "
+            f"{args.init_checkpoint} at start_step={int(args.start_step)}"
+        )
     if bool(args.stream_train):
         return _train_streaming(
             state,

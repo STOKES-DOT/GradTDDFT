@@ -412,8 +412,8 @@ def test_restricted_scf_forward_updates_density_and_is_differentiable(gradient_m
     [
         ("expl", True, 2, jnp.asarray([[1.7, 0.0], [0.0, 0.3]], dtype=jnp.float32)),
         ("impl", True, 2, jnp.asarray([[1.7, 0.0], [0.0, 0.3]], dtype=jnp.float32)),
-        ("expl", False, 4, 4.0 * jnp.eye(2, dtype=jnp.float32)),
-        ("impl", False, 4, 4.0 * jnp.eye(2, dtype=jnp.float32)),
+        ("expl", False, 2, jnp.asarray([[1.7, 0.0], [0.0, 0.3]], dtype=jnp.float32)),
+        ("impl", False, 2, jnp.asarray([[1.7, 0.0], [0.0, 0.3]], dtype=jnp.float32)),
     ],
 )
 def test_restricted_scf_returns_selected_iterate_for_best_rms(

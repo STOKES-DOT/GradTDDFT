@@ -388,6 +388,7 @@ def unrestricted_reference_from_pyscf(
     hfx_nu = None
     hfx_nu_api = None
     pt2_local = None
+    pt2_fock_response = None
     if compute_local_hfx_features:
         use_chunked_hfx_nu = bool(compute_local_hfx_aux) and _use_chunked_hfx_nu(
             mf.mol,
@@ -419,7 +420,7 @@ def unrestricted_reference_from_pyscf(
         hfx_local = _backend_array(hfx_local_np, array_backend=array_backend)
         hfx_fxx = _backend_array(hfx_fxx_np, array_backend=array_backend)
     if compute_local_pt2_features:
-        pt2_local_jax = _local_pt2_feature_from_unrestricted_orbitals(
+        pt2_local_jax, pt2_fock_response_jax = _local_pt2_feature_from_unrestricted_orbitals(
             jnp.asarray(ao_np),
             jnp.asarray(mo_coeff_np),
             jnp.asarray(mo_occ_np),
@@ -429,8 +430,13 @@ def unrestricted_reference_from_pyscf(
                 None if eri_pair_matrix_np is None else jnp.asarray(eri_pair_matrix_np)
             ),
             df_factors=None if df_factors_np is None else jnp.asarray(df_factors_np),
+            return_fock_response=True,
         )
         pt2_local = _backend_array(pt2_local_jax, array_backend=array_backend)
+        pt2_fock_response = _backend_array(
+            pt2_fock_response_jax,
+            array_backend=array_backend,
+        )
 
     return UnrestrictedMolecule(
         ao=_backend_array(ao_np, array_backend=array_backend),
@@ -469,6 +475,7 @@ def unrestricted_reference_from_pyscf(
         hfx_nu=hfx_nu,
         hfx_nu_api=hfx_nu_api,
         pt2_local=pt2_local,
+        pt2_fock_response=pt2_fock_response,
         df_factors=(
             None
             if df_factors_np is None

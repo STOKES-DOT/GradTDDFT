@@ -103,6 +103,69 @@ def test_h2plus_ground_training_data_uses_density_matrix_target():
     assert datum.density_matrix_constraint_weight == 0.0
 
 
+def test_h2plus_ground_hfx_cli_defaults_to_nograd_and_allows_scf():
+    module = _load_tool_module(
+        "tools/h2plus_fci_ground_train5_dense100.py",
+        "h2plus_fci_ground_train5_dense100_test_hfx_mode",
+    )
+
+    default_args = module.parse_args(["--include-hfx-channel"])
+    scf_args = module.parse_args(["--include-hfx-channel", "--ground-state-hf-mode", "scf"])
+    off_args = module.parse_args(["--no-include-hfx-channel", "--ground-state-hf-mode", "scf"])
+
+    assert default_args.ground_state_hf_mode == "nograd"
+    assert scf_args.ground_state_hf_mode == "scf"
+    assert off_args.ground_state_hf_mode == "off"
+
+
+def test_h2plus_ground_reference_builder_requests_hfx_cache_when_hfx_channel_enabled(monkeypatch):
+    module = _load_tool_module(
+        "tools/h2plus_fci_ground_train5_dense100.py",
+        "h2plus_fci_ground_train5_dense100_test_reference_hfx",
+    )
+    captured: list[dict[str, object]] = []
+
+    def fake_solve_h2plus_fci_one_electron(*args, **kwargs):
+        return (
+            -0.5,
+            np.asarray([-0.5], dtype=np.float64),
+            np.asarray([[1.0]], dtype=np.float64),
+            "fci_one_electron",
+            True,
+        )
+
+    def fake_unrestricted_molecule_from_spec_with_jax_uks(**kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(
+            ao=np.asarray([[1.0], [1.0]], dtype=np.float64),
+            grid=SimpleNamespace(weights=np.asarray([0.5, 0.5], dtype=np.float64)),
+        )
+
+    monkeypatch.setattr(module, "solve_h2plus_fci_one_electron", fake_solve_h2plus_fci_one_electron)
+    monkeypatch.setattr(
+        module,
+        "unrestricted_molecule_from_spec_with_jax_uks",
+        fake_unrestricted_molecule_from_spec_with_jax_uks,
+    )
+    args = module.parse_args(
+        [
+            "--include-hfx-channel",
+            "--input-feature-mode",
+            "enhanced",
+            "--basis",
+            "sto-3g",
+            "--integral-backend",
+            "cpu",
+        ]
+    )
+
+    point = module.build_reference_point(1.2, args=args)
+
+    assert captured[0]["compute_local_hfx_features"] is True
+    assert captured[0]["compute_local_hfx_aux"] is True
+    assert point.reference_backend == "fci_one_electron"
+
+
 def test_h2plus_ground_script_does_not_emit_dm_constraint_artifacts():
     source = Path("tools/h2plus_fci_ground_train5_dense100.py").read_text(encoding="utf-8")
 

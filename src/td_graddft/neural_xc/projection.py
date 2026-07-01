@@ -59,10 +59,12 @@ class NeuralXCProjectionMixin:
                 if hasattr(molecule, name):
                     updates[name] = getattr(molecule, name)
             nu_source = hfx_nu_source(molecule)
-            if hasattr(molecule, "hfx_local") and nu_source is not None:
+            if hasattr(molecule, "hfx_local") and (
+                ground_state_hf_mode != "nograd" or nu_source is not None
+            ):
                 updates["hfx_local"] = None
             if hasattr(molecule, "hfx_fxx"):
-                if nu_source is not None and ground_state_hf_mode != "nograd":
+                if ground_state_hf_mode != "nograd":
                     updates["hfx_fxx"] = None
                 else:
                     fxx_ref = getattr(molecule, "hfx_fxx", None)
@@ -949,7 +951,7 @@ class NeuralXCProjectionMixin:
         """Explicit handwritten local-channel contribution to the SCF Fock."""
 
         molecule_iter = self.scf_molecule_with_density(molecule, density)
-        pt2_guard = getattr(self, "_raise_if_variational_pt2_scf_is_required", None)
+        pt2_guard = getattr(self, "_raise_if_pt2_scf_derivative_is_unimplemented", None)
         if callable(pt2_guard):
             pt2_guard(molecule_iter)
         uses_explicit_pt2 = getattr(self, "uses_explicit_pt2_fock_for_scf", None)

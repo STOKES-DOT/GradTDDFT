@@ -1111,7 +1111,8 @@ def _local_pt2_feature_from_unrestricted_orbitals(
     occupation_tolerance: float = 1e-8,
     density_floor: float = 1e-12,
     return_total_energy: bool = False,
-) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
+    return_fock_response: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, ...]:
     ao_arr = jnp.asarray(ao)
     mo_coeff_arr = jnp.asarray(mo_coeff)
     mo_occ_arr = jnp.asarray(mo_occ)
@@ -1135,14 +1136,12 @@ def _local_pt2_feature_from_unrestricted_orbitals(
     occ_b = jnp.where(mo_occ_arr[1] > occupation_tolerance)[0]
     vir_b = jnp.where(mo_occ_arr[1] <= occupation_tolerance)[0]
 
-    occ_coeff = jnp.concatenate(
-        [mo_coeff_arr[0][:, occ_a], mo_coeff_arr[1][:, occ_b]],
-        axis=1,
-    )
-    vir_coeff = jnp.concatenate(
-        [mo_coeff_arr[0][:, vir_a], mo_coeff_arr[1][:, vir_b]],
-        axis=1,
-    )
+    occ_coeff_a = mo_coeff_arr[0][:, occ_a]
+    occ_coeff_b = mo_coeff_arr[1][:, occ_b]
+    vir_coeff_a = mo_coeff_arr[0][:, vir_a]
+    vir_coeff_b = mo_coeff_arr[1][:, vir_b]
+    occ_coeff = jnp.concatenate([occ_coeff_a, occ_coeff_b], axis=1)
+    vir_coeff = jnp.concatenate([vir_coeff_a, vir_coeff_b], axis=1)
     occ_spin = jnp.concatenate(
         [
             jnp.zeros((occ_a.shape[0],), dtype=jnp.int32),
@@ -1162,10 +1161,17 @@ def _local_pt2_feature_from_unrestricted_orbitals(
     nvir_total = int(vir_coeff.shape[1])
     zero_local = jnp.zeros((int(ao_arr.shape[0]),), dtype=ao_arr.dtype)
     zero_total = jnp.asarray(0.0, dtype=ao_arr.dtype)
+    zero_response = jnp.zeros(
+        (2, int(ao_arr.shape[0]), int(ao_arr.shape[1]), int(ao_arr.shape[1])),
+        dtype=ao_arr.dtype,
+    )
     if nocc_total < 2 or nvir_total < 2:
+        outputs = [zero_local]
+        if return_fock_response:
+            outputs.append(zero_response)
         if return_total_energy:
-            return zero_local, zero_total
-        return zero_local
+            outputs.append(zero_total)
+        return tuple(outputs) if len(outputs) > 1 else zero_local
 
     pair = None if eri_pair_matrix is None else jnp.asarray(eri_pair_matrix)
     factors = None if df_factors is None else jnp.asarray(df_factors)
@@ -1284,9 +1290,57 @@ def _local_pt2_feature_from_unrestricted_orbitals(
     )
     local_energy = jnp.nan_to_num(local_energy, nan=0.0, posinf=0.0, neginf=0.0)
     total_energy = jnp.nan_to_num(total_energy, nan=0.0, posinf=0.0, neginf=0.0)
+    outputs = [local_energy]
+    if return_fock_response:
+        source_occ = jnp.einsum(
+            "ga,gjb,iajb->gi",
+            rho_v,
+            pair_potential,
+            pair_weights,
+            precision=Precision.HIGHEST,
+        )
+        nocc_a = int(occ_coeff_a.shape[1])
+        source_occ_a = source_occ[:, :nocc_a]
+        source_occ_b = source_occ[:, nocc_a:]
+
+        def spin_response(
+            occ_coeff_spin: jnp.ndarray,
+            source_occ_spin: jnp.ndarray,
+        ) -> jnp.ndarray:
+            if int(occ_coeff_spin.shape[1]) <= 0:
+                return zero_response[0]
+            occ_gram_inv = jnp.linalg.pinv(
+                jnp.einsum(
+                    "pi,pj->ij",
+                    occ_coeff_spin,
+                    occ_coeff_spin,
+                    precision=Precision.HIGHEST,
+                )
+            )
+            source_ao = jnp.einsum(
+                "pi,ij,gj->gp",
+                occ_coeff_spin,
+                occ_gram_inv,
+                source_occ_spin,
+                precision=Precision.HIGHEST,
+            )
+            response = 0.5 * (
+                ao_arr[:, :, None] * source_ao[:, None, :]
+                + source_ao[:, :, None] * ao_arr[:, None, :]
+            )
+            return jnp.nan_to_num(response, nan=0.0, posinf=0.0, neginf=0.0)
+
+        outputs.append(
+            jnp.stack(
+                [
+                    spin_response(occ_coeff_a, source_occ_a),
+                    spin_response(occ_coeff_b, source_occ_b),
+                ]
+            )
+        )
     if return_total_energy:
-        return local_energy, total_energy
-    return local_energy
+        outputs.append(total_energy)
+    return tuple(outputs) if len(outputs) > 1 else local_energy
 
 
 __all__ = [

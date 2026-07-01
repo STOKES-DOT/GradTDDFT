@@ -428,7 +428,11 @@ def _molecule_like_state_for_bound_xc(
         atom_coords=getattr(molecule_template, "atom_coords", None),
         atom_charges=getattr(molecule_template, "atom_charges", None),
         hfx_omega_values=getattr(molecule_template, "hfx_omega_values", None),
+        hfx_local=getattr(molecule_template, "hfx_local", None),
+        hfx_fxx=getattr(molecule_template, "hfx_fxx", None),
         hfx_nu=getattr(molecule_template, "hfx_nu", None),
+        pt2_local=getattr(molecule_template, "pt2_local", None),
+        pt2_fock_response=getattr(molecule_template, "pt2_fock_response", None),
     )
 
 

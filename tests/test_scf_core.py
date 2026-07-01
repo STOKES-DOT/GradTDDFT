@@ -158,7 +158,11 @@ def test_rks_and_uks_build_molecule_like_pytree_states():
         atom_coords=jnp.zeros((2, 3)),
         atom_charges=jnp.asarray([1.0, 8.0]),
         hfx_omega_values=(0.0, 0.4),
+        hfx_local=jnp.ones((2, ngrids, 2)),
+        hfx_fxx=jnp.ones((2, ngrids, nao)),
         hfx_nu=jnp.zeros((2, ngrids, nao, nao)),
+        pt2_local=jnp.asarray([0.2, -0.1, 0.05]),
+        pt2_fock_response=jnp.ones((2, ngrids, nao, nao)),
     )
     unrestricted_state = uks._molecule_like_state_for_bound_xc(
         density_a=density,
@@ -180,7 +184,11 @@ def test_rks_and_uks_build_molecule_like_pytree_states():
     assert isinstance(unrestricted_state, features.MoleculeLikeState)
     assert isinstance(unrestricted_state.grid, features.MoleculeGridView)
     assert unrestricted_state.grid.coords is not None
+    assert unrestricted_state.hfx_local is not None
+    assert unrestricted_state.hfx_fxx is not None
     assert unrestricted_state.hfx_nu is not None
+    assert unrestricted_state.pt2_local is not None
+    assert unrestricted_state.pt2_fock_response is not None
     assert len(jax.tree_util.tree_leaves(unrestricted_state)) > 0
 
 

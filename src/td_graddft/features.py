@@ -74,7 +74,11 @@ class MoleculeLikeState:
     atom_coords: Array | None = None
     atom_charges: Array | None = None
     hfx_omega_values: Array | None = None
+    hfx_local: Array | None = None
+    hfx_fxx: Array | None = None
     hfx_nu: Array | None = None
+    pt2_local: Array | None = None
+    pt2_fock_response: Array | None = None
 
 
 def molecule_grid_view(
