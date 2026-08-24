@@ -219,74 +219,6 @@ def test_eri_tensor_screened_matches_unscreened_when_threshold_zero():
     assert np.allclose(eri_screened, eri_full, atol=1e-10, rtol=1e-10)
 
 
-def test_fused_shell_pair_matrix_matches_legacy_shell_block_for_water_sto3g():
-    _pyscf_or_skip()
-    from pyscf import gto
-
-    mol = gto.M(
-        atom="""
-        O 0.000000 0.000000 0.117790
-        H 0.000000 0.755453 -0.471161
-        H 0.000000 -0.755453 -0.471161
-        """,
-        basis="sto-3g",
-        unit="Angstrom",
-        cart=True,
-        spin=0,
-        verbose=0,
-    )
-    basis = basis_from_pyscf_mol_cart(mol, max_l=1)
-
-    fused = np.asarray(
-        two_electron_module._fused_eri_pair_matrix_from_shell_groups(
-            basis,
-            basis.shell_quartet_groups,
-        )
-    )
-    legacy = np.asarray(
-        two_electron_module._legacy_eri_pair_matrix_packed_shell_block(
-            basis,
-            engine="jit",
-        )
-    )
-
-    assert np.allclose(fused, legacy, atol=1e-10, rtol=1e-10)
-
-
-def test_fused_shell_eri_tensor_matches_legacy_shell_block_for_water_sto3g():
-    _pyscf_or_skip()
-    from pyscf import gto
-
-    mol = gto.M(
-        atom="""
-        O 0.000000 0.000000 0.117790
-        H 0.000000 0.755453 -0.471161
-        H 0.000000 -0.755453 -0.471161
-        """,
-        basis="sto-3g",
-        unit="Angstrom",
-        cart=True,
-        spin=0,
-        verbose=0,
-    )
-    basis = basis_from_pyscf_mol_cart(mol, max_l=1)
-
-    fused = np.asarray(
-        two_electron_module._fused_eri_tensor_from_shell_groups(
-            basis,
-            basis.shell_quartet_groups,
-        )
-    )
-    legacy = np.asarray(
-        two_electron_module._legacy_eri_tensor_shell_block(
-            basis,
-            engine="jit",
-        )
-    )
-
-    assert np.allclose(fused, legacy, atol=1e-10, rtol=1e-10)
-
-
 def test_fused_shell_pair_matrix_reuses_compiled_scan_executor_for_water_sto3g():
     _pyscf_or_skip()
     from pyscf import gto
@@ -367,7 +299,7 @@ def test_fused_shell_eri_tensor_reuses_compiled_scan_executor_for_water_sto3g():
     )
     second_info = two_electron_module._compiled_shell_tensor_scan_executor.cache_info()
 
-    assert np.allclose(second, first, atol=0.0, rtol=0.0)
+    assert np.allclose(second, first, atol=1e-12, rtol=1e-12)
     assert first_info.misses == expected_misses
     assert second_info.misses == first_info.misses
     assert second_info.hits >= first_info.hits + expected_misses

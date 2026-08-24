@@ -2,23 +2,11 @@ from pathlib import Path
 
 
 EXAMPLES_USING_PUBLIC_TDSCF = (
-    Path("examples/compare_h2_fci_vs_neural_spectrum.py"),
-    Path("examples/evaluate_h2_three_loss_checkpoints.py"),
-    Path("examples/h2_fci_train_and_excited_compare.py"),
-    Path("examples/h2_three_loss_dissociation_compare.py"),
-    Path("examples/qh9_short_benchmark.py"),
-    Path("examples/water_overfit_with_orbitals.py"),
+    Path("examples/compare_pyscf_vs_jax_tddft_no_neural.py"),
 )
 
 EXAMPLES_USING_NEURAL_XC_FACADE = (
-    Path("examples/compare_h2_fci_vs_neural_spectrum.py"),
-    Path("examples/evaluate_h2_three_loss_checkpoints.py"),
-    Path("examples/h2_fci_ground_curve.py"),
     Path("examples/h2_fci_self_consistent_train.py"),
-    Path("examples/h2_fci_train_and_excited_compare.py"),
-    Path("examples/h2_three_loss_dissociation_compare.py"),
-    Path("examples/qh9_short_benchmark.py"),
-    Path("examples/water_overfit_with_orbitals.py"),
 )
 
 

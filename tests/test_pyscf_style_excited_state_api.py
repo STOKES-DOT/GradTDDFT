@@ -8,6 +8,55 @@ from td_graddft import gto, scf, tdscf
 from td_graddft.spectra import HARTREE_TO_EV
 
 
+def test_tdscf_facade_defaults_match_pyscf_tda_solver_settings():
+    reference = types.SimpleNamespace(
+        mo_coeff=jnp.zeros((2, 2)),
+        mo_occ=jnp.asarray([2.0, 0.0]),
+        mo_energy=jnp.asarray([-0.5, 0.1]),
+    )
+
+    td = tdscf.TDA(reference)
+
+    assert td.davidson_tol == pytest.approx(1e-5)
+    assert td.davidson_max_iter == 100
+    assert td.excitation_threshold == pytest.approx(1e-3)
+
+
+def test_tdscf_tda_propagates_implicit_eigenvector_settings(monkeypatch):
+    import td_graddft.tdscf.api as api
+
+    captured = {}
+
+    class FakeRestrictedCasidaTDDFT:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def tda(self, nstates=None):
+            return types.SimpleNamespace(
+                excitation_energies=jnp.asarray([0.1]),
+                amplitudes=jnp.asarray([[[1.0]]]),
+            )
+
+    monkeypatch.setattr(api, "RestrictedCasidaTDDFT", FakeRestrictedCasidaTDDFT)
+    reference = types.SimpleNamespace(
+        mo_coeff=jnp.zeros((2, 2)),
+        mo_occ=jnp.asarray([2.0, 0.0]),
+        mo_energy=jnp.asarray([-0.5, 0.1]),
+    )
+    td = tdscf.TDA(
+        reference,
+        tda_gradient_mode="implicit_eigenvector",
+        eigenvector_adjoint_tol=2e-7,
+        eigenvector_adjoint_max_iter=72,
+    )
+
+    td.kernel(nstates=1)
+
+    assert captured["tda_gradient_mode"] == "implicit_eigenvector"
+    assert captured["eigenvector_adjoint_tol"] == 2e-7
+    assert captured["eigenvector_adjoint_max_iter"] == 72
+
+
 def test_tda_from_restricted_mf_stores_fields_and_spectra(monkeypatch):
     import td_graddft.tdscf.api as api
 
@@ -65,6 +114,37 @@ def test_tda_from_restricted_mf_stores_fields_and_spectra(monkeypatch):
     assert captured["init"]["xc_functional"].xc_spec == "pbe"
     np.testing.assert_allclose(np.asarray(td.oscillator_strength()), np.ones(2))
     assert td.transition_dipole().shape == (2, 3)
+
+
+def test_tda_facade_preserves_nonconverged_ritz_result(monkeypatch):
+    import td_graddft.tdscf.api as api
+
+    class FakeRestrictedCasidaTDDFT:
+        def __init__(self, **kwargs):
+            pass
+
+        def tda(self, nstates=None):
+            return types.SimpleNamespace(
+                excitation_energies=jnp.asarray([0.10]),
+                amplitudes="amplitudes",
+                converged=False,
+            )
+
+    monkeypatch.setattr(api, "RestrictedCasidaTDDFT", FakeRestrictedCasidaTDDFT)
+
+    reference = types.SimpleNamespace(
+        mo_coeff=jnp.zeros((2, 2)),
+        mo_occ=jnp.asarray([2.0, 0.0]),
+        mo_energy=jnp.asarray([-0.5, 0.1]),
+    )
+
+    td = tdscf.TDA(reference)
+    result = td.kernel(nstates=1)
+
+    assert result is td.result
+    assert td.e is result.excitation_energies
+    assert td.xy == "amplitudes"
+    assert td.converged is False
 
 
 def test_tddft_from_raw_restricted_reference_uses_kernel(monkeypatch):

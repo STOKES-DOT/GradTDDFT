@@ -58,6 +58,35 @@ def test_unrestricted_molecule_from_spec_with_jax_uks_h_atom_smoke():
     assert np.isfinite(float(ref.exact_exchange_fraction))
 
 
+def test_unrestricted_molecule_from_spec_with_jax_uks_builds_zero_local_pt2_for_h_atom():
+    ref = unrestricted_molecule_from_spec_with_jax_uks(
+        atom="H 0.0 0.0 0.0",
+        basis="sto-3g",
+        xc_spec="hf",
+        unit="Angstrom",
+        charge=0,
+        spin=1,
+        cart=True,
+        grids_level=0,
+        max_l=0,
+        uks_config=UKSConfig(
+            xc_spec="hf",
+            max_cycle=12,
+            conv_tol=1e-9,
+            conv_tol_density=1e-7,
+            damping=0.1,
+        ),
+        grid_ao_backend="jax",
+        integral_backend="jax",
+        compute_local_pt2_features=True,
+    )
+
+    assert ref.pt2_local is not None
+    assert ref.pt2_local.ndim == 1
+    assert ref.pt2_local.shape[0] == ref.ao.shape[0]
+    assert np.allclose(np.asarray(ref.pt2_local), 0.0, atol=1e-10)
+
+
 def test_unrestricted_molecule_from_spec_with_jax_uks_invalid_spin_parity_raises():
     with pytest.raises(ValueError, match="N \\+ spin must be even"):
         _ = unrestricted_molecule_from_spec_with_jax_uks(

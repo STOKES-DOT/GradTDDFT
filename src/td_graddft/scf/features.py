@@ -5,7 +5,7 @@ from typing import Any, Literal
 import jax.numpy as jnp
 from jax.lax import Precision
 
-from ..data.grid_ao import evaluate_cartesian_ao, evaluate_cartesian_ao_with_derivatives
+from ..data.grid_ao import evaluate_cartesian_ao_with_derivatives
 
 
 def _charge_center(mol: Any) -> jnp.ndarray:
@@ -24,24 +24,6 @@ def _eval_grid_ao(
     coords_arr = jnp.asarray(coords)
     if backend == "jax":
         return evaluate_cartesian_ao_with_derivatives(basis, coords_arr, deriv=1)
-    raise ValueError(
-        f"Unsupported grid_ao_backend={backend!r}. Only grid_ao_backend='jax' is supported."
-    )
-
-
-def _eval_grid_ao_laplacian(
-    mol: Any,
-    basis: Any,
-    coords: Any,
-    *,
-    backend: Literal["jax"] = "jax",
-) -> jnp.ndarray:
-    del mol
-    backend = str(backend).lower()
-    coords_arr = jnp.asarray(coords)
-    if backend == "jax":
-        ao_deriv2 = evaluate_cartesian_ao(basis, coords_arr, deriv=2)
-        return ao_deriv2[4]
     raise ValueError(
         f"Unsupported grid_ao_backend={backend!r}. Only grid_ao_backend='jax' is supported."
     )
@@ -94,6 +76,5 @@ def _restricted_response_eri_slices_from_mo_tensor(
 __all__ = [
     "_charge_center",
     "_eval_grid_ao",
-    "_eval_grid_ao_laplacian",
     "_restricted_response_eri_slices_from_mo_tensor",
 ]

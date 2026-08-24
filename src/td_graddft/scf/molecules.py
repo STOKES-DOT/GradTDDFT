@@ -23,6 +23,8 @@ class QuadratureGrid:
         "scf_converged",
         "runtime_scf_backend",
         "runtime_scf_options",
+        "hfx_nu_api",
+        "response_df_metadata",
     )
 )
 @dataclass(frozen=True)
@@ -49,10 +51,17 @@ class RestrictedMolecule:
     nocc: int | None = None
     hfx_omega_values: jnp.ndarray | None = None
     hfx_local: jnp.ndarray | None = None
+    hfx_fxx: jnp.ndarray | None = None
     hfx_nu: jnp.ndarray | None = None
+    hfx_nu_api: Any | None = None
     pt2_local: jnp.ndarray | None = None
+    pt2_fock_response: jnp.ndarray | None = None
+    neural_xc_grid_payload: Any | None = None
     scf_initial_density: jnp.ndarray | None = None
     df_factors: jnp.ndarray | None = None
+    response_df_factors_j: jnp.ndarray | None = None
+    response_df_factors_k: jnp.ndarray | None = None
+    response_df_metadata: Any | None = None
     eri_pair_matrix: jnp.ndarray | None = None
     eri_ovov: jnp.ndarray | None = None
     eri_ovvo: jnp.ndarray | None = None
@@ -66,7 +75,13 @@ class RestrictedMolecule:
 
 
 @pytree_dataclass(
-    static_fields=("nocc_alpha", "nocc_beta", "runtime_scf_backend", "runtime_scf_options")
+    static_fields=(
+        "nocc_alpha",
+        "nocc_beta",
+        "runtime_scf_backend",
+        "runtime_scf_options",
+        "hfx_nu_api",
+    )
 )
 @dataclass(frozen=True)
 class UnrestrictedMolecule:
@@ -93,8 +108,13 @@ class UnrestrictedMolecule:
     nocc_beta: int | None = None
     hfx_omega_values: jnp.ndarray | None = None
     hfx_local: jnp.ndarray | None = None
+    hfx_fxx: jnp.ndarray | None = None
     hfx_nu: jnp.ndarray | None = None
+    hfx_nu_api: Any | None = None
+    pt2_local: jnp.ndarray | None = None
+    pt2_fock_response: jnp.ndarray | None = None
     scf_initial_density: jnp.ndarray | None = None
+    df_factors: jnp.ndarray | None = None
     runtime_scf_backend: str | None = None
     runtime_scf_options: Any | None = None
 

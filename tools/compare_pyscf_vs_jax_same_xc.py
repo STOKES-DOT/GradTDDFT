@@ -5,16 +5,18 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 from pyscf import dft, gto
 
 from td_graddft import tdscf
-from td_graddft.features import restricted_grid_features_with_gradients
-from td_graddft.xc_backend.jax_libxc import eval_xc_response_tensor, hybrid_coeff, xc_type
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
 from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum
+
+
+jax.config.update("jax_enable_x64", True)
 
 
 MOLECULES = {
@@ -49,24 +51,6 @@ class CompareResult:
     ncomp: int
 
 
-class SemilocalResponseFunctional:
-    def __init__(self, xc_spec: str):
-        self.xc_spec = str(xc_spec).lower()
-        self.exact_exchange_fraction = float(hybrid_coeff(self.xc_spec))
-        self.response_feature_kind = str(xc_type(self.xc_spec))
-
-    def grid_response_tensor(self, molecule):
-        features, grad_rho = restricted_grid_features_with_gradients(molecule)
-        tau = features.tau_a + features.tau_b
-        _, tensor = eval_xc_response_tensor(
-            self.xc_spec,
-            features.rho,
-            grad=grad_rho,
-            tau=tau,
-        )
-        return tensor
-
-
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--molecule", choices=tuple(MOLECULES.keys()), default="benzene")
@@ -82,27 +66,12 @@ def parse_args() -> argparse.Namespace:
         help="max energy (eV) for broadened spectrum; default uses auto range from states.",
     )
     p.add_argument("--outdir", default="outputs/pyscf_vs_jax_same_xc")
-    p.add_argument(
-        "--allow-approx-b3lyp",
-        action="store_true",
-        help=(
-            "allow B3LYP comparison even though TD-GradDFT currently uses an approximate "
-            "B3LYP semilocal backbone (PW/PBE-correlation surrogate)."
-        ),
-    )
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    xc_key = str(args.xc).strip().lower()
-    kernel_source = "jax"
-    if xc_key == "b3lyp" and not args.allow_approx_b3lyp:
-        raise ValueError(
-            "Strict same-functional comparison is not valid for xc='b3lyp' in current "
-            "TD-GradDFT jax_libxc, because B3LYP is implemented as an approximate alias. "
-            "Use --allow-approx-b3lyp to run the all-JAX approximate comparison explicitly."
-        )
+    kernel_source = "jax_xc"
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -133,6 +102,8 @@ def main() -> None:
     ref = restricted_reference_from_pyscf(mf)
     jax_td = tdscf.TDDFT(ref, xc_functional=args.xc)
     pred = jax_td.kernel(nstates=int(args.nstates))
+    if not bool(np.asarray(pred.converged)):
+        raise RuntimeError("JAX TDDFT Davidson did not converge.")
     pred_e = np.asarray(pred.excitation_energies, dtype=float)
     pred_f = np.asarray(jax_td.oscillator_strength(), dtype=float)
 

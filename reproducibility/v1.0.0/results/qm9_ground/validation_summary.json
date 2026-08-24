@@ -1,0 +1,26 @@
+{
+  "basis": "def2-tzvp",
+  "checkpoint": "outputs/qm9_50_ccsdt_augccpvtz_ground_def2tzvp_hfx_df_grid2_maemse_self_consistent_h128x4_2000step_lr1em3_decay400_eval1_ckpt10_noresponse_reusecache_gpu1_20260717_110634/checkpoints/neural_xc_params_step000580.msgpack",
+  "evaluation_solver": "casida",
+  "include_pt2_channel": false,
+  "predictions_csv": "outputs/eval_qm9_50_ccsdt_augccpvtz_ground_def2tzvp_validation_bestckpt_step580_gpu0_20260720_123141/predictions.csv",
+  "pt2_channel_mode": null,
+  "reference_csv": "outputs/qm9_50_ccsdt_augccpvtz_ground_targets_def2tzvp_train40_val10_20260717/qm9_50_ccsdt_augccpvtz_ground_targets_def2tzvp_train40_val10.csv",
+  "s1_mae_ev": NaN,
+  "s1_max_ev": NaN,
+  "systems": [
+    "qm9_57_C2H3N3",
+    "qm9_107_C3H3NO",
+    "qm9_140_C3H3NO",
+    "qm9_162_C2H3N3",
+    "qm9_163_C2H3N3",
+    "qm9_164_C2H3N3",
+    "qm9_165_C2H3N3",
+    "qm9_166_C3H3NO",
+    "qm9_109_C2H3NO2",
+    "qm9_110_C2H3NO2"
+  ],
+  "total_mae_ev": 0.03316450704297141,
+  "training_mode": "self_consistent",
+  "xc": "b3lyp"
+}

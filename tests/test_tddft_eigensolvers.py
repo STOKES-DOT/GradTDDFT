@@ -1,21 +1,351 @@
 import numpy as np
 import jax
 import jax.numpy as jnp
+import pytest
 
-from td_graddft.tddft.casida import solve_casida
-from td_graddft.tddft.eigensolvers import davidson_lowest_symmetric
-from td_graddft.tddft.tda import solve_tda
-from td_graddft.tddft.types import TDDFTMatrices, TDAResult, TDDFTResult
+from td_graddft.tddft.casida import solve_casida_from_tdhf_operator
+from td_graddft.tddft.eigensolvers import _davidson_search_nroots
+from td_graddft.tddft.eigensolvers import implicit_differential_davidson_lowest_symmetric
+from td_graddft.tddft.eigenvector_differentiation import (
+    implicit_differential_davidson_lowest_symmetric_with_eigenvectors,
+)
+from td_graddft.tddft.tda import solve_tda_from_operator
+from td_graddft.tddft.types import TDAResult, TDDFTResult
+from td_graddft.tddft.unrestricted import (
+    UnrestrictedTDAResult,
+    UnrestrictedTDDFTResult,
+    solve_unrestricted_casida_from_tdhf_operator,
+    solve_unrestricted_tda_from_operator,
+)
 
 
-def test_davidson_restart_matches_dense_on_random_symmetric_matrix():
+def _numpy_tda_reference(flat_a: np.ndarray, nstates: int) -> np.ndarray:
+    return np.linalg.eigvalsh(0.5 * (flat_a + flat_a.T))[:nstates]
+
+
+def _numpy_casida_reference(
+    flat_a: np.ndarray,
+    flat_b: np.ndarray,
+    nstates: int,
+    *,
+    matrix_eps: float = 1e-10,
+) -> np.ndarray:
+    a_plus_b = 0.5 * (flat_a + flat_a.T) + 0.5 * (flat_b + flat_b.T)
+    a_minus_b = 0.5 * (flat_a + flat_a.T) - 0.5 * (flat_b + flat_b.T)
+    factor = np.linalg.cholesky(a_minus_b + matrix_eps * np.eye(a_minus_b.shape[0]))
+    w2 = np.linalg.eigvalsh(factor.T @ a_plus_b @ factor)
+    return np.sqrt(np.maximum(w2[:nstates], 0.0))
+
+
+def _tda_vind(flat_a):
+    def vind(rows):
+        rows = jnp.asarray(rows).reshape(-1, flat_a.shape[0])
+        return rows @ jnp.asarray(flat_a).T
+
+    return vind
+
+
+def _tdhf_vind(flat_a, flat_b):
+    def vind(rows):
+        rows = jnp.asarray(rows).reshape(-1, 2 * flat_a.shape[0])
+        x = rows[:, : flat_a.shape[0]]
+        y = rows[:, flat_a.shape[0] :]
+        upper = x @ jnp.asarray(flat_a).T + y @ jnp.asarray(flat_b).T
+        lower = -(x @ jnp.asarray(flat_b).T + y @ jnp.asarray(flat_a).T)
+        return jnp.concatenate([upper, lower], axis=-1)
+
+    return vind
+
+
+def test_implicit_eigenvector_gradient_matches_dense_single_root():
+    matrix = jnp.asarray(
+        [
+            [0.90, 0.08, 0.01, 0.00],
+            [0.08, 1.35, 0.06, 0.02],
+            [0.01, 0.06, 1.85, 0.07],
+            [0.00, 0.02, 0.07, 2.40],
+        ],
+        dtype=jnp.float32,
+    )
+    probe = jnp.asarray([0.3, -0.4, 0.7, 0.2], dtype=matrix.dtype)
+
+    def implicit_loss(raw_matrix):
+        sym = 0.5 * (raw_matrix + raw_matrix.T)
+        _, vectors, _ = (
+            implicit_differential_davidson_lowest_symmetric_with_eigenvectors(
+                sym,
+                nroots=1,
+                tol=1e-7,
+                max_iter=40,
+                eigenvector_adjoint_tol=1e-7,
+                eigenvector_adjoint_max_iter=16,
+            )
+        )
+        return (vectors[:, 0] @ probe) ** 2
+
+    def dense_loss(raw_matrix):
+        sym = 0.5 * (raw_matrix + raw_matrix.T)
+        _, vectors = jnp.linalg.eigh(sym)
+        return (vectors[:, 0] @ probe) ** 2
+
+    np.testing.assert_allclose(
+        np.asarray(jax.grad(implicit_loss)(matrix)),
+        np.asarray(jax.grad(dense_loss)(matrix)),
+        atol=3e-5,
+        rtol=3e-5,
+    )
+
+
+def test_implicit_eigenvector_multi_root_gradient_matches_dense():
+    matrix = jnp.asarray(
+        [
+            [0.8, 0.04, 0.01, 0.00, 0.00],
+            [0.04, 1.1, 0.03, 0.01, 0.00],
+            [0.01, 0.03, 1.5, 0.05, 0.01],
+            [0.00, 0.01, 0.05, 2.0, 0.06],
+            [0.00, 0.00, 0.01, 0.06, 2.6],
+        ],
+        dtype=jnp.float32,
+    )
+    probe = jnp.asarray([0.5, -0.2, 0.4, 0.1, -0.3], dtype=matrix.dtype)
+    weights = jnp.asarray([0.7, 1.3, 0.4], dtype=matrix.dtype)
+
+    def implicit_loss(raw_matrix):
+        sym = 0.5 * (raw_matrix + raw_matrix.T)
+        values, vectors, _ = (
+            implicit_differential_davidson_lowest_symmetric_with_eigenvectors(
+                sym,
+                nroots=3,
+                tol=1e-7,
+                max_iter=50,
+                eigenvector_adjoint_tol=1e-7,
+                eigenvector_adjoint_max_iter=20,
+            )
+        )
+        transition = vectors.T @ probe
+        return jnp.sum(weights * values * transition**2)
+
+    def dense_loss(raw_matrix):
+        sym = 0.5 * (raw_matrix + raw_matrix.T)
+        values, vectors = jnp.linalg.eigh(sym)
+        transition = vectors[:, :3].T @ probe
+        return jnp.sum(weights * values[:3] * transition**2)
+
+    np.testing.assert_allclose(
+        np.asarray(jax.grad(implicit_loss)(matrix)),
+        np.asarray(jax.grad(dense_loss)(matrix)),
+        atol=8e-5,
+        rtol=8e-5,
+    )
+
+
+def test_implicit_eigenvector_mode_preserves_eigenvalue_gradient():
+    matrix = jnp.diag(jnp.asarray([0.8, 1.2, 1.7, 2.3], dtype=jnp.float32))
+    matrix = matrix.at[0, 1].set(0.04).at[1, 0].set(0.04)
+
+    def old_loss(raw_matrix):
+        values, _, _ = implicit_differential_davidson_lowest_symmetric(
+            raw_matrix,
+            nroots=2,
+        )
+        return jnp.sum(values)
+
+    def new_loss(raw_matrix):
+        values, _, _ = (
+            implicit_differential_davidson_lowest_symmetric_with_eigenvectors(
+                raw_matrix,
+                nroots=2,
+            )
+        )
+        return jnp.sum(values)
+
+    np.testing.assert_allclose(
+        np.asarray(jax.grad(new_loss)(matrix)),
+        np.asarray(jax.grad(old_loss)(matrix)),
+        atol=2e-6,
+        rtol=2e-6,
+    )
+
+
+def test_implicit_eigenvector_solver_is_jittable():
+    matrix = jnp.diag(jnp.asarray([0.7, 1.0, 1.4, 1.9], dtype=jnp.float32))
+    solve = jax.jit(
+        lambda raw: implicit_differential_davidson_lowest_symmetric_with_eigenvectors(
+            raw,
+            nroots=2,
+            eigenvector_adjoint_max_iter=12,
+        )
+    )
+
+    values, vectors, converged = solve(matrix)
+
+    assert values.shape == (2,)
+    assert vectors.shape == (4, 2)
+    assert np.asarray(converged).shape == ()
+
+
+def test_restricted_tda_gradient_mode_is_opt_in():
+    matrix = jnp.asarray(
+        [[0.9, 0.08, 0.01], [0.08, 1.4, 0.05], [0.01, 0.05, 2.0]],
+        dtype=jnp.float32,
+    )
+    delta_eps = jnp.asarray([[0.9, 1.4, 2.0]], dtype=matrix.dtype)
+
+    def amplitude_loss(raw_matrix, mode):
+        sym = 0.5 * (raw_matrix + raw_matrix.T)
+        result = solve_tda_from_operator(
+            delta_eps,
+            _tda_vind(sym),
+            jnp.diag(sym),
+            nstates=1,
+            tda_gradient_mode=mode,
+            eigenvector_adjoint_tol=1e-7,
+        )
+        return jnp.sum(result.amplitudes[0] ** 4)
+
+    def dense_loss(raw_matrix):
+        sym = 0.5 * (raw_matrix + raw_matrix.T)
+        _, vectors = jnp.linalg.eigh(sym)
+        return jnp.sum((jnp.sqrt(0.5) * vectors[:, 0]) ** 4)
+
+    old_grad = jax.grad(
+        lambda raw: amplitude_loss(raw, "eigenvalue_only")
+    )(matrix)
+    new_grad = jax.grad(
+        lambda raw: amplitude_loss(raw, "implicit_eigenvector")
+    )(matrix)
+
+    np.testing.assert_array_equal(np.asarray(old_grad), np.zeros_like(np.asarray(matrix)))
+    np.testing.assert_allclose(
+        np.asarray(new_grad),
+        np.asarray(jax.grad(dense_loss)(matrix)),
+        atol=4e-5,
+        rtol=4e-5,
+    )
+
+
+def test_unrestricted_tda_gradient_mode_is_opt_in():
+    matrix = jnp.asarray(
+        [[0.8, 0.06, 0.02], [0.06, 1.3, 0.04], [0.02, 0.04, 1.9]],
+        dtype=jnp.float32,
+    )
+    de_a = jnp.asarray([[0.8, 1.3]], dtype=matrix.dtype)
+    de_b = jnp.asarray([[1.9]], dtype=matrix.dtype)
+
+    def amplitude_loss(raw_matrix, mode):
+        sym = 0.5 * (raw_matrix + raw_matrix.T)
+        result = solve_unrestricted_tda_from_operator(
+            de_a,
+            de_b,
+            _tda_vind(sym),
+            jnp.diag(sym),
+            nstates=1,
+            tda_gradient_mode=mode,
+            eigenvector_adjoint_tol=1e-7,
+        )
+        return jnp.sum(result.amplitudes_alpha[0] ** 4) + jnp.sum(
+            result.amplitudes_beta[0] ** 4
+        )
+
+    def dense_loss(raw_matrix):
+        sym = 0.5 * (raw_matrix + raw_matrix.T)
+        _, vectors = jnp.linalg.eigh(sym)
+        return jnp.sum(vectors[:, 0] ** 4)
+
+    old_grad = jax.grad(
+        lambda raw: amplitude_loss(raw, "eigenvalue_only")
+    )(matrix)
+    new_grad = jax.grad(
+        lambda raw: amplitude_loss(raw, "implicit_eigenvector")
+    )(matrix)
+
+    np.testing.assert_array_equal(np.asarray(old_grad), np.zeros_like(np.asarray(matrix)))
+    np.testing.assert_allclose(
+        np.asarray(new_grad),
+        np.asarray(jax.grad(dense_loss)(matrix)),
+        atol=4e-5,
+        rtol=4e-5,
+    )
+
+
+def test_davidson_search_nroots_matches_pyscf_requested_root_count():
+    assert _davidson_search_nroots(1, 12) == 1
+    assert _davidson_search_nroots(3, 12) == 3
+    assert _davidson_search_nroots(20, 12) == 12
+
+
+def test_tda_flags_roots_below_pyscf_positive_threshold_as_nonconverged():
+    flat_a = np.diag(np.asarray([5.0e-4], dtype=np.float64))
+    delta_eps = jnp.asarray([[5.0e-4]], dtype=jnp.float64)
+
+    result = solve_tda_from_operator(
+        delta_eps,
+        _tda_vind(flat_a),
+        jnp.diag(jnp.asarray(flat_a)),
+        nstates=1,
+    )
+
+    np.testing.assert_allclose(np.asarray(result.excitation_energies), np.asarray([0.0]))
+    assert not bool(np.asarray(result.converged))
+
+
+def test_operator_solvers_use_requested_root_count_by_default():
+    flat_a = np.asarray(
+        [
+            [2.0, 0.0, 0.0, 0.0],
+            [0.0, 10.0, -9.5, 0.0],
+            [0.0, -9.5, 10.0, 0.0],
+            [0.0, 0.0, 0.0, 3.0],
+        ],
+        dtype=np.float64,
+    )
+    flat_b = np.zeros_like(flat_a)
+    delta_eps = jnp.asarray([[2.0, 10.0, 10.0, 3.0]], dtype=jnp.float64)
+
+    tda = solve_tda_from_operator(
+        delta_eps,
+        _tda_vind(flat_a),
+        jnp.diag(jnp.asarray(flat_a)),
+        nstates=1,
+        davidson_tol=1e-8,
+        davidson_max_iter=20,
+    )
+    casida = solve_casida_from_tdhf_operator(
+        delta_eps,
+        _tdhf_vind(flat_a, flat_b),
+        nstates=1,
+        davidson_tol=1e-8,
+        davidson_max_iter=20,
+    )
+
+    np.testing.assert_allclose(np.asarray(tda.excitation_energies), np.asarray([2.0]))
+    np.testing.assert_allclose(np.asarray(casida.excitation_energies), np.asarray([2.0]))
+
+
+def test_restricted_casida_returns_nonconverged_ritz_result():
+    flat_a = np.diag(np.asarray([0.8, 1.2, 1.6, 2.0], dtype=np.float64))
+    flat_b = np.zeros_like(flat_a)
+    delta_eps = jnp.asarray([[0.8, 1.2], [1.6, 2.0]], dtype=jnp.float64)
+
+    result = solve_casida_from_tdhf_operator(
+        delta_eps,
+        _tdhf_vind(flat_a, flat_b),
+        nstates=1,
+        davidson_max_iter=0,
+    )
+
+    np.testing.assert_allclose(np.asarray(result.excitation_energies), np.asarray([0.0]))
+    assert not bool(np.asarray(result.converged))
+
+
+def test_davidson_restart_matches_numpy_on_random_symmetric_matrix():
     rng = np.random.default_rng(0)
     dim = 40
     matrix = rng.normal(size=(dim, dim)).astype(np.float32)
     matrix = 0.5 * (matrix + matrix.T)
 
     ref_eigvals, _ = np.linalg.eigh(matrix)
-    eigvals, _, converged = davidson_lowest_symmetric(
+    eigvals, _, converged = implicit_differential_davidson_lowest_symmetric(
         jnp.asarray(matrix),
         nroots=4,
         tol=1e-5,
@@ -33,14 +363,14 @@ def test_davidson_restart_matches_dense_on_random_symmetric_matrix():
     )
 
 
-def test_davidson_callable_matches_dense_on_random_symmetric_matrix():
+def test_davidson_callable_matches_numpy_on_random_symmetric_matrix():
     rng = np.random.default_rng(1)
     dim = 48
     matrix = rng.normal(size=(dim, dim)).astype(np.float32)
     matrix = 0.5 * (matrix + matrix.T)
 
     ref_eigvals, _ = np.linalg.eigh(matrix)
-    eigvals, _, converged = davidson_lowest_symmetric(
+    eigvals, _, converged = implicit_differential_davidson_lowest_symmetric(
         lambda vectors: jnp.asarray(matrix) @ vectors,
         nroots=5,
         size=dim,
@@ -60,7 +390,7 @@ def test_davidson_callable_matches_dense_on_random_symmetric_matrix():
     )
 
 
-def test_restricted_tda_and_casida_davidson_operator_match_dense():
+def test_restricted_tda_and_casida_operator_match_numpy_reference():
     rng = np.random.default_rng(2)
     nocc, nvir = 8, 9
     dim = nocc * nvir
@@ -71,52 +401,172 @@ def test_restricted_tda_and_casida_davidson_operator_match_dense():
     flat_b = 0.015 * sym
     flat_a = np.diag(np.ravel(delta_eps)) + 0.05 * sym + 0.25 * np.eye(dim, dtype=np.float32)
 
-    # Ensure A-B stays positive definite for the Casida square root.
     min_eig = np.linalg.eigvalsh(flat_a - flat_b).min()
     if min_eig <= 1e-3:
         flat_a = flat_a + (1e-3 - min_eig + 0.05) * np.eye(dim, dtype=np.float32)
 
-    matrices = TDDFTMatrices(
-        orbital_energy_differences=jnp.asarray(delta_eps),
-        a_matrix=jnp.asarray(flat_a.reshape(nocc, nvir, nocc, nvir)),
-        b_matrix=jnp.asarray(flat_b.reshape(nocc, nvir, nocc, nvir)),
-    )
-
-    dense_tda = solve_tda(matrices, nstates=4, eigensolver="dense")
-    davidson_tda = solve_tda(
-        matrices,
+    ref_tda = _numpy_tda_reference(flat_a, 4)
+    davidson_tda = solve_tda_from_operator(
+        jnp.asarray(delta_eps),
+        _tda_vind(flat_a),
+        jnp.diag(jnp.asarray(flat_a)),
         nstates=4,
-        eigensolver="davidson",
         davidson_tol=1e-5,
         davidson_max_iter=120,
         davidson_max_subspace=24,
     )
     np.testing.assert_allclose(
         np.asarray(davidson_tda.excitation_energies),
-        np.asarray(dense_tda.excitation_energies),
+        ref_tda,
         atol=2e-5,
         rtol=2e-5,
     )
 
-    dense_casida = solve_casida(matrices, nstates=4, eigensolver="dense")
-    davidson_casida = solve_casida(
-        matrices,
+    ref_casida = _numpy_casida_reference(flat_a, flat_b, 4)
+    davidson_casida = solve_casida_from_tdhf_operator(
+        jnp.asarray(delta_eps),
+        _tdhf_vind(flat_a, flat_b),
         nstates=4,
-        eigensolver="davidson",
         davidson_tol=1e-5,
         davidson_max_iter=120,
         davidson_max_subspace=24,
     )
     np.testing.assert_allclose(
         np.asarray(davidson_casida.excitation_energies),
-        np.asarray(dense_casida.excitation_energies),
+        ref_casida,
         atol=2e-5,
         rtol=2e-5,
     )
-    assert davidson_casida.casida_matrix is None
 
 
-def test_restricted_tda_and_casida_results_are_jittable_pytrees():
+def test_full_tddft_davidson_converges_on_stable_coupled_problem():
+    rng = np.random.default_rng(0)
+    dim = 8
+    diagonal = np.linspace(0.5, 4.0, dim, dtype=np.float64)
+    noise_a = rng.normal(size=(dim, dim))
+    noise_b = rng.normal(size=(dim, dim))
+    flat_a = np.diag(diagonal) + 0.05 * (noise_a + noise_a.T)
+    flat_b = 0.04 * (noise_b + noise_b.T)
+    shift = max(0.0, 0.1 - np.linalg.eigvalsh(flat_a - flat_b).min())
+    flat_a += shift * np.eye(dim)
+    delta_eps = jnp.asarray(np.diag(flat_a).reshape(1, dim))
+
+    result = solve_casida_from_tdhf_operator(
+        delta_eps,
+        _tdhf_vind(flat_a, flat_b),
+        nstates=3,
+        davidson_tol=1e-8,
+        davidson_max_iter=256,
+    )
+
+    assert bool(np.asarray(result.converged))
+    np.testing.assert_allclose(
+        np.asarray(result.excitation_energies),
+        _numpy_casida_reference(flat_a, flat_b, 3),
+        atol=1e-7,
+        rtol=1e-7,
+    )
+
+
+def test_full_tddft_implicit_eigenvalue_gradient_matches_dense_casida():
+    base_a = jnp.asarray(
+        [
+            [0.9, 0.06, 0.01, 0.00],
+            [0.06, 1.3, 0.04, 0.01],
+            [0.01, 0.04, 1.8, 0.05],
+            [0.00, 0.01, 0.05, 2.4],
+        ],
+        dtype=jnp.float64,
+    )
+    base_b = jnp.asarray(
+        [
+            [0.04, 0.01, 0.00, 0.00],
+            [0.01, 0.03, 0.01, 0.00],
+            [0.00, 0.01, 0.02, 0.01],
+            [0.00, 0.00, 0.01, 0.02],
+        ],
+        dtype=jnp.float64,
+    )
+    def davidson_energy(raw_a, raw_b):
+        flat_a = 0.5 * (raw_a + raw_a.T)
+        flat_b = 0.5 * (raw_b + raw_b.T)
+        result = solve_casida_from_tdhf_operator(
+            jnp.diag(flat_a).reshape(1, 4),
+            _tdhf_vind(flat_a, flat_b),
+            nstates=1,
+            davidson_tol=1e-9,
+            davidson_max_iter=128,
+        )
+        return result.excitation_energies[0]
+
+    def dense_energy(raw_a, raw_b):
+        flat_a = 0.5 * (raw_a + raw_a.T)
+        flat_b = 0.5 * (raw_b + raw_b.T)
+        factor = jnp.linalg.cholesky(flat_a - flat_b)
+        omega2 = jnp.linalg.eigvalsh(factor.T @ (flat_a + flat_b) @ factor)
+        return jnp.sqrt(omega2[0])
+
+    davidson_grads = jax.grad(davidson_energy, argnums=(0, 1))(base_a, base_b)
+    dense_grads = jax.grad(dense_energy, argnums=(0, 1))(base_a, base_b)
+    for actual, expected in zip(davidson_grads, dense_grads):
+        np.testing.assert_allclose(
+            np.asarray(actual),
+            np.asarray(expected),
+            atol=2e-7,
+            rtol=2e-7,
+        )
+
+
+def test_unrestricted_tda_and_casida_operator_match_numpy_reference():
+    rng = np.random.default_rng(22)
+    de_a = np.asarray([[0.7, 1.1], [1.6, 2.0]], dtype=np.float32)
+    de_b = np.asarray([[0.9, 1.4]], dtype=np.float32)
+    dim = de_a.size + de_b.size
+    noise = rng.normal(size=(dim, dim)).astype(np.float32)
+    sym = 0.5 * (noise + noise.T)
+    flat_b = 0.01 * sym
+    flat_a = np.diag(np.concatenate([de_a.ravel(), de_b.ravel()])) + 0.04 * sym
+    flat_a = flat_a + 0.2 * np.eye(dim, dtype=np.float32)
+
+    min_eig = np.linalg.eigvalsh(flat_a - flat_b).min()
+    if min_eig <= 1e-3:
+        flat_a = flat_a + (1e-3 - min_eig + 0.05) * np.eye(dim, dtype=np.float32)
+
+    tda = solve_unrestricted_tda_from_operator(
+        jnp.asarray(de_a),
+        jnp.asarray(de_b),
+        _tda_vind(flat_a),
+        jnp.diag(jnp.asarray(flat_a)),
+        nstates=3,
+        davidson_tol=1e-5,
+        davidson_max_iter=120,
+        davidson_max_subspace=18,
+    )
+    np.testing.assert_allclose(
+        np.asarray(tda.excitation_energies),
+        _numpy_tda_reference(flat_a, 3),
+        atol=2e-5,
+        rtol=2e-5,
+    )
+
+    casida = solve_unrestricted_casida_from_tdhf_operator(
+        jnp.asarray(de_a),
+        jnp.asarray(de_b),
+        _tdhf_vind(flat_a, flat_b),
+        nstates=3,
+        davidson_tol=1e-5,
+        davidson_max_iter=120,
+        davidson_max_subspace=18,
+    )
+    np.testing.assert_allclose(
+        np.asarray(casida.excitation_energies),
+        _numpy_casida_reference(flat_a, flat_b, 3),
+        atol=2e-5,
+        rtol=2e-5,
+    )
+
+
+def test_operator_results_are_jittable_pytrees():
     delta_eps = jnp.asarray([[0.8, 1.1], [1.4, 1.9]], dtype=jnp.float32)
     flat_a = jnp.asarray(
         [
@@ -136,19 +586,23 @@ def test_restricted_tda_and_casida_results_are_jittable_pytrees():
         ],
         dtype=jnp.float32,
     )
-    matrices = TDDFTMatrices(
-        orbital_energy_differences=delta_eps,
-        a_matrix=flat_a.reshape(2, 2, 2, 2),
-        b_matrix=flat_b.reshape(2, 2, 2, 2),
-    )
 
-    jit_tda = jax.jit(lambda mats: solve_tda(mats, nstates=2, eigensolver="dense"))
-    jit_casida = jax.jit(
-        lambda mats: solve_casida(mats, nstates=2, eigensolver="dense")
-    )
+    @jax.jit
+    def _solve(a, b):
+        tda = solve_tda_from_operator(
+            delta_eps,
+            _tda_vind(a),
+            jnp.diag(a),
+            nstates=2,
+        )
+        casida = solve_casida_from_tdhf_operator(
+            delta_eps,
+            _tdhf_vind(a, b),
+            nstates=2,
+        )
+        return tda, casida
 
-    tda_result = jit_tda(matrices)
-    casida_result = jit_casida(matrices)
+    tda_result, casida_result = _solve(flat_a, flat_b)
 
     assert isinstance(tda_result, TDAResult)
     assert isinstance(casida_result, TDDFTResult)
@@ -159,6 +613,82 @@ def test_restricted_tda_and_casida_results_are_jittable_pytrees():
     assert casida_result.y_amplitudes.shape == (2, 2, 2)
 
 
+def test_tda_operator_gradient_matches_dense_eigenvalue_perturbation():
+    matrix = jnp.asarray(
+        [
+            [0.95, 0.02, 0.00, 0.01],
+            [0.02, 1.20, 0.03, 0.00],
+            [0.00, 0.03, 1.55, 0.02],
+            [0.01, 0.00, 0.02, 2.05],
+        ],
+        dtype=jnp.float32,
+    )
+    delta_eps = jnp.asarray([[0.8, 1.1], [1.4, 1.9]], dtype=jnp.float32)
+
+    def davidson_energy(raw_matrix):
+        sym = 0.5 * (raw_matrix + raw_matrix.T)
+        return solve_tda_from_operator(
+            delta_eps,
+            _tda_vind(sym),
+            jnp.diag(sym),
+            nstates=1,
+        ).excitation_energies[0]
+
+    def dense_energy(raw_matrix):
+        sym = 0.5 * (raw_matrix + raw_matrix.T)
+        return jnp.linalg.eigvalsh(sym)[0]
+
+    np.testing.assert_allclose(
+        np.asarray(jax.grad(davidson_energy)(matrix)),
+        np.asarray(jax.grad(dense_energy)(matrix)),
+        atol=5e-5,
+        rtol=5e-5,
+    )
+
+
+def test_unrestricted_operator_results_are_jittable_pytrees():
+    de_a = jnp.asarray([[0.8, 1.1]], dtype=jnp.float32)
+    de_b = jnp.asarray([[0.9, 1.2]], dtype=jnp.float32)
+    flat_a = jnp.asarray(
+        [
+            [1.0, 0.02, 0.01, 0.00],
+            [0.02, 1.2, 0.00, 0.01],
+            [0.01, 0.00, 1.1, 0.02],
+            [0.00, 0.01, 0.02, 1.3],
+        ],
+        dtype=jnp.float32,
+    )
+    flat_b = 0.01 * jnp.ones_like(flat_a)
+
+    @jax.jit
+    def _solve(a, b):
+        tda = solve_unrestricted_tda_from_operator(
+            de_a,
+            de_b,
+            _tda_vind(a),
+            jnp.diag(a),
+            nstates=2,
+        )
+        casida = solve_unrestricted_casida_from_tdhf_operator(
+            de_a,
+            de_b,
+            _tdhf_vind(a, b),
+            nstates=2,
+        )
+        return tda, casida
+
+    tda_result, casida_result = _solve(flat_a, flat_b)
+
+    assert isinstance(tda_result, UnrestrictedTDAResult)
+    assert isinstance(casida_result, UnrestrictedTDDFTResult)
+    assert tda_result.excitation_energies.shape == (2,)
+    assert tda_result.amplitudes_alpha.shape == (2, 1, 2)
+    assert tda_result.amplitudes_beta.shape == (2, 1, 2)
+    assert casida_result.excitation_energies.shape == (2,)
+    assert casida_result.x_amplitudes_alpha.shape == (2, 1, 2)
+    assert casida_result.y_amplitudes_beta.shape == (2, 1, 2)
+
+
 def test_davidson_callable_is_jittable():
     rng = np.random.default_rng(3)
     dim = 72
@@ -167,7 +697,7 @@ def test_davidson_callable_is_jittable():
     diag = jnp.diag(jnp.asarray(matrix))
 
     compiled = jax.jit(
-        lambda d: davidson_lowest_symmetric(
+        lambda d: implicit_differential_davidson_lowest_symmetric(
             lambda vectors: jnp.asarray(matrix) @ vectors,
             nroots=4,
             size=dim,
@@ -199,7 +729,7 @@ def test_davidson_callable_is_jittable_with_x64_enabled():
 
     with enable_x64(True):
         compiled = jax.jit(
-            lambda d: davidson_lowest_symmetric(
+            lambda d: implicit_differential_davidson_lowest_symmetric(
                 lambda vectors: jnp.asarray(matrix) @ vectors,
                 nroots=4,
                 size=dim,
@@ -217,117 +747,3 @@ def test_davidson_callable_is_jittable_with_x64_enabled():
     assert np.asarray(converged).shape == ()
     assert np.all(np.isfinite(np.asarray(eigvals)))
     assert np.all(np.isfinite(np.asarray(eigvecs)))
-
-
-def test_davidson_tda_and_casida_are_jittable():
-    rng = np.random.default_rng(4)
-    nocc, nvir = 8, 9
-    dim = nocc * nvir
-    delta_eps = np.linspace(0.7, 2.9, dim, dtype=np.float32).reshape(nocc, nvir)
-    noise = rng.normal(size=(dim, dim)).astype(np.float32)
-    sym = 0.5 * (noise + noise.T)
-    flat_b = 0.01 * sym
-    flat_a = np.diag(np.ravel(delta_eps)) + 0.03 * sym + 0.2 * np.eye(dim, dtype=np.float32)
-
-    min_eig = np.linalg.eigvalsh(flat_a - flat_b).min()
-    if min_eig <= 1e-3:
-        flat_a = flat_a + (1e-3 - min_eig + 0.05) * np.eye(dim, dtype=np.float32)
-
-    matrices = TDDFTMatrices(
-        orbital_energy_differences=jnp.asarray(delta_eps),
-        a_matrix=jnp.asarray(flat_a.reshape(nocc, nvir, nocc, nvir)),
-        b_matrix=jnp.asarray(flat_b.reshape(nocc, nvir, nocc, nvir)),
-    )
-
-    jit_tda = jax.jit(
-        lambda mats: solve_tda(
-            mats,
-            nstates=4,
-            eigensolver="davidson",
-            davidson_tol=1e-5,
-            davidson_max_iter=80,
-            davidson_max_subspace=20,
-        )
-    )
-    jit_casida = jax.jit(
-        lambda mats: solve_casida(
-            mats,
-            nstates=4,
-            eigensolver="davidson",
-            davidson_tol=1e-5,
-            davidson_max_iter=80,
-            davidson_max_subspace=20,
-        )
-    )
-
-    tda_result = jit_tda(matrices)
-    casida_result = jit_casida(matrices)
-
-    assert isinstance(tda_result, TDAResult)
-    assert isinstance(casida_result, TDDFTResult)
-    assert tda_result.excitation_energies.shape == (4,)
-    assert tda_result.amplitudes.shape == (4, nocc, nvir)
-    assert casida_result.excitation_energies.shape == (4,)
-    assert casida_result.x_amplitudes.shape == (4, nocc, nvir)
-    assert casida_result.y_amplitudes.shape == (4, nocc, nvir)
-
-
-def test_auto_tda_and_casida_are_jittable_when_auto_selects_davidson():
-    rng = np.random.default_rng(5)
-    nocc, nvir = 10, 10
-    dim = nocc * nvir
-    delta_eps = np.linspace(0.8, 3.4, dim, dtype=np.float32).reshape(nocc, nvir)
-    noise = rng.normal(size=(dim, dim)).astype(np.float32)
-    sym = 0.5 * (noise + noise.T)
-    flat_b = 0.008 * sym
-    flat_a = np.diag(np.ravel(delta_eps)) + 0.025 * sym + 0.18 * np.eye(dim, dtype=np.float32)
-
-    min_eig = np.linalg.eigvalsh(flat_a - flat_b).min()
-    if min_eig <= 1e-3:
-        flat_a = flat_a + (1e-3 - min_eig + 0.05) * np.eye(dim, dtype=np.float32)
-
-    matrices = TDDFTMatrices(
-        orbital_energy_differences=jnp.asarray(delta_eps),
-        a_matrix=jnp.asarray(flat_a.reshape(nocc, nvir, nocc, nvir)),
-        b_matrix=jnp.asarray(flat_b.reshape(nocc, nvir, nocc, nvir)),
-    )
-
-    dense_tda = solve_tda(matrices, nstates=4, eigensolver="dense")
-    dense_casida = solve_casida(matrices, nstates=4, eigensolver="dense")
-
-    jit_tda = jax.jit(
-        lambda mats: solve_tda(
-            mats,
-            nstates=4,
-            eigensolver="auto",
-            davidson_tol=1e-5,
-            davidson_max_iter=100,
-            davidson_max_subspace=24,
-        )
-    )
-    jit_casida = jax.jit(
-        lambda mats: solve_casida(
-            mats,
-            nstates=4,
-            eigensolver="auto",
-            davidson_tol=1e-5,
-            davidson_max_iter=100,
-            davidson_max_subspace=24,
-        )
-    )
-
-    tda_result = jit_tda(matrices)
-    casida_result = jit_casida(matrices)
-
-    np.testing.assert_allclose(
-        np.asarray(tda_result.excitation_energies),
-        np.asarray(dense_tda.excitation_energies),
-        atol=2e-5,
-        rtol=2e-5,
-    )
-    np.testing.assert_allclose(
-        np.asarray(casida_result.excitation_energies),
-        np.asarray(dense_casida.excitation_energies),
-        atol=2e-5,
-        rtol=2e-5,
-    )

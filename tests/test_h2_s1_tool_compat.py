@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 import sys
 
+import h5py
 import numpy as np
 
 
@@ -45,6 +47,40 @@ def test_h2_ground_tool_normalizes_legacy_cli_aliases():
 
     assert args.input_feature_mode == "canonical"
     assert args.scf_gradient_mode == "impl"
+    assert not hasattr(args, "density_matrix_constraint_weight")
+
+
+def test_h2_ground_training_data_uses_density_matrix_target():
+    module = _load_tool_module(
+        "tools/h2_self_consistent_ground_train5_dense100_vs_fci.py",
+        "h2_self_consistent_ground_train5_dense100_vs_fci_test_density_target",
+    )
+    point = SimpleNamespace(
+        molecule=SimpleNamespace(),
+        fci_energy_h=-1.0,
+        fci_density_grid=np.asarray([0.2, 0.3], dtype=np.float64),
+        fci_density_matrix=np.asarray([[1.0]], dtype=np.float64),
+    )
+
+    (datum,) = module.build_training_data([point], density_matrix_mse_weight=0.7)
+
+    assert datum.target_grid_density is None
+    assert np.allclose(np.asarray(datum.target_density_matrix), point.fci_density_matrix)
+    assert datum.target_density_matrix is not None
+
+
+def test_h2_ground_script_exposes_only_explicit_dm_weight():
+    source = Path("tools/h2_self_consistent_ground_train5_dense100_vs_fci.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--density-matrix-mse-weight" in source
+    assert "density_matrix_constraint_weight" not in source
+    assert "_metric_scalar(train_metrics, 'energy_mae')" not in source
+    assert "_metric_scalar(train_metrics, 'e0_total_mae')" in source
+    assert source.count('"density_matrix_mse": float(density_matrix_mse[idx])') == 1
+    assert "predicted_total_energies" not in source
+    assert "predicted_e0_total_h" in source
 
 
 def test_h2_reference_builder_requests_pt2_features_when_pt2_channel_enabled(monkeypatch):
@@ -90,3 +126,214 @@ def test_h2_reference_builder_requests_pt2_features_when_pt2_channel_enabled(mon
 
     assert captured[0]["compute_local_hfx_features"] is True
     assert captured[0]["compute_local_pt2_features"] is True
+
+
+def test_h2_s1_tool_defaults_to_explicit_s1_total_tda_objective():
+    module = _load_tool_module(
+        "tools/h2_s1_tda_train5_dense100_vs_fci.py",
+        "h2_s1_tda_train5_dense100_vs_fci_test_default_objective",
+    )
+
+    args = module.parse_args([])
+
+    assert not hasattr(args, "objective")
+    assert args.s1_total_mse_weight == 1.0
+    assert args.s1_total_mae_weight == 1.0
+    assert args.excited_state_solver == "tda"
+    assert args.checkpoint_every == 10
+    assert module._resolved_objective_kind(args) == "s1_total"
+    assert module._objective_name(args) == "s1_total_tda"
+
+
+def test_h2_s1_training_checkpoint_writes_metadata_atomically(tmp_path):
+    module = _load_tool_module(
+        "tools/h2_s1_tda_train5_dense100_vs_fci.py",
+        "h2_s1_tda_train5_dense100_vs_fci_test_checkpoint",
+    )
+    args = module.parse_args(
+        [
+            "--outdir",
+            str(tmp_path),
+            "--train-r-values",
+            "0.8",
+            "1.0",
+            "--checkpoint-every",
+            "7",
+            "--include-hfx-channel",
+            "--no-include-pt2-channel",
+        ]
+    )
+    params = {"dense": {"kernel": np.asarray([1.0, 2.0], dtype=np.float64)}}
+
+    checkpoint_path, meta_path = module._save_training_checkpoint(
+        args,
+        kind="best",
+        params=params,
+        step=3,
+        parameter_state="pre_update",
+        loss=0.12,
+        s1_total_mae=0.04,
+        s1_total_mse=0.002,
+        s1_total_penalty=0.042,
+        learning_rate=5e-5,
+        min_loss=0.12,
+        min_loss_step=3,
+    )
+    module._save_training_checkpoint(
+        args,
+        kind="best",
+        params=params,
+        step=4,
+        parameter_state="pre_update",
+        loss=0.08,
+        min_loss=0.08,
+        min_loss_step=4,
+    )
+
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert checkpoint_path == tmp_path / "neural_xc_params_best.msgpack"
+    assert checkpoint_path.exists()
+    assert metadata["checkpoint_kind"] == "best"
+    assert metadata["parameter_state"] == "pre_update"
+    assert metadata["step"] == 4
+    assert metadata["loss"] == 0.08
+    assert metadata["min_loss_step"] == 4
+    assert metadata["checkpoint_every"] == 7
+    assert metadata["include_hfx_channel"] is True
+    assert metadata["include_pt2_channel"] is False
+    assert metadata["train_r_values_angstrom"] == [0.8, 1.0]
+    assert not any(tmp_path.glob("*.tmp"))
+
+
+def test_h2_s1_tool_exposes_hfx_channel_controls():
+    module = _load_tool_module(
+        "tools/h2_s1_tda_train5_dense100_vs_fci.py",
+        "h2_s1_tda_train5_dense100_vs_fci_test_hfx_controls",
+    )
+
+    default_args = module.parse_args([])
+    hfx_args = module.parse_args(
+        [
+            "--include-hfx-channel",
+            "--response-hf-mode",
+            "approx",
+        ]
+    )
+
+    assert default_args.include_hfx_channel is False
+    assert default_args.response_hf_mode == "approx"
+    assert hfx_args.include_hfx_channel is True
+    assert hfx_args.response_hf_mode == "approx"
+
+
+def test_h2_s1_self_consistent_config_uses_current_implicit_diff_fields():
+    module = _load_tool_module(
+        "tools/h2_s1_tda_train5_dense100_vs_fci.py",
+        "h2_s1_tda_train5_dense100_vs_fci_test_implicit_diff_config",
+    )
+
+    args = module.parse_args(
+        [
+            "--scf-implicit-diff-max-iter",
+            "9",
+            "--scf-implicit-diff-clip",
+            "123.0",
+            "--scf-implicit-diff-tolerance",
+            "1e-5",
+            "--scf-implicit-diff-regularization",
+            "2e-3",
+        ]
+    )
+
+    config = module._self_consistent_prediction_config(args)
+
+    assert config.scf_implicit_diff_max_iter == 9
+    assert config.scf_implicit_diff_clip == 123.0
+    assert config.scf_implicit_diff_tolerance == 1e-5
+    assert config.scf_implicit_diff_regularization == 2e-3
+    assert not hasattr(config, "scf_implicit_diff_solver")
+    assert not hasattr(config, "scf_implicit_diff_restart")
+
+
+def test_h2_s1_reference_cache_writer_matches_current_reference_point(tmp_path, monkeypatch):
+    module = _load_tool_module(
+        "tools/h2_s1_tda_train5_dense100_vs_fci.py",
+        "h2_s1_tda_train5_dense100_vs_fci_test_reference_cache_writer",
+    )
+    point = SimpleNamespace(
+        r_angstrom=0.74,
+        atom="H 0 0 -0.37; H 0 0 0.37",
+        molecule=SimpleNamespace(),
+        fci_energy_h=-1.0,
+        fci_total_energies_h=np.asarray([-1.0, -0.5], dtype=np.float64),
+        fci_excitation_energies_h=np.asarray([0.5], dtype=np.float64),
+        fci_density_grid=np.asarray([0.2, 0.3], dtype=np.float64),
+        fci_density_matrix=np.asarray([[1.0]], dtype=np.float64),
+        fci_electron_count=2.0,
+    )
+    monkeypatch.setattr(module, "write_restricted_molecule", lambda group, molecule: None)
+
+    with h5py.File(tmp_path / "refs.h5", "w") as handle:
+        group = handle.create_group("point")
+        module._write_reference_point(group, point)
+        assert "fci_density_grid" in group
+        assert "fci_density_matrix" in group
+        assert "fci_dm_ao" not in group
+
+
+def test_h2_s1_training_data_uses_density_matrix_target():
+    module = _load_tool_module(
+        "tools/h2_s1_tda_train5_dense100_vs_fci.py",
+        "h2_s1_tda_train5_dense100_vs_fci_test_density_target",
+    )
+    point = SimpleNamespace(
+        molecule=SimpleNamespace(),
+        fci_energy_h=-1.0,
+        fci_total_energies_h=np.asarray([-1.0, -0.4], dtype=np.float64),
+        fci_excitation_energies_h=np.asarray([0.5], dtype=np.float64),
+        fci_density_grid=np.asarray([0.2, 0.3], dtype=np.float64),
+        fci_density_matrix=np.asarray([[1.0]], dtype=np.float64),
+    )
+
+    (datum,) = module.build_s1_training_data([point])
+
+    assert datum.target_grid_density is None
+    assert np.allclose(np.asarray(datum.target_density_matrix), point.fci_density_matrix)
+    assert np.allclose(np.asarray(datum.target_density_matrix), point.fci_density_matrix)
+    assert np.isclose(np.asarray(datum.target_s1_total_h), -0.4)
+
+
+def test_h2_s1_tool_infers_e0_total_from_explicit_weights():
+    module = _load_tool_module(
+        "tools/h2_s1_tda_train5_dense100_vs_fci.py",
+        "h2_s1_tda_train5_dense100_vs_fci_test_e0_objective",
+    )
+
+    args = module.parse_args(
+        [
+            "--s1-total-mse-weight",
+            "0",
+            "--s1-total-mae-weight",
+            "0",
+            "--e0-total-mae-weight",
+            "1",
+        ]
+    )
+
+    assert module._resolved_objective_kind(args) == "e0_total"
+    assert module._objective_name(args) == "e0_total"
+
+
+def test_h2_s1_tool_infers_joint_objective_without_mutating_weights():
+    module = _load_tool_module(
+        "tools/h2_s1_tda_train5_dense100_vs_fci.py",
+        "h2_s1_tda_train5_dense100_vs_fci_test_joint_objective",
+    )
+
+    args = module.parse_args(["--e0-total-mae-weight", "0.7"])
+
+    assert args.e0_total_mae_weight == 0.7
+    assert args.s1_total_mse_weight == 1.0
+    assert args.s1_total_mae_weight == 1.0
+    assert module._resolved_objective_kind(args) == "e0_plus_s1_total"
+    assert module._objective_name(args) == "e0_plus_s1_total_tda"

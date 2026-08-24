@@ -145,6 +145,7 @@ def restricted_reference_from_pyscf(
 
     hfx_local = None
     hfx_nu = None
+    hfx_fxx = None
     pt2_local = None
     if compute_local_hfx_features:
         dm_half_np = np.asarray(half_dm)
@@ -156,13 +157,15 @@ def restricted_reference_from_pyscf(
             omega_values=tuple(float(omega) for omega in hfx_omega_values),
             chunk_size=hfx_chunk_size,
             return_nu=bool(compute_local_hfx_aux),
+            return_fxx=True,
         )
         if compute_local_hfx_aux:
-            hfx_local_np, hfx_nu_np = hfx_result
+            hfx_local_np, hfx_nu_np, hfx_fxx_np = hfx_result
             hfx_nu = jnp.asarray(hfx_nu_np)
         else:
-            hfx_local_np = hfx_result
+            hfx_local_np, hfx_fxx_np = hfx_result
         hfx_local = jnp.asarray(hfx_local_np)
+        hfx_fxx = jnp.asarray(hfx_fxx_np)
     if compute_local_pt2_features:
         pt2_local = _local_pt2_feature_from_restricted_orbitals(
             ao,
@@ -199,6 +202,7 @@ def restricted_reference_from_pyscf(
         ),
         hfx_local=hfx_local,
         hfx_nu=hfx_nu,
+        hfx_fxx=hfx_fxx,
         pt2_local=pt2_local,
         eri_ovov=eri_ovov,
         eri_ovvo=eri_ovvo,
@@ -322,6 +326,7 @@ def restricted_reference_from_pyscf_with_jax_rhf(
     mo_energy = jnp.asarray(rhf.mo_energy)
     hfx_local = None
     hfx_nu = None
+    hfx_fxx = None
     pt2_local = None
     if compute_local_hfx_features:
         hfx_result = _local_hfx_features_from_basis_dm(
@@ -332,11 +337,12 @@ def restricted_reference_from_pyscf_with_jax_rhf(
             omega_values=tuple(float(omega) for omega in hfx_omega_values),
             chunk_size=hfx_chunk_size,
             return_nu=bool(compute_local_hfx_aux),
+            return_fxx=True,
         )
         if compute_local_hfx_aux:
-            hfx_local, hfx_nu = hfx_result
+            hfx_local, hfx_nu, hfx_fxx = hfx_result
         else:
-            hfx_local = hfx_result
+            hfx_local, hfx_fxx = hfx_result
     nocc = int(np.count_nonzero(np.asarray(rhf.mo_occ) > 1e-8))
     eri_ovov, eri_ovvo, eri_oovv = _restricted_response_eri_slices_from_mo_tensor(
         np.asarray(eri),
@@ -377,6 +383,7 @@ def restricted_reference_from_pyscf_with_jax_rhf(
         nocc=nocc,
         hfx_local=hfx_local,
         hfx_nu=hfx_nu,
+        hfx_fxx=hfx_fxx,
         pt2_local=pt2_local,
         eri_ovov=eri_ovov,
         eri_ovvo=eri_ovvo,
@@ -477,6 +484,7 @@ def restricted_reference_from_pyscf_with_jax_rks(
     mo_energy = jnp.asarray(rks.mo_energy)
     hfx_local = None
     hfx_nu = None
+    hfx_fxx = None
     pt2_local = None
     if compute_local_hfx_features:
         hfx_result = _local_hfx_features_from_basis_dm(
@@ -487,11 +495,12 @@ def restricted_reference_from_pyscf_with_jax_rks(
             omega_values=tuple(float(omega) for omega in hfx_omega_values),
             chunk_size=hfx_chunk_size,
             return_nu=bool(compute_local_hfx_aux),
+            return_fxx=True,
         )
         if compute_local_hfx_aux:
-            hfx_local, hfx_nu = hfx_result
+            hfx_local, hfx_nu, hfx_fxx = hfx_result
         else:
-            hfx_local = hfx_result
+            hfx_local, hfx_fxx = hfx_result
     mf_energy = float(rks.total_energy) if energy_target is None else float(energy_target)
     nocc = int(np.count_nonzero(np.asarray(rks.mo_occ) > 1e-8))
     eri_ovov, eri_ovvo, eri_oovv = eri_pair_matrix_to_mo_eri_slices(
@@ -531,6 +540,7 @@ def restricted_reference_from_pyscf_with_jax_rks(
         nocc=nocc,
         hfx_local=hfx_local,
         hfx_nu=hfx_nu,
+        hfx_fxx=hfx_fxx,
         pt2_local=pt2_local,
         eri_ovov=eri_ovov,
         eri_ovvo=eri_ovvo,
@@ -688,6 +698,7 @@ def unrestricted_reference_from_pyscf_with_jax_uks(
     nocc_beta = int(np.count_nonzero(np.asarray(uks.mo_occ_beta) > 1e-8))
     hfx_local = None
     hfx_nu = None
+    hfx_fxx = None
     if compute_local_hfx_features:
         hfx_result = _local_hfx_features_from_basis_dm(
             basis,
@@ -697,11 +708,12 @@ def unrestricted_reference_from_pyscf_with_jax_uks(
             omega_values=tuple(float(omega) for omega in hfx_omega_values),
             chunk_size=hfx_chunk_size,
             return_nu=bool(compute_local_hfx_aux),
+            return_fxx=True,
         )
         if compute_local_hfx_aux:
-            hfx_local, hfx_nu = hfx_result
+            hfx_local, hfx_nu, hfx_fxx = hfx_result
         else:
-            hfx_local = hfx_result
+            hfx_local, hfx_fxx = hfx_result
     return UnrestrictedMolecule(
         ao=ao,
         grid=QuadratureGrid(weights=weights, coords=coords),
@@ -728,6 +740,7 @@ def unrestricted_reference_from_pyscf_with_jax_uks(
         ),
         hfx_local=hfx_local,
         hfx_nu=hfx_nu,
+        hfx_fxx=hfx_fxx,
     )
 
 

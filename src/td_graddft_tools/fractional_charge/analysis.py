@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array
 
-from td_graddft.training import GroundStateTrainingConfig, predict_ground_state_total_energy
+from td_graddft.training import MolecularTrainingConfig, predict_ground_state_total_energy
 
 
 FractionalChargeEnergyEvaluator = Callable[[Any], Array]
@@ -160,7 +160,7 @@ def make_neural_xc_energy_evaluator(
     params: Any,
     functional: Any,
     *,
-    training_config: GroundStateTrainingConfig | None = None,
+    training_config: MolecularTrainingConfig | None = None,
 ) -> FractionalChargeEnergyEvaluator:
     """Wrap the standard ground-state predictor as a molecule -> energy callable."""
 

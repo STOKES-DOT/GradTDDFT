@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "td-graddft"
-version = "0.1.0"
-description = "JAX research toolkit for differentiable TDDFT, Neural XC/RSH training, spectra, integrals, and GPU4PySCF workflows."
+version = "1.0.0"
+description = "JAX research toolkit for differentiable TDDFT, Neural XC training, spectra, integrals, and GPU4PySCF workflows."
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "Apache-2.0"}
+license = {text = "MIT"}
 authors = [
-  {name = "Codex"},
+  {name = "GradTDDFT developers"},
 ]
 dependencies = [
   "jax>=0.4.14",
@@ -18,8 +18,12 @@ dependencies = [
   "flax>=0.10.7,<0.11; python_version < '3.11'",
   "flax>=0.12.0; python_version >= '3.11'",
   "jaxtyping>=0.2.36",
+  "numpy>=1.24",
   "optax>=0.2.6",
 ]
+
+[project.urls]
+Repository = "https://github.com/STOKES-DOT/GradTDDFT"
 
 [project.optional-dependencies]
 dev = [
@@ -28,6 +32,13 @@ dev = [
 upstreams = [
   "jax-xc>=0.0.12",
   "pyscf>=2.3.0",
+]
+reproducibility = [
+  "h5py>=3.8",
+  "jax-xc>=0.0.12",
+  "matplotlib>=3.7",
+  "pyscf>=2.3.0",
+  "scipy>=1.10",
 ]
 
 [tool.pytest.ini_options]

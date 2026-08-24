@@ -14,12 +14,13 @@ from .components import (
     normalize_semilocal_xc_names,
 )
 from .defaults import (
-    DEFAULT_INPUT_FEATURE_MODE,
-    DEFAULT_NEURAL_XC_SEMILOCAL_XC,
     DEFAULT_NETWORK_ARCHITECTURE,
+    DEFAULT_INPUT_FEATURE_MODE,
+    DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
+    DEFAULT_NEURAL_XC_SEMILOCAL_XC,
     DEFAULT_NETWORK_HIDDEN_DIMS,
 )
-from .networks import SimpleMixingMLP, ResidualMixingMLP, normalize_hidden_dims
+from .networks import ResidualMixingMLP, normalize_hidden_dims
 
 
 def _make_neural_xc_hybrid_functional(
@@ -30,15 +31,19 @@ def _make_neural_xc_hybrid_functional(
     n_semilocal_channels: int | None = None,
     input_feature_mode: Literal["enhanced", "canonical"] = DEFAULT_INPUT_FEATURE_MODE,
     hf_input_mode: Literal["total_only", "spin_resolved"] = "spin_resolved",
+    include_hfx_channel: bool = False,
+    ground_state_hf_mode: Literal["off", "nograd"] | None = None,
     include_pt2_channel: bool = False,
+    ground_state_pt2_mode: Literal["off", "nograd"] | None = None,
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected",
-    response_hf_mode: Literal["approx", "strict"] = "strict",
+    response_hf_mode: Literal["approx", "strict"] = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     response_pt2_mode: Literal["approx", "strict"] = "approx",
     strict_feature_alignment: bool = True,
     allow_experimental_jax_xc: bool = False,
+    architecture: str | None = None,
+    network_architecture: str | None = None,
     hidden_dims: Sequence[int] = DEFAULT_NETWORK_HIDDEN_DIMS,
     activation: Callable[[Array], Array] = nn.tanh,
-    network_architecture: Literal["simple_mlp", "graddft_residual"] = DEFAULT_NETWORK_ARCHITECTURE,
     squash_offset: float = 1e-4,
     sigmoid_scale_factor: float = 2.0,
     density_floor: float = 1e-12,
@@ -48,6 +53,32 @@ def _make_neural_xc_hybrid_functional(
     hfx_channels: int = 2,
     name: str = "neural_xc",
 ) -> NeuralXCFunctional:
+    if ground_state_hf_mode is not None:
+        ground_state_hf_mode = str(ground_state_hf_mode).lower()  # type: ignore[assignment]
+        if ground_state_hf_mode not in {"off", "nograd"}:
+            raise ValueError(
+                "ground_state_hf_mode must be 'off' or 'nograd'; "
+                f"got {ground_state_hf_mode!r}."
+            )
+        include_hfx_channel = ground_state_hf_mode != "off"
+    if ground_state_pt2_mode is not None:
+        ground_state_pt2_mode = str(ground_state_pt2_mode).lower()  # type: ignore[assignment]
+        if ground_state_pt2_mode not in {"off", "nograd"}:
+            raise ValueError(
+                "ground_state_pt2_mode must be 'off' or 'nograd'; "
+                f"got {ground_state_pt2_mode!r}."
+            )
+        include_pt2_channel = ground_state_pt2_mode != "off"
+    arch = DEFAULT_NETWORK_ARCHITECTURE
+    if architecture is not None:
+        arch = str(architecture)
+    if network_architecture is not None:
+        arch = str(network_architecture)
+    if arch not in {"graddft_residual", "residual"}:
+        raise ValueError(
+            f"Unsupported network architecture={arch!r}. "
+            "Expected 'graddft_residual'."
+        )
     if non_hf_module is not None:
         if (
             n_semilocal_channels is not None
@@ -72,30 +103,19 @@ def _make_neural_xc_hybrid_functional(
         raise ValueError("n_semilocal_channels must be a positive integer.")
 
     dims = normalize_hidden_dims(hidden_dims)
-    output_dim = n_semilocal + 1 + int(bool(include_pt2_channel))
-
-    if network_architecture == "simple_mlp":
-        model = SimpleMixingMLP(
-            hidden_dims=dims,
-            output_dim=output_dim,
-            activation=activation,
-            squash_offset=squash_offset,
-            sigmoid_scale_factor=sigmoid_scale_factor,
-        )
-    elif network_architecture == "graddft_residual":
-        block_activation = nn.elu if activation is nn.tanh else activation
-        model = ResidualMixingMLP(
-            hidden_dims=dims,
-            output_dim=output_dim,
-            block_activation=block_activation,
-            squash_offset=squash_offset,
-            sigmoid_scale_factor=sigmoid_scale_factor,
-        )
-    else:
-        raise ValueError(
-            f"Unsupported network_architecture={network_architecture!r}. "
-            "Expected 'simple_mlp' or 'graddft_residual'."
-        )
+    output_dim = (
+        n_semilocal
+        + int(bool(include_pt2_channel))
+        + int(bool(include_hfx_channel))
+    )
+    block_activation = nn.elu if activation is nn.tanh else activation
+    model = ResidualMixingMLP(
+        hidden_dims=dims,
+        output_dim=output_dim,
+        block_activation=block_activation,
+        squash_offset=squash_offset,
+        sigmoid_scale_factor=sigmoid_scale_factor,
+    )
 
     return NeuralXCFunctional(
         model=model,
@@ -104,7 +124,10 @@ def _make_neural_xc_hybrid_functional(
         semilocal_energy_density_fn=semilocal_energy_density_fn,
         input_feature_mode=input_feature_mode,
         hf_input_mode=hf_input_mode,
+        include_hfx_channel=bool(include_hfx_channel),
+        ground_state_hf_mode=ground_state_hf_mode,
         include_pt2_channel=bool(include_pt2_channel),
+        ground_state_pt2_mode=ground_state_pt2_mode,
         pt2_channel_mode=pt2_channel_mode,
         response_hf_mode=response_hf_mode,
         response_pt2_mode=response_pt2_mode,
@@ -119,7 +142,7 @@ def _make_neural_xc_hybrid_functional(
     )
 
 
-NeuralXCMixingMLP = SimpleMixingMLP
+NeuralXCMixingMLP = ResidualMixingMLP
 
 
 def make_neural_xc_functional(
@@ -130,15 +153,19 @@ def make_neural_xc_functional(
     n_semilocal_channels: int | None = None,
     input_feature_mode: Literal["enhanced", "canonical"] = DEFAULT_INPUT_FEATURE_MODE,
     hf_input_mode: Literal["total_only", "spin_resolved"] = "spin_resolved",
+    include_hfx_channel: bool = False,
+    ground_state_hf_mode: Literal["off", "nograd"] | None = None,
     include_pt2_channel: bool = False,
+    ground_state_pt2_mode: Literal["off", "nograd"] | None = None,
     pt2_channel_mode: Literal["scaled_projected", "local_exact"] = "scaled_projected",
-    response_hf_mode: Literal["approx", "strict"] = "strict",
+    response_hf_mode: Literal["approx", "strict"] = DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
     response_pt2_mode: Literal["approx", "strict"] = "approx",
     strict_feature_alignment: bool = True,
     allow_experimental_jax_xc: bool = False,
+    architecture: str | None = None,
+    network_architecture: str | None = None,
     hidden_dims: Sequence[int] = DEFAULT_NETWORK_HIDDEN_DIMS,
     activation: Callable[[Array], Array] = nn.tanh,
-    network_architecture: Literal["simple_mlp", "graddft_residual"] = DEFAULT_NETWORK_ARCHITECTURE,
     squash_offset: float = 1e-4,
     sigmoid_scale_factor: float = 2.0,
     density_floor: float = 1e-12,
@@ -155,15 +182,19 @@ def make_neural_xc_functional(
         n_semilocal_channels=n_semilocal_channels,
         input_feature_mode=input_feature_mode,
         hf_input_mode=hf_input_mode,
+        include_hfx_channel=include_hfx_channel,
+        ground_state_hf_mode=ground_state_hf_mode,
         include_pt2_channel=include_pt2_channel,
+        ground_state_pt2_mode=ground_state_pt2_mode,
         pt2_channel_mode=pt2_channel_mode,
         response_hf_mode=response_hf_mode,
         response_pt2_mode=response_pt2_mode,
         strict_feature_alignment=strict_feature_alignment,
         allow_experimental_jax_xc=allow_experimental_jax_xc,
+        architecture=architecture,
+        network_architecture=network_architecture,
         hidden_dims=hidden_dims,
         activation=activation,
-        network_architecture=network_architecture,
         squash_offset=squash_offset,
         sigmoid_scale_factor=sigmoid_scale_factor,
         density_floor=density_floor,

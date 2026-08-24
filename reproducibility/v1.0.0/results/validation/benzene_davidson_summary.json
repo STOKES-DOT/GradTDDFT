@@ -1,0 +1,890 @@
+{
+  "molecule": "benzene",
+  "xc": "b3lyp",
+  "basis": "def2-tzvp",
+  "grids_level": 0,
+  "nocc": 21,
+  "nvir": 201,
+  "nmo": 222,
+  "dim_nocc_x_nvir": 4221,
+  "nstates": 5,
+  "davidson_tol": 1e-05,
+  "davidson_max_iter": 100,
+  "davidson_max_subspace": null,
+  "tdgraddft_jk_backend": "full",
+  "tdgraddft_response_mode": "direct",
+  "pyscf": {
+    "solver": "pyscf_tdhf_real_eig",
+    "equation": "full TDHF/TDDFT [A B; -B -A] [X,Y] = omega [X,Y]",
+    "converged": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ],
+    "energies_h": [
+      0.19812304424725619,
+      0.22269467203831902,
+      0.25883387006045566,
+      0.2588486629625471,
+      0.26529205276585394
+    ],
+    "energies_ev": [
+      5.391202681243059,
+      6.0598307357583225,
+      7.043228411758928,
+      7.043630947131438,
+      7.21896451580268
+    ],
+    "elapsed_s": 57.21838215399475,
+    "initial_guess_shape": [
+      6,
+      8442
+    ],
+    "hdiag_shape": [
+      8442
+    ],
+    "history": [
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 0,
+        "subspace_dim": 6,
+        "max_residual": 0.259,
+        "max_delta_e": 0.307,
+        "lindep": 0.0,
+        "root_residuals": [
+          0.077,
+          0.242,
+          0.0347,
+          0.0344,
+          0.259
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 1,
+        "subspace_dim": 12,
+        "max_residual": 0.0691,
+        "max_delta_e": 0.263,
+        "lindep": 0.0,
+        "root_residuals": [
+          0.0394,
+          0.0606,
+          0.0691,
+          0.069,
+          0.0337
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 2,
+        "subspace_dim": 24,
+        "max_residual": 0.0435,
+        "max_delta_e": -0.00283,
+        "lindep": 0.0,
+        "root_residuals": [
+          0.00867,
+          0.022,
+          0.0435,
+          0.0435,
+          0.00763
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 3,
+        "subspace_dim": 44,
+        "max_residual": 0.0206,
+        "max_delta_e": -0.000967,
+        "lindep": 0.0,
+        "root_residuals": [
+          0.00174,
+          0.00898,
+          0.0205,
+          0.0206,
+          0.00194
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 4,
+        "subspace_dim": 64,
+        "max_residual": 0.0186,
+        "max_delta_e": -0.000211,
+        "lindep": 0.0,
+        "root_residuals": [
+          0.000365,
+          0.00496,
+          0.0185,
+          0.0186,
+          0.000633
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 5,
+        "subspace_dim": 84,
+        "max_residual": 0.0146,
+        "max_delta_e": -0.000119,
+        "lindep": 0.0,
+        "root_residuals": [
+          0.00011,
+          0.0016,
+          0.0144,
+          0.0146,
+          0.000417
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 6,
+        "subspace_dim": 104,
+        "max_residual": 0.00745,
+        "max_delta_e": -0.000159,
+        "lindep": 0.0,
+        "root_residuals": [
+          0.000115,
+          0.00168,
+          0.00745,
+          0.0073,
+          0.000191
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 7,
+        "subspace_dim": 124,
+        "max_residual": 0.0057,
+        "max_delta_e": -3.22e-05,
+        "lindep": 0.0,
+        "root_residuals": [
+          5.31e-05,
+          0.00139,
+          0.0057,
+          0.00547,
+          0.000136
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 8,
+        "subspace_dim": 144,
+        "max_residual": 0.00465,
+        "max_delta_e": -4.96e-06,
+        "lindep": 0.0,
+        "root_residuals": [
+          1.33e-05,
+          0.000545,
+          0.00465,
+          0.00454,
+          5.55e-05
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 9,
+        "subspace_dim": 164,
+        "max_residual": 0.00324,
+        "max_delta_e": -3.16e-06,
+        "lindep": 0.0,
+        "root_residuals": [
+          9.58e-06,
+          0.000406,
+          0.00324,
+          0.00324,
+          4.45e-05
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 10,
+        "subspace_dim": 183,
+        "max_residual": 0.00232,
+        "max_delta_e": -2.34e-06,
+        "lindep": 0.0,
+        "root_residuals": [
+          6.63e-06,
+          0.000303,
+          0.00231,
+          0.00232,
+          2.94e-05
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 11,
+        "subspace_dim": 202,
+        "max_residual": 0.00149,
+        "max_delta_e": -3.13e-06,
+        "lindep": 0.0,
+        "root_residuals": [
+          5.1e-06,
+          0.000151,
+          0.000829,
+          0.00149,
+          1.27e-05
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 12,
+        "subspace_dim": 221,
+        "max_residual": 0.000831,
+        "max_delta_e": -3.94e-07,
+        "lindep": 0.0,
+        "root_residuals": [
+          4.61e-06,
+          6.91e-05,
+          0.000602,
+          0.000831,
+          5.9e-06
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 13,
+        "subspace_dim": 238,
+        "max_residual": 0.000474,
+        "max_delta_e": -2.22e-07,
+        "lindep": 0.0,
+        "root_residuals": [
+          3.37e-06,
+          4.25e-05,
+          0.000312,
+          0.000474,
+          4.13e-06
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 14,
+        "subspace_dim": 255,
+        "max_residual": 0.000157,
+        "max_delta_e": -9.36e-08,
+        "lindep": 0.0,
+        "root_residuals": [
+          3.24e-06,
+          1.74e-05,
+          0.000101,
+          0.000157,
+          3.38e-06
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 15,
+        "subspace_dim": 272,
+        "max_residual": 8.71e-05,
+        "max_delta_e": -7.3e-09,
+        "lindep": 0.0,
+        "root_residuals": [
+          2.37e-06,
+          1.08e-05,
+          3.97e-05,
+          8.71e-05,
+          1.71e-06
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 16,
+        "subspace_dim": 289,
+        "max_residual": 3.7e-05,
+        "max_delta_e": -2.31e-09,
+        "lindep": 0.0,
+        "root_residuals": [
+          1.78e-06,
+          3.06e-06,
+          1.49e-05,
+          3.7e-05,
+          1.13e-06
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 17,
+        "subspace_dim": 305,
+        "max_residual": 2.32e-05,
+        "max_delta_e": -3.18e-10,
+        "lindep": 0.0,
+        "root_residuals": [
+          1.46e-06,
+          2.6e-06,
+          1e-05,
+          2.32e-05,
+          5.27e-07
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 18,
+        "subspace_dim": 321,
+        "max_residual": 1.65e-05,
+        "max_delta_e": -4.98e-11,
+        "lindep": 0.0,
+        "root_residuals": [
+          8.95e-07,
+          2.24e-06,
+          4.44e-06,
+          1.65e-05,
+          2.23e-07
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 19,
+        "subspace_dim": 335,
+        "max_residual": 1.24e-05,
+        "max_delta_e": -6.44e-11,
+        "lindep": 0.0,
+        "root_residuals": [
+          6.52e-07,
+          1.84e-06,
+          4.3e-06,
+          1.24e-05,
+          1.71e-07
+        ],
+        "converged": false
+      },
+      {
+        "solver": "pyscf_tdhf_real_eig",
+        "iteration": 20,
+        "subspace_dim": 5,
+        "max_residual": 8.85e-06,
+        "max_delta_e": -4.01e-11,
+        "lindep": "",
+        "root_residuals": [
+          6.45e-07,
+          1.53e-06,
+          3.48e-06,
+          8.85e-06,
+          1.24e-07
+        ],
+        "converged": true
+      }
+    ],
+    "raw_vectors_shape": [
+      5,
+      8442
+    ]
+  },
+  "tdgraddft": {
+    "solver": "tdgraddft_tdhf_davidson",
+    "equation": "full TDHF/TDDFT [A B; -B -A] [X,Y] = omega [X,Y]",
+    "converged": true,
+    "energies_h": [
+      0.1981230443416668,
+      0.22269467209289767,
+      0.25883387014330583,
+      0.25884866300251846,
+      0.2652920528274503
+    ],
+    "energies_ev": [
+      5.391202683812103,
+      6.059830737243483,
+      7.043228414013396,
+      7.043630948219113,
+      7.218964517478802
+    ],
+    "elapsed_s": 491.3437466309988,
+    "initial_guess_shape": [
+      5,
+      8442
+    ],
+    "hdiag_shape": [
+      4221
+    ],
+    "history": [
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 0,
+        "subspace_dim": 5,
+        "max_residual": 0.2592835224297539,
+        "root_residuals": [
+          0.0770119803282918,
+          0.24182624991562282,
+          0.034691374353561906,
+          0.25921719569815616,
+          0.2592835224297539
+        ],
+        "energies_h": [
+          0.20116788464360785,
+          0.2522119592084618,
+          0.26660878631434654,
+          0.30722051776405834,
+          0.3072562427155867
+        ],
+        "energies_ev": [
+          5.474057009325571,
+          6.863037037878823,
+          7.254794660973762,
+          8.35989617157021,
+          8.360868297024867
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 1,
+        "subspace_dim": 10,
+        "max_residual": 0.07470288143347797,
+        "root_residuals": [
+          0.03936123057763282,
+          0.06627629175295918,
+          0.07470288143347797,
+          0.0745991758991427,
+          0.032171362116992334
+        ],
+        "energies_h": [
+          0.19883136776601296,
+          0.22614438445574725,
+          0.2641365204201186,
+          0.2641399901660147,
+          0.2659243229373225
+        ],
+        "energies_ev": [
+          5.410477146099066,
+          6.153702192786543,
+          7.187520878823143,
+          7.187615295418897,
+          7.236169463650328
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 2,
+        "subspace_dim": 15,
+        "max_residual": 0.05505255177607663,
+        "root_residuals": [
+          0.009043085688245701,
+          0.03574442516882784,
+          0.05505255177607663,
+          0.05503514012975218,
+          0.008391949293879665
+        ],
+        "energies_h": [
+          0.19817845368766374,
+          0.22440110778836672,
+          0.26268597106576125,
+          0.26270017812320423,
+          0.2653759302300405
+        ],
+        "energies_ev": [
+          5.392710448927662,
+          6.106265218056833,
+          7.148049420072857,
+          7.148436013800357,
+          7.2212469378779955
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 3,
+        "subspace_dim": 20,
+        "max_residual": 0.012080544850704283,
+        "root_residuals": [
+          0.002234805085410297,
+          0.007150407303721065,
+          0.01207664488228123,
+          0.012080544850704283,
+          0.0029284068079772864
+        ],
+        "energies_h": [
+          0.1981249189776407,
+          0.2227323905629318,
+          0.2589601617098794,
+          0.25897520149850006,
+          0.26530375704106113
+        ],
+        "energies_ev": [
+          5.391253695255659,
+          6.060857109100189,
+          7.04666498261104,
+          7.047074236108255,
+          7.219283005356073
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 4,
+        "subspace_dim": 25,
+        "max_residual": 0.009753190623225058,
+        "root_residuals": [
+          0.00104307983161037,
+          0.008597619201903902,
+          0.009748432455691253,
+          0.009753190623225058,
+          0.0021342516314997026
+        ],
+        "energies_h": [
+          0.19812377912696563,
+          0.22271803367457266,
+          0.2588800638605431,
+          0.2588949854965841,
+          0.26530032224792427
+        ],
+        "energies_ev": [
+          5.391222678338677,
+          6.060466438265759,
+          7.044485409095277,
+          7.04489144749701,
+          7.2191895398733505
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 5,
+        "subspace_dim": 30,
+        "max_residual": 0.0033264038255409623,
+        "root_residuals": [
+          0.000139476201927265,
+          0.001093849097374248,
+          0.003321351602662216,
+          0.0033264038255409623,
+          0.000839995061420373
+        ],
+        "energies_h": [
+          0.19812305517945977,
+          0.2226950638846633,
+          0.2588406648411499,
+          0.2588554825857953,
+          0.2652926730146416
+        ],
+        "energies_ev": [
+          5.391202978723473,
+          6.059841398440546,
+          7.043413307160857,
+          7.0438165185336965,
+          7.21898139363201
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 6,
+        "subspace_dim": 35,
+        "max_residual": 0.001112087139279419,
+        "root_residuals": [
+          0.00015748739491988376,
+          0.0010703113219511346,
+          0.001112087139279419,
+          0.001109055842251923,
+          0.0006321238139148432
+        ],
+        "energies_h": [
+          0.1981230539646113,
+          0.22269477210678262,
+          0.2588340451367407,
+          0.25884883839075035,
+          0.2652924561695615
+        ],
+        "energies_ev": [
+          5.391202945665762,
+          6.059833458759937,
+          7.043233175827343,
+          7.0436357207760345,
+          7.21897549297678
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 7,
+        "subspace_dim": 40,
+        "max_residual": 0.0007121697147032599,
+        "root_residuals": [
+          7.79772775676249e-06,
+          0.00010330469114011915,
+          0.000709527658136676,
+          0.0007121697147032599,
+          0.00013151179328750107
+        ],
+        "energies_h": [
+          0.1981230443508827,
+          0.22269467637375473,
+          0.25883400858580025,
+          0.2588488022843933,
+          0.26529206635769853
+        ],
+        "energies_ev": [
+          5.39120268406288,
+          6.059830853731538,
+          7.0432321812255845,
+          7.043634738272006,
+          7.2189648856556135
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 8,
+        "subspace_dim": 44,
+        "max_residual": 0.0001703482489246889,
+        "root_residuals": [
+          7.795093732599799e-06,
+          5.1602310119911635e-05,
+          0.00016515395648211662,
+          0.0001703482489246889,
+          7.25508660687832e-05
+        ],
+        "energies_h": [
+          0.19812304435080516,
+          0.22269467245097263,
+          0.25883388435339166,
+          0.2588486792184366,
+          0.2652920583773981
+        ],
+        "energies_ev": [
+          5.39120268406077,
+          6.059830746987199,
+          7.04322880068953,
+          7.043631389476724,
+          7.218964668500576
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 9,
+        "subspace_dim": 48,
+        "max_residual": 0.00020996908917048733,
+        "root_residuals": [
+          8.017797028445079e-06,
+          1.473704086824079e-05,
+          0.0002077711577603168,
+          0.00020996908917048733,
+          2.4847661711831997e-05
+        ],
+        "energies_h": [
+          0.19812304434990766,
+          0.22269467217167588,
+          0.25883388241363253,
+          0.25884867708267467,
+          0.26529205314208665
+        ],
+        "energies_ev": [
+          5.391202684036347,
+          6.059830739387148,
+          7.043228747905995,
+          7.043631331359682,
+          7.2189645260404935
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 10,
+        "subspace_dim": 52,
+        "max_residual": 6.281195384232388e-05,
+        "root_residuals": [
+          8.312131928751772e-06,
+          1.726981912910665e-06,
+          4.3872965413770197e-05,
+          6.281195384232388e-05,
+          4.236861815983872e-06
+        ],
+        "energies_h": [
+          0.19812304434926462,
+          0.22269467209288973,
+          0.2588338709659222,
+          0.2588486645874039,
+          0.265292052827473
+        ],
+        "energies_ev": [
+          5.391202684018849,
+          6.059830737243267,
+          7.043228436397928,
+          7.043630991346044,
+          7.21896451747942
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 11,
+        "subspace_dim": 54,
+        "max_residual": 6.058427431918854e-05,
+        "root_residuals": [
+          8.457415952755132e-06,
+          1.726905328168984e-06,
+          3.755814520929774e-05,
+          6.058427431918854e-05,
+          4.236861817086459e-06
+        ],
+        "energies_h": [
+          0.19812304434868858,
+          0.2226946720929155,
+          0.2588338707072191,
+          0.2588486644010469,
+          0.2652920528274561
+        ],
+        "energies_ev": [
+          5.391202684003175,
+          6.059830737243968,
+          7.043228429358257,
+          7.043630986275011,
+          7.218964517478961
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 12,
+        "subspace_dim": 56,
+        "max_residual": 1.5981152279341133e-05,
+        "root_residuals": [
+          8.254111587213085e-06,
+          1.7267198162727167e-06,
+          6.5904784168329e-06,
+          1.5981152279341133e-05,
+          4.236861817292576e-06
+        ],
+        "energies_h": [
+          0.1981230443481287,
+          0.22269467209289065,
+          0.25883387014329295,
+          0.25884866309613686,
+          0.26529205282745455
+        ],
+        "energies_ev": [
+          5.391202683987939,
+          6.059830737243292,
+          7.043228414013046,
+          7.0436309507666,
+          7.218964517478918
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 13,
+        "subspace_dim": 57,
+        "max_residual": 1.4659323223752516e-05,
+        "root_residuals": [
+          7.991305965591754e-06,
+          1.7267198160861064e-06,
+          6.590478424779498e-06,
+          1.4659323223752516e-05,
+          4.236861816852977e-06
+        ],
+        "energies_h": [
+          0.1981230443447561,
+          0.22269467209291816,
+          0.2588338701433274,
+          0.2588486630519784,
+          0.26529205282744844
+        ],
+        "energies_ev": [
+          5.391202683896167,
+          6.059830737244041,
+          7.043228414013984,
+          7.043630949564987,
+          7.218964517478752
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 14,
+        "subspace_dim": 58,
+        "max_residual": 1.0775408840205091e-05,
+        "root_residuals": [
+          7.626145349714262e-06,
+          1.7267198175409937e-06,
+          6.590478418506409e-06,
+          1.0775408840205091e-05,
+          4.236861817005143e-06
+        ],
+        "energies_h": [
+          0.1981230443430704,
+          0.2226946720929267,
+          0.2588338701433288,
+          0.2588486630342007,
+          0.26529205282744794
+        ],
+        "energies_ev": [
+          5.391202683850296,
+          6.0598307372442735,
+          7.043228414014021,
+          7.043630949081231,
+          7.218964517478739
+        ],
+        "converged": false
+      },
+      {
+        "solver": "tdgraddft_tdhf_davidson",
+        "iteration": 15,
+        "subspace_dim": 59,
+        "max_residual": 7.5377112920377986e-06,
+        "root_residuals": [
+          7.5377112920377986e-06,
+          1.7267198165759394e-06,
+          6.590478406301686e-06,
+          2.2383716329858367e-06,
+          4.236861817451128e-06
+        ],
+        "energies_h": [
+          0.1981230443416668,
+          0.22269467209289767,
+          0.25883387014330583,
+          0.25884866300251846,
+          0.2652920528274503
+        ],
+        "energies_ev": [
+          5.391202683812103,
+          6.059830737243483,
+          7.043228414013396,
+          7.043630948219113,
+          7.218964517478802
+        ],
+        "converged": true
+      }
+    ],
+    "production_energies_h": [
+      0.1981230442933495,
+      0.22269467203834925,
+      0.258833870077699,
+      0.2588486629369197,
+      0.26529205277626594
+    ],
+    "production_energies_ev": [
+      5.391202682497322,
+      6.059830735759145,
+      7.043228412228142,
+      7.043630946434081,
+      7.218964516086006
+    ],
+    "production_converged": true
+  },
+  "energy_delta_tdgraddft_minus_pyscf_ev": [
+    2.5690436444847364e-09,
+    1.4851604390742068e-09,
+    2.2544677236169264e-09,
+    1.0876757272626492e-09,
+    1.6761214638449928e-09
+  ]
+}

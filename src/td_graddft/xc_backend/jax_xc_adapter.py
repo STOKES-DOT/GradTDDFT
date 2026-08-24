@@ -370,6 +370,56 @@ def _evaluate_factory_from_restricted_features(
     return jnp.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def _evaluate_factory_from_unrestricted_features(
+    factory: Any,
+    features: Any,
+    *,
+    family: str,
+) -> jnp.ndarray:
+    rho_a = jnp.maximum(jnp.asarray(features.rho_a), _DENSITY_FLOOR)
+    rho_b = jnp.maximum(jnp.asarray(features.rho_b), _DENSITY_FLOOR)
+    sigma_aa = jnp.maximum(jnp.asarray(features.sigma_aa), 0.0)
+    sigma_bb = jnp.maximum(jnp.asarray(features.sigma_bb), 0.0)
+    grad_a = jnp.sqrt(sigma_aa)
+    grad_b = jnp.sqrt(sigma_bb)
+    tau_a = jnp.maximum(jnp.asarray(features.tau_a), 0.0)
+    tau_b = jnp.maximum(jnp.asarray(features.tau_b), 0.0)
+    origin = jnp.zeros((3,), dtype=rho_a.dtype)
+
+    def point_eval(rho_a_value, rho_b_value, grad_a_value, grad_b_value, tau_a_value, tau_b_value):
+        def rho_fn(r):
+            return jnp.asarray(
+                [
+                    rho_a_value + grad_a_value * r[0],
+                    rho_b_value + grad_b_value * r[0],
+                ],
+                dtype=rho_a.dtype,
+            )
+
+        def mo_fn(r):
+            mo_grad_a = jnp.sqrt(jnp.maximum(2.0 * tau_a_value, 1e-30))
+            mo_grad_b = jnp.sqrt(jnp.maximum(2.0 * tau_b_value, 1e-30))
+            return jnp.asarray(
+                [
+                    [mo_grad_a * r[0]],
+                    [mo_grad_b * r[0]],
+                ],
+                dtype=rho_a.dtype,
+            )
+
+        if family == "MGGA":
+            value = factory(rho_fn, origin, mo_fn)
+        else:
+            value = factory(rho_fn, origin)
+        return jnp.asarray(_coerce_functional_value(value), dtype=rho_a.dtype)
+
+    if rho_a.ndim == 0:
+        value = point_eval(rho_a, rho_b, grad_a, grad_b, tau_a, tau_b)
+    else:
+        value = jax.vmap(point_eval)(rho_a, rho_b, grad_a, grad_b, tau_a, tau_b)
+    return jnp.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def eval_jax_xc_from_restricted_features(
     name: str,
     features: Any,
@@ -391,6 +441,33 @@ def eval_jax_xc_from_restricted_features(
         **_factory_kwargs(info.name, omega),
     )
     return _evaluate_factory_from_restricted_features(
+        functional,
+        features,
+        family=info.family,
+    )
+
+
+def eval_jax_xc_from_unrestricted_features(
+    name: str,
+    features: Any,
+    *,
+    omega: Any | None = None,
+    allow_experimental_jax_xc: bool = False,
+) -> jnp.ndarray:
+    """Evaluate a jax_xc functional as spin-polarized epsilon_xc."""
+
+    info = jax_xc_functional_info(name)
+    _raise_if_not_allowed(info, allow_experimental_jax_xc=allow_experimental_jax_xc)
+    module, _ = load_jax_xc()
+    try:
+        factory = getattr(module, info.name)
+    except AttributeError as exc:
+        raise KeyError(f"Installed jax_xc does not expose functional {info.name!r}.") from exc
+    functional = factory(
+        polarized=True,
+        **_factory_kwargs(info.name, omega),
+    )
+    return _evaluate_factory_from_unrestricted_features(
         functional,
         features,
         family=info.family,

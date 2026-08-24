@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 from jaxtyping import Array, PyTree
 
-from .config import GroundStateTrainingConfig
+from .config import MolecularTrainingConfig
 from .targets import (
     _predict_ground_state_total_energy_from_molecule,
     _resolve_training_molecule_with_mode,
@@ -19,7 +19,7 @@ def predict_ground_state_molecule(
     functional: Any,
     molecule: Any,
     *,
-    training_config: GroundStateTrainingConfig | None = None,
+    training_config: MolecularTrainingConfig | None = None,
 ) -> Any:
     """Resolve the molecule used by a ground-state predictor.
 
@@ -32,7 +32,7 @@ def predict_ground_state_molecule(
         params,
         functional,
         molecule,
-        GroundStateTrainingConfig() if training_config is None else training_config,
+        MolecularTrainingConfig() if training_config is None else training_config,
     )
 
 
@@ -41,7 +41,7 @@ def predict_ground_state_density(
     functional: Any,
     molecule: Any,
     *,
-    training_config: GroundStateTrainingConfig | None = None,
+    training_config: MolecularTrainingConfig | None = None,
     spin_resolved: bool = False,
 ) -> Array:
     """Predict the grid density under fixed-density or self-consistent evaluation."""
@@ -60,11 +60,11 @@ def predict_ground_state_density(
 def make_ground_state_predictor(
     functional: Any,
     *,
-    training_config: GroundStateTrainingConfig | None = None,
+    training_config: MolecularTrainingConfig | None = None,
 ) -> Callable[[PyTree, Any], tuple[Array, Any]]:
     """Create a reusable predictor returning `(energy, evaluated_molecule)`."""
 
-    cfg = GroundStateTrainingConfig() if training_config is None else training_config
+    cfg = MolecularTrainingConfig() if training_config is None else training_config
 
     def predictor(params: PyTree, molecule: Any) -> tuple[Array, Any]:
         predicted_molecule = predict_ground_state_molecule(
@@ -88,18 +88,18 @@ def make_fixed_density_predictor(functional: Any) -> Callable[[PyTree, Any], tup
 
     return make_ground_state_predictor(
         functional,
-        training_config=GroundStateTrainingConfig(mode="fixed_density"),
+        training_config=MolecularTrainingConfig(mode="fixed_density"),
     )
 
 
 def make_self_consistent_predictor(
     functional: Any,
     *,
-    training_config: GroundStateTrainingConfig | None = None,
+    training_config: MolecularTrainingConfig | None = None,
 ) -> Callable[[PyTree, Any], tuple[Array, Any]]:
     """Create a GradDFT-style self-consistent predictor."""
 
-    cfg = GroundStateTrainingConfig() if training_config is None else training_config
+    cfg = MolecularTrainingConfig() if training_config is None else training_config
     if cfg.mode != "self_consistent":
         cfg = replace(cfg, mode="self_consistent")
     return make_ground_state_predictor(functional, training_config=cfg)

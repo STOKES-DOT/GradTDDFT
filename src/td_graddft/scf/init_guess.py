@@ -107,8 +107,9 @@ def _build_pyscf_ks_object(
     return mol, mf
 
 
-def _restricted_guess_density_from_pyscf(
+def _guess_density_from_pyscf(
     *,
+    restricted: bool,
     atom: Any,
     basis: Any,
     unit: str,
@@ -122,10 +123,10 @@ def _restricted_guess_density_from_pyscf(
     chkfile: str | None,
     chkfile_project: bool | None,
     libcint_mol: Any | None = None,
-) -> np.ndarray | None:
+) -> Any | None:
     try:
         mol, mf = _build_pyscf_ks_object(
-            restricted=True,
+            restricted=restricted,
             atom=atom,
             basis=basis,
             unit=unit,
@@ -161,64 +162,19 @@ def _restricted_guess_density_from_pyscf(
             dm = mf.init_guess_by_minao(mol)
     else:
         dm = mf.get_init_guess(mol, key=key)
-    return _normalize_density_matrix(dm)
+    return _normalize_density_matrix(dm) if restricted else _normalize_spin_density_matrices(dm)
 
 
-def _unrestricted_guess_density_from_pyscf(
-    *,
-    atom: Any,
-    basis: Any,
-    unit: str,
-    charge: int,
-    spin: int,
-    cart: bool,
-    verbose: int,
-    xc_spec: str,
-    init_guess: str,
-    sap_basis: Any | None,
-    chkfile: str | None,
-    chkfile_project: bool | None,
-    libcint_mol: Any | None = None,
-) -> tuple[np.ndarray, np.ndarray] | None:
-    try:
-        mol, mf = _build_pyscf_ks_object(
-            restricted=False,
-            atom=atom,
-            basis=basis,
-            unit=unit,
-            charge=charge,
-            spin=spin,
-            cart=cart,
-            verbose=verbose,
-            xc_spec=xc_spec,
-            sap_basis=sap_basis,
-            chkfile=chkfile,
-            libcint_mol=libcint_mol,
-        )
-    except ModuleNotFoundError:
-        warnings.warn(
-            "PySCF is unavailable; falling back to the hcore/1e initial guess.",
-            RuntimeWarning,
-            stacklevel=3,
-        )
+def _host_guess_key(init_guess: str, *, geometry_is_traced: bool) -> str | None:
+    key = _guess_key(init_guess) or "minao"
+    if key in _HCORE_GUESS_KEYS:
         return None
-
-    key = _guess_key(init_guess)
-    if key is None:
+    if key not in _PYSCF_GUESS_KEYS:
         key = "minao"
-    if key == "chkfile":
-        try:
-            dm = mf.init_guess_by_chkfile(chkfile=chkfile, project=chkfile_project)
-        except (OSError, IOError, FileNotFoundError, KeyError, TypeError):
-            warnings.warn(
-                "Failed to load initial guess from chkfile; falling back to MINAO.",
-                RuntimeWarning,
-                stacklevel=3,
-            )
-            dm = mf.init_guess_by_minao(mol)
-    else:
-        dm = mf.get_init_guess(mol, key=key)
-    return _normalize_spin_density_matrices(dm)
+    if geometry_is_traced:
+        _warn_traceable_init_guess_fallback(key)
+        return None
+    return key
 
 
 def restricted_init_guess_from_pyscf(
@@ -244,17 +200,11 @@ def restricted_init_guess_from_pyscf(
             return RestrictedInitGuess()
         return RestrictedInitGuess(density=jnp.asarray(_normalize_density_matrix(init_guess), dtype=dtype))
 
-    key = _guess_key(init_guess)
+    key = _host_guess_key(init_guess, geometry_is_traced=geometry_is_traced)
     if key is None:
-        key = "minao"
-    if key in _HCORE_GUESS_KEYS:
         return RestrictedInitGuess()
-    if key not in _PYSCF_GUESS_KEYS:
-        key = "minao"
-    if geometry_is_traced:
-        _warn_traceable_init_guess_fallback(key)
-        return RestrictedInitGuess()
-    dm = _restricted_guess_density_from_pyscf(
+    dm = _guess_density_from_pyscf(
+        restricted=True,
         atom=atom,
         basis=basis,
         unit=unit,
@@ -301,17 +251,11 @@ def unrestricted_init_guess_from_pyscf(
             density_beta=jnp.asarray(density_beta, dtype=dtype),
         )
 
-    key = _guess_key(init_guess)
+    key = _host_guess_key(init_guess, geometry_is_traced=geometry_is_traced)
     if key is None:
-        key = "minao"
-    if key in _HCORE_GUESS_KEYS:
         return UnrestrictedInitGuess()
-    if key not in _PYSCF_GUESS_KEYS:
-        key = "minao"
-    if geometry_is_traced:
-        _warn_traceable_init_guess_fallback(key)
-        return UnrestrictedInitGuess()
-    dm_pair = _unrestricted_guess_density_from_pyscf(
+    dm_pair = _guess_density_from_pyscf(
+        restricted=False,
         atom=atom,
         basis=basis,
         unit=unit,

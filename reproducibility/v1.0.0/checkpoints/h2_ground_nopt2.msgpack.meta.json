@@ -1,0 +1,27 @@
+{
+  "basis": "def2-tzvp",
+  "dense_points": 100,
+  "density_constraint_weight": 1.0,
+  "final_evaluation_skipped": true,
+  "hidden_dims": [
+    128,
+    128,
+    128,
+    128
+  ],
+  "include_pt2_channel": false,
+  "learning_rate": 0.001,
+  "reference_method": "fci_ground_state",
+  "steps": 2000,
+  "train_r_values_angstrom": [
+    0.4,
+    0.74,
+    1.1,
+    1.6,
+    2.2,
+    3.5,
+    6.0
+  ],
+  "training_mode": "self_consistent",
+  "xc": "b3lyp"
+}

@@ -8,8 +8,8 @@ import optax
 from flax.training.train_state import TrainState
 from jaxtyping import Array, PRNGKeyArray
 
-from .config import GroundStateDatum, GroundStateTrainingConfig
-from .targets import density_on_grid, ground_state_mse_loss
+from .config import MolecularTrainingDatum, MolecularTrainingConfig
+from .targets import density_on_grid, molecular_loss
 
 
 def _tree_l2_norm(tree: Any, *, sanitize: bool = False) -> Array:
@@ -86,25 +86,20 @@ def create_train_state_from_molecule(
     return create_train_state(functional, rng, sample_density, tx)
 
 
-def make_ground_state_loss_and_grad(
+def make_molecular_loss_and_grad(
     functional: Any,
-    training_config: GroundStateTrainingConfig | None = None,
-    loss_fn: Callable[..., tuple[Array, dict[str, Array]]] | None = None,
+    training_config: MolecularTrainingConfig | None = None,
     predictor: Callable[[Any, Any], tuple[Array, Any]] | None = None,
 ):
-    """Create a params-only ground-state objective+gradient kernel.
+    """Create a params-only molecular objective and gradient kernel."""
 
-    This is useful when callers want to JIT only the expensive numerical core
-    and keep optimizer state updates outside the compiled graph.
-    """
-
-    objective = ground_state_mse_loss if loss_fn is None else loss_fn
+    config = MolecularTrainingConfig() if training_config is None else training_config
 
     def compute_loss(local_params, local_data):
-        kwargs = {"training_config": training_config}
+        kwargs = {"training_config": config}
         if predictor is not None:
             kwargs["predictor"] = predictor
-        return objective(
+        return molecular_loss(
             local_params,
             functional,
             local_data,
@@ -119,39 +114,36 @@ def make_ground_state_loss_and_grad(
 
     def loss_and_grad(
         params: Any,
-        data: GroundStateDatum | Sequence[GroundStateDatum],
+        data: MolecularTrainingDatum | Sequence[MolecularTrainingDatum],
     ):
         (loss, metrics), grads = loss_value_and_grad(params, data)
         cleaned_grads, nonfinite_grad_fraction = _sanitize_gradients(grads)
         metrics = dict(metrics)
-        metrics["loss"] = loss
-        metrics["raw_grad_norm"] = jnp.asarray([_tree_l2_norm(grads, sanitize=False)], dtype=loss.dtype)
+        metrics["total_loss"] = loss
         metrics["grad_norm"] = jnp.asarray([_tree_l2_norm(cleaned_grads, sanitize=True)], dtype=loss.dtype)
-        metrics["grad_abs_max"] = jnp.asarray([_tree_abs_max(cleaned_grads, sanitize=True)], dtype=loss.dtype)
         metrics["nonfinite_grad_fraction"] = jnp.asarray([nonfinite_grad_fraction], dtype=loss.dtype)
         return loss, metrics, cleaned_grads
 
     return loss_and_grad
 
 
-def make_ground_state_eval(
+def make_molecular_eval(
     functional: Any,
-    training_config: GroundStateTrainingConfig | None = None,
-    loss_fn: Callable[..., tuple[Array, dict[str, Array]]] | None = None,
+    training_config: MolecularTrainingConfig | None = None,
     predictor: Callable[[Any, Any], tuple[Array, Any]] | None = None,
 ):
     """Create a params-only evaluation kernel aligned with the train-step policy."""
 
-    objective = ground_state_mse_loss if loss_fn is None else loss_fn
+    config = MolecularTrainingConfig() if training_config is None else training_config
 
     def evaluate(
         params: Any,
-        data: GroundStateDatum | Sequence[GroundStateDatum],
+        data: MolecularTrainingDatum | Sequence[MolecularTrainingDatum],
     ):
-        kwargs = {"training_config": training_config}
+        kwargs = {"training_config": config}
         if predictor is not None:
             kwargs["predictor"] = predictor
-        return objective(
+        return molecular_loss(
             params,
             functional,
             data,
@@ -161,28 +153,22 @@ def make_ground_state_eval(
     return evaluate
 
 
-def make_ground_state_train_step(
+def make_molecular_train_step(
     functional: Any,
-    training_config: GroundStateTrainingConfig | None = None,
-    loss_fn: Callable[..., tuple[Array, dict[str, Array]]] | None = None,
+    training_config: MolecularTrainingConfig | None = None,
     predictor: Callable[[Any, Any], tuple[Array, Any]] | None = None,
 ):
-    """Create one ground-state training step.
+    """Create one molecular training step."""
 
-    Passing ``loss_fn`` mirrors GradDFT's explicit ``train_kernel(loss=...)``
-    style while keeping the default TD-GradDFT energy+density objective.
-    """
-
-    loss_and_grad = make_ground_state_loss_and_grad(
+    loss_and_grad = make_molecular_loss_and_grad(
         functional,
         training_config=training_config,
-        loss_fn=loss_fn,
         predictor=predictor,
     )
 
     def train_step(
         state: TrainState,
-        data: GroundStateDatum | Sequence[GroundStateDatum],
+        data: MolecularTrainingDatum | Sequence[MolecularTrainingDatum],
     ):
         loss, metrics, cleaned_grads = loss_and_grad(state.params, data)
         new_state = state.apply_gradients(grads=cleaned_grads)

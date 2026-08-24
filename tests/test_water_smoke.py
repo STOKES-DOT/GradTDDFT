@@ -7,9 +7,10 @@ pytestmark = []
 from td_graddft import neural_xc
 from pyscf_reference import restricted_reference_from_pyscf
 from td_graddft.training import (
-    GroundStateDatum,
+    MolecularTrainingConfig,
+    MolecularTrainingDatum,
     create_train_state_from_molecule,
-    make_ground_state_train_step,
+    make_molecular_train_step,
     predict_excitation_energies,
     predict_ground_state_total_energy,
 )
@@ -57,10 +58,9 @@ def test_water_ground_state_training_and_tddft_smoke():
     functional = _make_trainable_functional()
 
     target_energy = jnp.array(molecule.mf_energy)
-    datum = GroundStateDatum.from_reference(
-        molecule,
-        target_total_energy=target_energy,
-        require_hfx=True,
+    datum = MolecularTrainingDatum(
+        molecule=molecule,
+        target_e0_total_h=target_energy,
     )
 
     state = create_train_state_from_molecule(
@@ -69,7 +69,10 @@ def test_water_ground_state_training_and_tddft_smoke():
         molecule,
         optax.adam(1e-3),
     )
-    train_step = make_ground_state_train_step(functional)
+    train_step = make_molecular_train_step(
+        functional,
+        training_config=MolecularTrainingConfig(e0_total_mae_weight=1.0),
+    )
 
     initial_energy = predict_ground_state_total_energy(state.params, functional, molecule)
     for _ in range(5):
@@ -85,7 +88,7 @@ def test_water_ground_state_training_and_tddft_smoke():
 
     assert jnp.isfinite(initial_energy)
     assert jnp.isfinite(predicted_energy)
-    assert jnp.isfinite(metrics["loss"])
+    assert jnp.isfinite(metrics["total_loss"])
     assert excitations.shape == (3,)
     assert jnp.all(jnp.isfinite(excitations))
     assert jnp.all(excitations > 0.0)

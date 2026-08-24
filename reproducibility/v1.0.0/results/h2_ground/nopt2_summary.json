@@ -1,0 +1,13 @@
+{
+  "csv": "nopt2_dense_curve.csv",
+  "density_matrix_rmse_max": 0.057717190667242985,
+  "density_matrix_rmse_mean": 0.039268647968632615,
+  "energy_mae_ev": 0.11115067766402223,
+  "energy_max_ev": 0.29212559263669896,
+  "energy_max_r_angstrom": 1.70101010101,
+  "energy_rmse_ev": 0.1327774595967402,
+  "n_points": 100,
+  "figure": "../../figures/h2_ground_hfx_nopt2_dissociation_paper_style.pdf",
+  "scf_cycles_max": 26.0,
+  "scf_cycles_mean": 14.29
+}

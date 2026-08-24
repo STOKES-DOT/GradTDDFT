@@ -20,6 +20,8 @@ from ..data.integrals.jax.direct_jk import _DIRECT_PACKED_JK_MAX_NAO
 from ..df import build_j_from_df, build_jk_from_df, build_jk_from_df_orbitals, eri_to_df_factors
 from ..features import (
     MoleculeLikeState,
+    _spin_density_and_gradient,
+    _spin_tau,
     molecule_grid_view,
     restricted_grid_features_with_gradients,
 )
@@ -30,7 +32,12 @@ from ..xc_backend.jax_libxc import (
     restricted_feature_bundle_from_rho_grad_tau,
     xc_type,
 )
-from .core import _build_density_from_occ, _diagonalize_fock, _orthogonalizer
+from .core import (
+    _build_density_from_occ,
+    _diagonalize_fock,
+    _orthogonalizer,
+    _validate_density_matrix,
+)
 from ._pytree import pytree_dataclass
 
 _PYSCF_LIKE_DIIS_START_CYCLE = 2
@@ -62,6 +69,7 @@ class RKSConfig:
     df_tol: float = 1e-10
     df_max_rank: int | None = None
     direct_scf_tol: float = 0.0
+    convergence_metric: Literal["energy_and_residual", "energy"] = "energy_and_residual"
 
 
 @dataclass(frozen=True)
@@ -129,21 +137,6 @@ def _closed_shell_mo_occ(nao: int, nocc: int, dtype: Array) -> Array:
     return jnp.zeros((nao,), dtype=dtype).at[:nocc].set(2.0)
 
 
-def _validate_initial_density(
-    density: Array | None,
-    *,
-    nao: int,
-    dtype: Any,
-    label: str = "init_density",
-) -> Array | None:
-    if density is None:
-        return None
-    dm = jnp.asarray(density, dtype=dtype)
-    if dm.ndim != 2 or int(dm.shape[0]) != nao or int(dm.shape[1]) != nao:
-        raise ValueError(f"{label} must be a square ({nao}, {nao}) matrix for RKS.")
-    return 0.5 * (dm + dm.T)
-
-
 def _build_jk(eri: Array, density: Array) -> tuple[Array, Array]:
     eri_arr = jnp.asarray(eri)
     if eri_arr.ndim == 2:
@@ -166,8 +159,13 @@ def _orthonormal_diis_error(fock: Array, density: Array, overlap: Array, corth: 
     return corth.T @ error @ corth
 
 
-def _scf_residual_norm(fock: Array, density: Array, overlap: Array) -> Array:
-    return jnp.linalg.norm(_commutator_error(fock, density, overlap))
+def _mo_residual_norm(fock: Array, mo_coeff: Array, mo_occ: Array) -> Array:
+    occ = jnp.asarray(mo_occ) > jnp.asarray(1e-12, dtype=mo_occ.dtype)
+    vir = jnp.logical_not(occ)
+    c_occ = jnp.where(occ[None, :], mo_coeff, jnp.zeros_like(mo_coeff))
+    c_vir = jnp.where(vir[None, :], mo_coeff, jnp.zeros_like(mo_coeff))
+    grad = 2.0 * (c_vir.T @ fock @ c_occ)
+    return jnp.linalg.norm(grad)
 
 
 def _apply_fock_damping(fock: Array, fock_prev: Array, factor: Array) -> Array:
@@ -490,40 +488,6 @@ def _restricted_spin_view(
 
 
 @lru_cache(maxsize=64)
-def _point_xc_value_and_grad_kernel(
-    xc_spec: str,
-    xc_kind: str,
-    density_floor: float,
-) -> Callable[[Array], tuple[Array, Array]]:
-    xc_spec_norm = str(xc_spec)
-    xc_kind_norm = str(xc_kind)
-    density_floor_value = float(density_floor)
-
-    def point_energy(variables: Array) -> Array:
-        rho_point = jnp.maximum(variables[0], density_floor_value)
-        if xc_kind_norm == "LDA":
-            grad_point = jnp.zeros((3,), dtype=variables.dtype)
-            tau_point = jnp.asarray(0.0, dtype=variables.dtype)
-        elif xc_kind_norm == "GGA":
-            grad_point = variables[1:4]
-            tau_point = jnp.asarray(0.0, dtype=variables.dtype)
-        elif xc_kind_norm == "MGGA":
-            grad_point = variables[1:4]
-            tau_point = jnp.maximum(variables[4], 0.0)
-        else:
-            raise ValueError(f"Unsupported XC kind={xc_kind_norm!r}.")
-        point_features = restricted_feature_bundle_from_rho_grad_tau(
-            rho_point,
-            grad_point,
-            tau_point,
-            density_floor=density_floor_value,
-        )
-        return eval_xc_energy_density(xc_spec_norm, point_features)
-
-    return jax.jit(jax.vmap(jax.value_and_grad(point_energy)))
-
-
-@lru_cache(maxsize=64)
 def _array_xc_value_and_grad_kernel(
     xc_spec: str,
     xc_kind: str,
@@ -568,16 +532,19 @@ def _array_xc_value_and_grad_kernel(
 
 def _xc_energy_and_potential_on_grid(
     *,
-    molecule,
+    rho: Array,
+    grad: Array,
+    tau: Array,
+    weights: Array,
     xc_spec: str,
     density_floor: float,
     potential_clip: float | None,
     xc_kind: str,
 ) -> tuple[Array, Array, Array]:
-    features, grad = restricted_grid_features_with_gradients(molecule)
-    rho = jnp.maximum(features.rho, density_floor)
-    tau = jnp.maximum(features.tau_a + features.tau_b, 0.0)
-    weights = jnp.asarray(molecule.grid.weights)
+    rho = jnp.maximum(jnp.asarray(rho), density_floor)
+    grad = jnp.asarray(grad)
+    tau = jnp.maximum(jnp.asarray(tau), 0.0)
+    weights = jnp.asarray(weights)
 
     if xc_kind == "HF":
         zeros = jnp.zeros_like(rho)
@@ -690,29 +657,23 @@ def _fock_components_for_density(
     xc_kind: str,
 ) -> tuple[Array, Array, Array, Array]:
     j_mat, k_mat = jk_builder(density, mo_coeff, mo_occ, density_last, j_last, k_last)
-    molecule = _restricted_spin_view(
-        ao=ao,
-        ao_deriv1=ao_deriv1,
-        weights=weights,
-        density=density,
-        mo_coeff=mo_coeff,
-        mo_occ=mo_occ,
-        mo_energy=mo_energy,
-    )
+    del mo_energy
+    rho, grad = _spin_density_and_gradient(ao, ao_deriv1, density)
+    tau = _spin_tau(ao_deriv1, mo_coeff, mo_occ)
     xc_energy, vxc_rho, vxc_grad = _xc_energy_and_potential_on_grid(
-        molecule=molecule,
+        rho=rho,
+        grad=grad,
+        tau=tau,
+        weights=weights,
         xc_spec=cfg.xc_spec,
         density_floor=cfg.density_floor,
         potential_clip=cfg.potential_clip,
         xc_kind=xc_kind,
     )
-    ao_laplacian = getattr(molecule, "ao_laplacian", None)
-    if ao_laplacian is None:
-        ao_laplacian = jnp.zeros_like(ao)
     vxc_matrix = _vxc_matrix_from_grid_potential(
         ao=ao,
         ao_deriv1=ao_deriv1,
-        ao_laplacian=ao_laplacian,
+        ao_laplacian=jnp.zeros_like(ao),
         weights=weights,
         vxc_rho=vxc_rho,
         vxc_grad=vxc_grad,
@@ -825,7 +786,7 @@ def _maybe_run_extra_final_cycle(
         grad_tol = jnp.sqrt(jnp.asarray(cfg.conv_tol, dtype=h.dtype)) * jnp.asarray(3.0, dtype=h.dtype)
         converged_final = jnp.logical_or(
             jnp.abs(total_final - energy) < tol_e,
-            _scf_residual_norm(raw_fock_final, density_final, s) < grad_tol,
+            _mo_residual_norm(raw_fock_final, mo_coeff_final, mo_occ_fixed) < grad_tol,
         )
         return (
             density_final,
@@ -883,6 +844,7 @@ def _advance_scf_iteration_with_fock_builder(
     use_density_damping: Any,
     tol_e: Any,
     grad_tol: Any,
+    energy_only_convergence: Any = False,
     eigenvalue_jitter: float = 0.0,
 ) -> tuple[Array, Array, Array, Array, Array, Array, Array, Array, Array]:
     mo_energy_new, mo_coeff_new = _diagonalize_fock(
@@ -906,9 +868,12 @@ def _advance_scf_iteration_with_fock_builder(
         j_mat,
         k_mat,
     )
-    converged_step = jnp.logical_and(
-        jnp.abs(total_new - energy) < tol_e,
-        _scf_residual_norm(raw_fock_new, density_new, s) < grad_tol,
+    energy_converged = jnp.abs(total_new - energy) < tol_e
+    residual_converged = _mo_residual_norm(raw_fock_new, mo_coeff_new, mo_occ_fixed) < grad_tol
+    converged_step = jnp.where(
+        jnp.asarray(energy_only_convergence),
+        energy_converged,
+        jnp.logical_and(energy_converged, residual_converged),
     )
     return (
         converged_step,
@@ -968,6 +933,7 @@ def _run_scf_iterations_lax_core(
     use_pyscf_like_damping = jnp.finfo(h.dtype).bits >= 64 and not bool(force_density_damping)
     level_shift = jnp.asarray(cfg.level_shift, dtype=h.dtype)
     has_level_shift = cfg.level_shift != 0.0
+    energy_only_convergence = cfg.convergence_metric == "energy"
 
     def body_fn(carry: RKSIterationCarry) -> RKSIterationCarry:
         cycle = carry.cycle
@@ -1059,7 +1025,12 @@ def _run_scf_iterations_lax_core(
             use_density_damping=use_density_damping,
             tol_e=tol_e,
             grad_tol=grad_tol,
+            energy_only_convergence=energy_only_convergence,
             eigenvalue_jitter=eigenvalue_jitter,
+        )
+        converged_step = jnp.logical_and(
+            converged_step,
+            cycle > jnp.asarray(0, dtype=cycle.dtype),
         )
 
         converged_new = jnp.logical_or(
@@ -1247,11 +1218,12 @@ def _run_rks_from_integrals_shared(
         nocc = int(jnp.count_nonzero(mo_occ_fixed > jnp.asarray(1e-12, dtype=h.dtype)))
     density = _build_density_from_occ(mo_coeff, mo_occ_fixed)
 
-    init_density_matrix = _validate_initial_density(
+    init_density_matrix = _validate_density_matrix(
         init_density,
         nao=nao,
         dtype=h.dtype,
         label="init_density",
+        method="RKS",
     )
     if init_density_matrix is not None:
         density = init_density_matrix

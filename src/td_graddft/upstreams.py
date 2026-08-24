@@ -20,15 +20,6 @@ def _optional_import(module_name: str):
         return None
 
 
-def _require_module(module_name: str, install_hint: str):
-    module = _optional_import(module_name)
-    if module is None:
-        raise MissingDependencyError(
-            f"Optional dependency '{module_name}' is not installed. {install_hint}"
-        )
-    return module
-
-
 def has_grad_dft() -> bool:
     return _optional_import("grad_dft") is not None
 

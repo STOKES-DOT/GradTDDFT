@@ -3,6 +3,7 @@ import math
 import pytest
 
 import jax.numpy as jnp
+from td_graddft.training import MolecularTrainingConfig
 
 from td_graddft.workflows.core import (
     _canonicalize_graddft_ground_state_config,
@@ -56,10 +57,7 @@ def test_build_spectrum_handles_empty_neural_states():
 
 def test_training_scf_gradient_mode_is_always_implicit():
     config = NeuralXCTrainingConfig(
-        scf_gradient_mode="impl",
-        density_constraint_weight=0.0,
-        stationarity_constraint_weight=0.0,
-        training_mode="fixed_density",
+        objective=MolecularTrainingConfig(mode="fixed_density", scf_gradient_mode="impl"),
     )
     assert _resolve_training_scf_gradient_mode(config) == "impl"
 
@@ -68,28 +66,30 @@ def test_strict_graddft_ground_state_canonicalizes_network_and_loss_shape():
     config = NeuralXCTrainingConfig(
         strict_graddft_ground_state=True,
         hidden_dims=(32, 32),
-        energy_mse_weight=1.0,
-        energy_mae_weight=0.0,
+        objective=MolecularTrainingConfig(
+            e0_total_mse_weight=1.0,
+            e0_total_mae_weight=0.0,
+            grid_density_spin="spin_summed",
+        ),
         input_feature_mode="enhanced",
         network_architecture="simple_mlp",
-        density_supervision="spin_summed",
     )
 
     aligned = _canonicalize_graddft_ground_state_config(config)
 
     assert aligned.network_architecture == "graddft_residual"
     assert aligned.input_feature_mode == "canonical"
-    assert aligned.energy_mse_weight == 0.0
-    assert aligned.energy_mae_weight == 1.0
-    assert aligned.orbital_energy_mse_weight == 0.0
-    assert aligned.orbital_energy_mae_weight == 1.0
-    assert aligned.density_supervision == "spin_resolved"
+    assert aligned.objective.e0_total_mse_weight == 0.0
+    assert aligned.objective.e0_total_mae_weight == 1.0
+    assert aligned.objective.orbital_energy_mse_weight == 0.0
+    assert aligned.objective.orbital_energy_mae_weight == 0.0
+    assert aligned.objective.grid_density_spin == "spin_resolved"
 
 
 def test_strict_graddft_ground_state_rejects_excited_state_constraints():
     config = NeuralXCTrainingConfig(
         strict_graddft_ground_state=True,
-        s1_constraint_weight=0.1,
+        objective=MolecularTrainingConfig(s1_total_mae_weight=0.1),
     )
 
     with pytest.raises(ValueError, match="strict_graddft_ground_state"):

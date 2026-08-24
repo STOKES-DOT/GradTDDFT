@@ -1,0 +1,19 @@
+{
+  "basis": "def2-tzvp",
+  "grad_norm": 6.126701235771179,
+  "include_hfx_channel": true,
+  "learning_rate": 0.0005,
+  "reference_csv": "reproducibility/v1.0.0/references/qm9_ground_ccsdt_augccpvtz_train40_val10.csv",
+  "response_hf_mode": "approx",
+  "step": 580,
+  "steps": 2000,
+  "stream_train": true,
+  "stream_update_mode": "per_molecule",
+  "train_loss": 0.006783401096741973,
+  "train_s1_mae": 0.0,
+  "training_mode": "self_consistent",
+  "update_norm": 0.022169393859803675,
+  "val_loss": 0.0012220443345940754,
+  "val_s1_mae": 0.0,
+  "xc": "b3lyp"
+}

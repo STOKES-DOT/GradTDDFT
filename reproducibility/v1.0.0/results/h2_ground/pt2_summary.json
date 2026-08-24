@@ -1,0 +1,13 @@
+{
+  "csv": "pt2_dense_curve.csv",
+  "density_matrix_rmse_max": 0.0534787546413517,
+  "density_matrix_rmse_mean": 0.037593099487904735,
+  "energy_mae_ev": 0.01000935007363033,
+  "energy_max_ev": 0.02542370042590349,
+  "energy_max_r_angstrom": 2.832323232323,
+  "energy_rmse_ev": 0.012942036761236541,
+  "n_points": 100,
+  "figure": "../../figures/h2_ground_hfx_pt2_dissociation_paper_style.pdf",
+  "scf_cycles_max": 13.0,
+  "scf_cycles_mean": 7.39
+}

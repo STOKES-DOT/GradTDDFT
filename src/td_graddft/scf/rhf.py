@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 import jax.numpy as jnp
 from jaxtyping import Array
 
 from ..data.basis import CartesianBasis
 from ..data.integrals import build_hcore, eri_tensor, overlap_matrix
-from .core import _build_density_closed_shell as _build_density
-from .core import _diagonalize_fock, _orthogonalizer
-from .rks import _build_jk
+from .rks import RKSConfig, run_rks_from_integrals
 
 
 @dataclass(frozen=True)
@@ -58,48 +55,6 @@ def nuclear_repulsion_energy(atom_coords: Array, atom_charges: Array) -> Array:
             enuc = enuc + charges[i] * charges[j] / rij
     return enuc
 
-def _build_fock(hcore: Array, eri: Array, density: Array) -> Array:
-    j_mat, k_mat = _build_jk(eri, density)
-    return hcore + j_mat - 0.5 * k_mat
-
-
-def _electronic_energy(density: Array, hcore: Array, fock: Array) -> Array:
-    return 0.5 * jnp.einsum("ij,ij->", density, hcore + fock)
-
-
-def _diis_extrapolate(
-    fock: Array,
-    error: Array,
-    fock_hist: list[Array],
-    err_hist: list[Array],
-    max_space: int,
-) -> Array:
-    fock_hist.append(fock)
-    err_hist.append(error.reshape(-1))
-    if len(fock_hist) > max_space:
-        del fock_hist[0]
-        del err_hist[0]
-    if len(fock_hist) < 2:
-        return fock
-
-    m = len(fock_hist)
-    b = jnp.empty((m + 1, m + 1), dtype=fock.dtype)
-    b = b.at[:, :].set(0.0)
-    for i in range(m):
-        for j in range(m):
-            b = b.at[i, j].set(jnp.dot(err_hist[i], err_hist[j]))
-    b = b.at[jnp.arange(m), jnp.arange(m)].add(1e-14)
-    b = b.at[:m, m].set(-1.0)
-    b = b.at[m, :m].set(-1.0)
-    rhs = jnp.zeros((m + 1,), dtype=fock.dtype)
-    rhs = rhs.at[m].set(-1.0)
-
-    coeff = jnp.linalg.solve(b, rhs)[:m]
-    out = jnp.zeros_like(fock)
-    for c, fm in zip(coeff, fock_hist, strict=True):
-        out = out + c * fm
-    return out
-
 
 def run_rhf_from_integrals(
     *,
@@ -113,77 +68,46 @@ def run_rhf_from_integrals(
     """Run restricted Hartree-Fock from precomputed AO integrals."""
 
     cfg = RHFConfig() if config is None else config
-    if nelectron % 2 != 0:
-        raise ValueError("RHF requires an even number of electrons.")
-
     s = jnp.asarray(overlap)
     h = jnp.asarray(hcore)
-    eri = jnp.asarray(eri)
-    enuc = jnp.asarray(nuclear_repulsion)
     nao = int(s.shape[0])
-    nocc = nelectron // 2
-    if nocc <= 0 or nocc > nao:
-        raise ValueError("Invalid occupation count for RHF.")
-
-    x = _orthogonalizer(s, cfg.orthogonalization_eps)
-    mo_energy, mo_coeff = _diagonalize_fock(h, x)
-    density = _build_density(mo_coeff, nocc)
-
-    energy = jnp.asarray(0.0)
-    converged = False
-    fock_hist: list[Array] = []
-    err_hist: list[Array] = []
-    fock = h
-    cycles = 0
-
-    for cycle in range(1, cfg.max_cycle + 1):
-        fock = _build_fock(h, eri, density)
-        if cfg.level_shift != 0.0:
-            fock = fock + cfg.level_shift * s
-
-        error = fock @ density @ s - s @ density @ fock
-        if cycle >= cfg.diis_start_cycle and cfg.diis_space > 1:
-            fock_eff = _diis_extrapolate(
-                fock,
-                error,
-                fock_hist,
-                err_hist,
-                cfg.diis_space,
-            )
-        else:
-            fock_eff = fock
-
-        mo_energy, mo_coeff = _diagonalize_fock(fock_eff, x)
-        density_new = _build_density(mo_coeff, nocc)
-        if cfg.damping != 0.0:
-            density_new = (1.0 - cfg.damping) * density_new + cfg.damping * density
-
-        elec = _electronic_energy(density_new, h, fock)
-        total = elec + enuc
-        delta_e = jnp.abs(total - energy)
-        rms_d = jnp.sqrt(jnp.mean((density_new - density) ** 2))
-        density = density_new
-        energy = total
-        cycles = cycle
-
-        if float(delta_e) < cfg.conv_tol and float(rms_d) < cfg.conv_tol_density:
-            converged = True
-            break
-
-    mo_occ = jnp.zeros((nao,), dtype=h.dtype).at[:nocc].set(2.0)
+    if cfg.diis_start_cycle != 2 or cfg.diis_space != 8:
+        raise ValueError(
+            "run_rhf_from_integrals uses the shared RKS DIIS schedule "
+            "(diis_start_cycle=2, diis_space=8)."
+        )
+    result = run_rks_from_integrals(
+        overlap=s,
+        hcore=h,
+        eri=jnp.asarray(eri),
+        nelectron=nelectron,
+        nuclear_repulsion=nuclear_repulsion,
+        ao=jnp.zeros((0, nao), dtype=h.dtype),
+        ao_deriv1=jnp.zeros((4, 0, nao), dtype=h.dtype),
+        grid_weights=jnp.zeros((0,), dtype=h.dtype),
+        config=RKSConfig(
+            xc_spec="hf",
+            max_cycle=cfg.max_cycle,
+            conv_tol=cfg.conv_tol,
+            conv_tol_density=cfg.conv_tol_density,
+            damping=cfg.damping,
+            level_shift=cfg.level_shift,
+            orthogonalization_eps=cfg.orthogonalization_eps,
+        ),
+    )
     return RHFResult(
-        converged=converged,
-        total_energy=float(energy),
-        electronic_energy=float(energy - enuc),
-        nuclear_repulsion=float(enuc),
-        mo_energy=mo_energy,
-        mo_coeff=mo_coeff,
-        mo_occ=mo_occ,
-        density_matrix=density,
-        fock_matrix=fock,
-        overlap_matrix=s,
-        hcore_matrix=h,
-        cycles=cycles,
+        converged=result.converged,
+        total_energy=result.total_energy,
+        electronic_energy=result.electronic_energy,
+        nuclear_repulsion=result.nuclear_repulsion,
+        mo_energy=result.mo_energy,
+        mo_coeff=result.mo_coeff,
+        mo_occ=result.mo_occ,
+        density_matrix=result.density_matrix,
+        fock_matrix=result.fock_matrix,
+        overlap_matrix=result.overlap_matrix,
+        hcore_matrix=result.hcore_matrix,
+        cycles=result.cycles,
     )
 
 

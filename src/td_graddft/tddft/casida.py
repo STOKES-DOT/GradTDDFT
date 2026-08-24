@@ -2,101 +2,67 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from dataclasses import field
+from dataclasses import replace
 from typing import Any
 from typing import Literal
 
-import jax
 import jax.numpy as jnp
-from jax import core as jax_core
+from jaxtyping import Array
 
-from .eigensolvers import davidson_lowest_symmetric
+from .eigensolvers import (
+    FULL_TDDFT_DAVIDSON_MAX_CYCLE,
+    PYSCF_TD_DAVIDSON_MAX_CYCLE,
+    PYSCF_TD_DAVIDSON_TOL,
+    PYSCF_TD_POSITIVE_EIG_THRESHOLD,
+    _davidson_search_nroots,
+    _solver_dtype,
+    implicit_differential_davidson_lowest_tdhf,
+)
+from .eigenvector_differentiation import TDAGradientMode
 from ._utils import (
-    _casida_metric_factor,
-    _matrix_power_symmetric,
+    _resolve_xc_functional,
     _restricted_channel,
-    _symmetrize,
 )
 from .response import (
-    build_restricted_a_minus_b_matrix,
-    build_restricted_tda_matrix,
     build_restricted_tda_operator,
-    build_restricted_response_matrices,
     gen_tda_vind,
     gen_tdhf_vind,
 )
-from .tda import (
-    _prefer_dense_auto_eigensolve,
-    _prefer_dense_eigensolve,
-    solve_tda,
-    solve_tda_from_a_matrix,
-    solve_tda_from_operator,
-)
-from .types import TDDFTMatrices, TDDFTResult, TDAResult
+from .response_options import ResponseKernelOptions
+from .tda import solve_tda_from_operator
+from .types import TDDFTResult, TDAResult
 
 
-def _is_traced_convergence_flag(value) -> bool:
-    return _is_tracer(value)
-
-
-def _is_tracer(value) -> bool:
-    value_type = type(value)
-    return isinstance(value, jax_core.Tracer) or (
-        "Tracer" in value_type.__name__ and value_type.__module__.startswith("jax")
-    )
-
-
-def _lowest_dense_eigenpairs(matrix, *, nroots: int):
-    eigvals, eigvecs = jnp.linalg.eigh(matrix)
-    return eigvals[:nroots], eigvecs[:, :nroots]
-
-
-def _restricted_td_space_dimensions(
-    molecule: Any,
-    occupation_tolerance: float,
-) -> tuple[int, int, int]:
-    mo_coeff, mo_occ, _ = _restricted_channel(molecule)
+def _restricted_delta_eps(molecule: Any, occupation_tolerance: float) -> Array:
+    _, mo_occ, mo_energy = _restricted_channel(molecule)
     nocc = getattr(molecule, "nocc", None)
     if nocc is None:
         nocc = int(jnp.count_nonzero(mo_occ > occupation_tolerance))
     else:
         nocc = int(nocc)
-    nvir = int(mo_coeff.shape[1] - nocc)
-    if nocc <= 0 or nvir <= 0:
-        raise ValueError("Need at least one occupied and one virtual orbital.")
-    return nocc, nvir, nocc * nvir
+    return mo_energy[nocc:] - mo_energy[:nocc, None]
 
 
 def _finalize_casida_result(
-    w2,
-    vecs,
+    w,
+    x_vecs,
+    y_vecs,
     *,
     nroots: int,
     excitation_threshold: float,
     matrix_eps: float,
     nocc: int,
     nvir: int,
-    metric_factor,
-    a_plus_b_vind_rows: Callable,
-    a_matrix,
-    b_matrix,
-    casida_matrix,
+    converged=True,
 ) -> TDDFTResult:
-    valid = w2 > excitation_threshold**2
-    order = jnp.argsort(jnp.where(valid, w2, jnp.inf))
+    valid = jnp.isfinite(w) & (w > excitation_threshold)
+    order = jnp.argsort(jnp.where(valid, w, jnp.inf))
     keep = order[:nroots]
     keep_mask = valid[keep]
 
-    w = jnp.sqrt(jnp.maximum(w2[keep], 0.0))
-    w = jnp.where(keep_mask, w, 0.0)
-    f_vectors = vecs[:, keep]
-    f_vectors = f_vectors * keep_mask[jnp.newaxis, :]
-    x_plus_y = metric_factor @ f_vectors
-    safe_w = jnp.where(keep_mask, w, 1.0)
-    x_minus_y = a_plus_b_vind_rows(x_plus_y.T).T / safe_w[jnp.newaxis, :]
-
-    x = 0.5 * (x_plus_y + x_minus_y)
-    y = 0.5 * (x_plus_y - x_minus_y)
+    energies = jnp.where(keep_mask, w[keep], 0.0)
+    x = x_vecs[:, keep]
+    y = y_vecs[:, keep]
     x = x * keep_mask[jnp.newaxis, :]
     y = y * keep_mask[jnp.newaxis, :]
     norm = jnp.sum(jnp.abs(x) ** 2, axis=0) - jnp.sum(jnp.abs(y) ** 2, axis=0)
@@ -105,160 +71,54 @@ def _finalize_casida_result(
     y = y * scale[jnp.newaxis, :]
 
     return TDDFTResult(
-        excitation_energies=w,
+        excitation_energies=energies,
         x_amplitudes=x.T.reshape(-1, nocc, nvir),
         y_amplitudes=y.T.reshape(-1, nocc, nvir),
-        a_matrix=a_matrix,
-        b_matrix=b_matrix,
-        casida_matrix=casida_matrix,
+        converged=jnp.asarray(converged) & jnp.all(keep_mask),
     )
 
 
-def solve_casida_from_operator(
+def solve_casida_from_tdhf_operator(
     delta_eps,
-    casida_vind_rows: Callable,
-    diagonal,
+    tdhf_vind_rows: Callable,
     *,
-    metric_factor,
-    a_plus_b_vind_rows: Callable,
     nstates: int | None = None,
-    excitation_threshold: float = 1e-7,
+    excitation_threshold: float = PYSCF_TD_POSITIVE_EIG_THRESHOLD,
     matrix_eps: float = 1e-10,
-    davidson_tol: float = 1e-6,
-    davidson_max_iter: int = 60,
+    davidson_tol: float = PYSCF_TD_DAVIDSON_TOL,
+    davidson_max_iter: int = FULL_TDDFT_DAVIDSON_MAX_CYCLE,
     davidson_max_subspace: int | None = None,
-    a_matrix=None,
-    b_matrix=None,
-    casida_matrix=None,
 ) -> TDDFTResult:
     nocc, nvir = delta_eps.shape
     dim = int(nocc * nvir)
     nroots = dim if nstates is None else min(int(nstates), dim)
-    w2, vecs, converged = davidson_lowest_symmetric(
-        lambda vectors: casida_vind_rows(jnp.asarray(vectors).T).T,
-        nroots=nroots,
+    search_nroots = _davidson_search_nroots(nroots, dim)
+    work_dtype = _solver_dtype(jnp.asarray(delta_eps).dtype)
+
+    def tdhf_vind(values):
+        values = jnp.asarray(values, dtype=work_dtype).reshape(-1, 2 * dim)
+        return tdhf_vind_rows(values)
+
+    w, x_vecs, y_vecs, converged = implicit_differential_davidson_lowest_tdhf(
+        tdhf_vind,
+        nroots=search_nroots,
         size=dim,
-        diag=jnp.asarray(diagonal).reshape(dim),
+        diag=jnp.asarray(delta_eps, dtype=work_dtype).reshape(dim),
         tol=davidson_tol,
         max_iter=davidson_max_iter,
         max_subspace=davidson_max_subspace,
+        matrix_eps=matrix_eps,
     )
-    if not _is_traced_convergence_flag(converged) and not bool(converged):
-        raise RuntimeError("Davidson Casida solver did not converge.")
     return _finalize_casida_result(
-        w2,
-        vecs,
+        w,
+        x_vecs,
+        y_vecs,
         nroots=nroots,
         excitation_threshold=excitation_threshold,
         matrix_eps=matrix_eps,
         nocc=nocc,
         nvir=nvir,
-        metric_factor=metric_factor,
-        a_plus_b_vind_rows=a_plus_b_vind_rows,
-        a_matrix=a_matrix,
-        b_matrix=b_matrix,
-        casida_matrix=casida_matrix,
-    )
-
-
-def solve_casida(
-    matrices: TDDFTMatrices,
-    *,
-    nstates: int | None = None,
-    excitation_threshold: float = 1e-7,
-    matrix_eps: float = 1e-10,
-    eigensolver: str = "auto",
-    davidson_tol: float = 1e-6,
-    davidson_max_iter: int = 60,
-    davidson_max_subspace: int | None = None,
-) -> TDDFTResult:
-    """Solve the restricted Casida TDDFT equation."""
-
-    delta_eps = matrices.orbital_energy_differences
-    nocc, nvir = delta_eps.shape
-    flat_a = _symmetrize(matrices.a_matrix.reshape(nocc * nvir, nocc * nvir))
-    flat_b = _symmetrize(matrices.b_matrix.reshape(nocc * nvir, nocc * nvir))
-
-    a_plus_b = _symmetrize(flat_a + flat_b)
-    a_minus_b = _symmetrize(flat_a - flat_b)
-    dim = int(a_plus_b.shape[0])
-    nroots = dim if nstates is None else min(int(nstates), dim)
-
-    mode = str(eigensolver).lower()
-    use_davidson = False
-    if mode == "davidson":
-        use_davidson = not _prefer_dense_eigensolve(dim, nroots)
-    elif mode == "dense":
-        use_davidson = False
-    elif mode == "auto":
-        use_davidson = (
-            nstates is not None
-            and not _prefer_dense_auto_eigensolve(dim, nroots)
-            and dim >= 96
-            and nroots <= min(24, max(1, dim // 3))
-        )
-    else:
-        raise ValueError(
-            f"Unsupported eigensolver={eigensolver!r}. Choose one of {{'auto', 'dense', 'davidson'}}."
-        )
-
-    casida_matrix = None
-    if use_davidson:
-        metric_factor = _casida_metric_factor(a_minus_b, matrix_eps)
-
-        def casida_matvec(vectors):
-            transformed = metric_factor @ vectors
-            coupled = a_plus_b @ transformed
-            return metric_factor.T.conj() @ coupled
-
-        projected = a_plus_b @ metric_factor
-        casida_diag = jnp.einsum("ki,ki->i", metric_factor, projected)
-        davidson_w2, davidson_vecs, converged = davidson_lowest_symmetric(
-            casida_matvec,
-            nroots=nroots,
-            size=dim,
-            diag=casida_diag,
-            tol=davidson_tol,
-            max_iter=davidson_max_iter,
-            max_subspace=davidson_max_subspace,
-        )
-        if mode == "auto":
-            dense_casida_matrix = _symmetrize(metric_factor.T.conj() @ a_plus_b @ metric_factor)
-            if _is_traced_convergence_flag(converged):
-                w2, vecs = jax.lax.cond(
-                    converged,
-                    lambda _: (davidson_w2, davidson_vecs),
-                    lambda _: _lowest_dense_eigenpairs(dense_casida_matrix, nroots=nroots),
-                    operand=None,
-                )
-                casida_matrix = dense_casida_matrix
-            elif bool(converged):
-                w2, vecs, casida_matrix = davidson_w2, davidson_vecs, None
-            else:
-                w2, vecs = _lowest_dense_eigenpairs(dense_casida_matrix, nroots=nroots)
-                casida_matrix = dense_casida_matrix
-        else:
-            w2, vecs = davidson_w2, davidson_vecs
-            if not _is_traced_convergence_flag(converged) and not bool(converged):
-                raise RuntimeError("Davidson Casida solver did not converge.")
-    else:
-        metric_factor = _matrix_power_symmetric(a_minus_b, 0.5, matrix_eps)
-        casida_matrix = _symmetrize(metric_factor.T.conj() @ a_plus_b @ metric_factor)
-        w2, vecs = jnp.linalg.eigh(casida_matrix)
-
-    return _finalize_casida_result(
-        w2,
-        vecs,
-        nroots=nroots,
-        excitation_threshold=excitation_threshold,
-        matrix_eps=matrix_eps,
-        nocc=nocc,
-        nvir=nvir,
-        metric_factor=metric_factor,
-        a_plus_b_vind_rows=lambda rows: rows @ a_plus_b.T,
-        a_matrix=matrices.a_matrix,
-        b_matrix=matrices.b_matrix,
-        casida_matrix=casida_matrix,
+        converged=converged,
     )
 
 
@@ -270,199 +130,149 @@ class RestrictedCasidaTDDFT:
     xc_functional: Any | None = None
     xc_params: Any | None = None
     occupation_tolerance: float = 1e-8
-    excitation_threshold: float = 1e-7
+    excitation_threshold: float = PYSCF_TD_POSITIVE_EIG_THRESHOLD
     matrix_eps: float = 1e-10
-    eigensolver: Literal["auto", "dense", "davidson"] = "auto"
-    davidson_tol: float = 1e-6
-    davidson_max_iter: int = 60
+    eigensolver: Literal["auto", "davidson"] = "auto"
+    davidson_tol: float = PYSCF_TD_DAVIDSON_TOL
+    davidson_max_iter: int = FULL_TDDFT_DAVIDSON_MAX_CYCLE
     davidson_max_subspace: int | None = None
-    _cached_matrices: TDDFTMatrices | None = field(default=None, init=False, repr=False, compare=False)
-    _cached_tda_matrix: tuple[Any, Any] | None = field(default=None, init=False, repr=False, compare=False)
+    davidson_initial_guess_count: int | None = None
+    davidson_max_trial_vectors: int | None = None
+    tda_gradient_mode: TDAGradientMode = "eigenvalue_only"
+    eigenvector_adjoint_tol: float = 1e-6
+    eigenvector_adjoint_max_iter: int = 64
+    response_kernel_options: ResponseKernelOptions | dict[str, Any] | None = None
 
-    def build_matrices(self) -> TDDFTMatrices:
-        return build_restricted_response_matrices(
+    def _posthoc_correction(
+        self,
+        result: TDAResult | TDDFTResult,
+        *,
+        use_tda: bool,
+    ) -> Array | None:
+        method_name = "post_tda_correction" if use_tda else "post_tddft_correction"
+        if (
+            self.xc_params is not None
+            and self.xc_functional is not None
+            and not callable(getattr(self.xc_functional, method_name, None))
+            and getattr(self.xc_functional, "include_pt2_channel", None) is False
+        ):
+            return None
+        resolved_xc = _resolve_xc_functional(
             self.molecule,
             self.xc_functional,
-            xc_params=self.xc_params,
-            occupation_tolerance=self.occupation_tolerance,
+            self.xc_params,
         )
+        if resolved_xc is None:
+            return None
+        correction_fn = getattr(resolved_xc, method_name, None)
+        if not callable(correction_fn):
+            return None
+        try:
+            correction = correction_fn(
+                self.molecule,
+                result,
+                occupation_tolerance=self.occupation_tolerance,
+            )
+        except AttributeError as exc:
+            if "does not expose" not in str(exc):
+                raise
+            return None
+        correction = jnp.asarray(correction, dtype=result.excitation_energies.dtype)
+        if correction.ndim == 0:
+            correction = jnp.full_like(result.excitation_energies, correction)
+        elif correction.shape != result.excitation_energies.shape:
+            raise ValueError(
+                f"{method_name} must return a scalar or shape "
+                f"{result.excitation_energies.shape}, got {correction.shape}."
+            )
+        return correction
 
-    def _build_tda_matrix(self) -> tuple[Any, Any]:
-        return build_restricted_tda_matrix(
-            self.molecule,
-            self.xc_functional,
-            xc_params=self.xc_params,
-            occupation_tolerance=self.occupation_tolerance,
+    def _apply_posthoc_correction(
+        self,
+        result: TDAResult | TDDFTResult,
+        *,
+        use_tda: bool,
+    ) -> TDAResult | TDDFTResult:
+        correction = self._posthoc_correction(result, use_tda=use_tda)
+        if correction is None:
+            return result
+        return replace(
+            result,
+            excitation_energies=result.excitation_energies + correction,
+            posthoc_correction=correction,
         )
 
     def tda(self, nstates: int | None = None) -> TDAResult:
         mode = str(self.eigensolver).lower()
-        _, _, dim = _restricted_td_space_dimensions(
-            self.molecule,
-            self.occupation_tolerance,
-        )
-        nroots = dim if nstates is None else min(int(nstates), dim)
-        use_davidson = False
-        if mode == "davidson":
-            use_davidson = not _prefer_dense_eigensolve(dim, nroots)
-        elif mode == "auto":
-            use_davidson = (
-                nstates is not None
-                and not _prefer_dense_auto_eigensolve(dim, nroots)
-                and dim >= 96
-                and nroots <= min(24, max(1, dim // 3))
-            )
-        elif mode != "dense":
+        if mode not in {"auto", "davidson"}:
             raise ValueError(
-                f"Unsupported eigensolver={self.eigensolver!r}. Choose one of {{'auto', 'dense', 'davidson'}}."
+                f"Unsupported eigensolver={self.eigensolver!r}. Choose one of {{'auto', 'davidson'}}."
             )
 
-        if not use_davidson:
-            delta_eps, a_matrix = self._build_tda_matrix()
-            return solve_tda_from_a_matrix(
-                delta_eps,
-                a_matrix,
-                nstates=nstates,
-                excitation_threshold=self.excitation_threshold,
-            )
-
-        vind, diagonal, delta_eps, _ = build_restricted_tda_operator(
+        vind, diagonal, delta_eps = build_restricted_tda_operator(
             self.molecule,
             self.xc_functional,
             xc_params=self.xc_params,
             occupation_tolerance=self.occupation_tolerance,
-            materialize_matrix=False,
+            response_kernel_options=self.response_kernel_options,
         )
-        if use_davidson:
-            try:
-                return solve_tda_from_operator(
-                    delta_eps,
-                    vind,
-                    diagonal,
-                    nstates=nstates,
-                    excitation_threshold=self.excitation_threshold,
-                    davidson_tol=self.davidson_tol,
-                    davidson_max_iter=self.davidson_max_iter,
-                    davidson_max_subspace=self.davidson_max_subspace,
-                    a_matrix=None,
-                )
-            except RuntimeError:
-                delta_eps, a_matrix = self._build_tda_matrix()
-                return solve_tda_from_a_matrix(
-                    delta_eps,
-                    a_matrix,
-                    nstates=nstates,
-                    excitation_threshold=self.excitation_threshold,
-                )
-        raise AssertionError("Unreachable TDA solver branch.")
+        result = solve_tda_from_operator(
+            delta_eps,
+            vind,
+            diagonal,
+            nstates=nstates,
+            excitation_threshold=self.excitation_threshold,
+            davidson_tol=self.davidson_tol,
+            davidson_max_iter=self.davidson_max_iter,
+            davidson_max_subspace=self.davidson_max_subspace,
+            davidson_initial_guess_count=self.davidson_initial_guess_count,
+            davidson_max_trial_vectors=self.davidson_max_trial_vectors,
+            tda_gradient_mode=self.tda_gradient_mode,
+            eigenvector_adjoint_tol=self.eigenvector_adjoint_tol,
+            eigenvector_adjoint_max_iter=self.eigenvector_adjoint_max_iter,
+        )
+        return self._apply_posthoc_correction(result, use_tda=True)
 
-    def gen_tda_vind(self, *, materialize_matrix: bool = True):
+    def gen_tda_vind(self):
         return gen_tda_vind(
             self.molecule,
             self.xc_functional,
             xc_params=self.xc_params,
             occupation_tolerance=self.occupation_tolerance,
-            materialize_matrix=materialize_matrix,
+            response_kernel_options=self.response_kernel_options,
         )
 
-    def gen_tdhf_vind(self, *, materialize_matrix: bool = True):
+    def gen_tdhf_vind(self):
         return gen_tdhf_vind(
             self.molecule,
             self.xc_functional,
             xc_params=self.xc_params,
             occupation_tolerance=self.occupation_tolerance,
-            materialize_matrix=materialize_matrix,
+            response_kernel_options=self.response_kernel_options,
         )
 
     def kernel(self, nstates: int | None = None) -> TDDFTResult:
         mode = str(self.eigensolver).lower()
-        _, _, dim = _restricted_td_space_dimensions(
-            self.molecule,
-            self.occupation_tolerance,
-        )
-        nroots = dim if nstates is None else min(int(nstates), dim)
-        use_davidson = False
-        if mode == "davidson":
-            use_davidson = not _prefer_dense_eigensolve(dim, nroots)
-        elif mode == "auto":
-            use_davidson = (
-                nstates is not None
-                and not _prefer_dense_auto_eigensolve(dim, nroots)
-                and dim >= 96
-                and nroots <= min(24, max(1, dim // 3))
-            )
-        elif mode != "dense":
+        if mode not in {"auto", "davidson"}:
             raise ValueError(
-                f"Unsupported eigensolver={self.eigensolver!r}. Choose one of {{'auto', 'dense', 'davidson'}}."
+                f"Unsupported eigensolver={self.eigensolver!r}. Choose one of {{'auto', 'davidson'}}."
             )
 
-        if not use_davidson:
-            return solve_casida(
-                self.build_matrices(),
-                nstates=nstates,
-                excitation_threshold=self.excitation_threshold,
-                matrix_eps=self.matrix_eps,
-                eigensolver=self.eigensolver,
-                davidson_tol=self.davidson_tol,
-                davidson_max_iter=self.davidson_max_iter,
-                davidson_max_subspace=self.davidson_max_subspace,
-            )
-
-        a_minus_b, delta_eps = build_restricted_a_minus_b_matrix(
+        vind_tdhf = gen_tdhf_vind(
             self.molecule,
             self.xc_functional,
             xc_params=self.xc_params,
             occupation_tolerance=self.occupation_tolerance,
+            response_kernel_options=self.response_kernel_options,
         )
-        if use_davidson:
-            vind_tdhf, _, _ = gen_tdhf_vind(
-                self.molecule,
-                self.xc_functional,
-                xc_params=self.xc_params,
-                occupation_tolerance=self.occupation_tolerance,
-                materialize_matrix=False,
-            )
-            metric_factor = _casida_metric_factor(a_minus_b, self.matrix_eps)
-
-            def a_plus_b_vind_rows(rows):
-                rows = jnp.asarray(rows).reshape(-1, dim)
-                z = jnp.concatenate([rows, rows], axis=-1)
-                return vind_tdhf(z)[:, :dim]
-
-            def casida_vind_rows(rows):
-                rows = jnp.asarray(rows).reshape(-1, dim)
-                transformed = rows @ metric_factor.T.conj()
-                coupled = a_plus_b_vind_rows(transformed)
-                return coupled @ metric_factor
-
-            projected = a_plus_b_vind_rows(metric_factor.T).T
-            diagonal = jnp.einsum("ki,ki->i", metric_factor, projected)
-            try:
-                return solve_casida_from_operator(
-                    delta_eps,
-                    casida_vind_rows,
-                    diagonal,
-                    metric_factor=metric_factor,
-                    a_plus_b_vind_rows=a_plus_b_vind_rows,
-                    nstates=nstates,
-                    excitation_threshold=self.excitation_threshold,
-                    matrix_eps=self.matrix_eps,
-                    davidson_tol=self.davidson_tol,
-                    davidson_max_iter=self.davidson_max_iter,
-                    davidson_max_subspace=self.davidson_max_subspace,
-                    a_matrix=None,
-                    b_matrix=None,
-                    casida_matrix=None,
-                )
-            except RuntimeError:
-                return solve_casida(
-                    self.build_matrices(),
-                    nstates=nstates,
-                    excitation_threshold=self.excitation_threshold,
-                    matrix_eps=self.matrix_eps,
-                    eigensolver="dense",
-                    davidson_tol=self.davidson_tol,
-                    davidson_max_iter=self.davidson_max_iter,
-                    davidson_max_subspace=self.davidson_max_subspace,
-                )
-        raise AssertionError("Unreachable Casida solver branch.")
+        result = solve_casida_from_tdhf_operator(
+            _restricted_delta_eps(self.molecule, self.occupation_tolerance),
+            vind_tdhf,
+            nstates=nstates,
+            excitation_threshold=self.excitation_threshold,
+            matrix_eps=self.matrix_eps,
+            davidson_tol=self.davidson_tol,
+            davidson_max_iter=self.davidson_max_iter,
+            davidson_max_subspace=self.davidson_max_subspace,
+        )
+        return self._apply_posthoc_correction(result, use_tda=False)

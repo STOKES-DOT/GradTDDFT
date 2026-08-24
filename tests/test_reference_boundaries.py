@@ -51,6 +51,35 @@ def test_runtime_public_api_does_not_expose_pyscf_bridge_symbols():
         assert forbidden.isdisjoint(names)
 
 
+def test_core_public_api_does_not_expose_removed_geomopt_namespace():
+    import importlib
+    import td_graddft
+
+    forbidden = {
+        "BOHR_TO_ANGSTROM",
+        "CoordinateUnit",
+        "EnergyFunction",
+        "GeometryOptimizationConfig",
+        "GeometryOptimizationResult",
+        "compute_forces",
+        "make_rks_ground_state_energy_fn",
+        "run_geometry_optimization",
+        "run_rks_ground_state_geometry_optimization",
+    }
+
+    assert "geomopt" not in td_graddft.__all__
+    assert forbidden.isdisjoint(set(td_graddft.__all__))
+    for name in forbidden:
+        assert not hasattr(td_graddft, name)
+
+    removed_module = ".".join(("td_graddft", "geomopt"))
+    try:
+        importlib.import_module(removed_module)
+    except ModuleNotFoundError:
+        return
+    raise AssertionError(f"{removed_module} should not exist in the runtime package")
+
+
 def test_pyscf_runtime_imports_are_limited_to_integral_modules():
     root = Path("src/td_graddft")
     allowed = {
@@ -101,19 +130,20 @@ def test_scf_features_do_not_expose_neural_training_only_hf_pt2_helpers():
         assert hasattr(inputs, name)
 
 
-def test_restricted_response_lda_fallback_uses_central_transition_features():
+def test_restricted_response_hvp_uses_factorized_transition_features():
     text = Path("src/td_graddft/tddft/response.py").read_text()
 
     assert "_transition_densities_on_grid" not in text
-    assert (
-        len(
-            re.findall(
-                r"restricted_transition_response_features\(\s*molecule,\s*feature_kind=\"LDA\",",
-                text,
-            )
-        )
-        == 3
-    )
+    assert "def _restricted_grid_xc_response" in text
+    assert "def _restricted_response_factors" in text
+    assert "def _project_restricted_transition_to_grid" in text
+    assert "def _project_grid_response_to_restricted_transition" in text
+    hvp_body = text.split("def _restricted_grid_xc_response_hvp", maxsplit=1)[1].split(
+        "def _as_nonlocal_response_diagonal",
+        maxsplit=1,
+    )[0]
+    assert "_restricted_response_features(" not in hvp_body
+    assert "_restricted_response_factors(" in hvp_body
 
 
 def test_restricted_response_feature_kind_helpers_are_owned_by_features_module():

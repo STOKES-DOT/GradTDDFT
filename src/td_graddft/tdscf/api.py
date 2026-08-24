@@ -4,6 +4,11 @@ from typing import Any, Literal
 
 from .. import spectra
 from ..spectra import HARTREE_TO_EV
+from ..tddft.eigensolvers import PYSCF_TD_DAVIDSON_MAX_CYCLE
+from ..tddft.eigensolvers import FULL_TDDFT_DAVIDSON_MAX_CYCLE
+from ..tddft.eigensolvers import PYSCF_TD_DAVIDSON_TOL
+from ..tddft.eigensolvers import PYSCF_TD_POSITIVE_EIG_THRESHOLD
+from ..tddft.eigenvector_differentiation import TDAGradientMode
 from ..tddft import RestrictedCasidaTDDFT, UnrestrictedCasidaTDDFT, UnrestrictedTDA
 from ..tddft._semilocal_response import SemilocalResponseFunctional
 
@@ -68,10 +73,15 @@ class _BaseTD:
     occupation_tolerance: float
     excitation_threshold: float
     matrix_eps: float
-    eigensolver: Literal["auto", "dense", "davidson"]
+    eigensolver: Literal["auto", "davidson"]
     davidson_tol: float
     davidson_max_iter: int
     davidson_max_subspace: int | None
+    davidson_initial_guess_count: int | None
+    davidson_max_trial_vectors: int | None
+    tda_gradient_mode: TDAGradientMode
+    eigenvector_adjoint_tol: float
+    eigenvector_adjoint_max_iter: int
 
     def __init__(
         self,
@@ -81,12 +91,18 @@ class _BaseTD:
         xc_params: Any | None = None,
         nstates: int | None = 3,
         occupation_tolerance: float = 1e-8,
-        excitation_threshold: float = 1e-7,
+        excitation_threshold: float = PYSCF_TD_POSITIVE_EIG_THRESHOLD,
         matrix_eps: float = 1e-10,
-        eigensolver: Literal["auto", "dense", "davidson"] = "auto",
-        davidson_tol: float = 1e-6,
-        davidson_max_iter: int = 60,
+        eigensolver: Literal["auto", "davidson"] = "auto",
+        davidson_tol: float = PYSCF_TD_DAVIDSON_TOL,
+        davidson_max_iter: int = PYSCF_TD_DAVIDSON_MAX_CYCLE,
         davidson_max_subspace: int | None = None,
+        davidson_initial_guess_count: int | None = None,
+        davidson_max_trial_vectors: int | None = None,
+        tda_gradient_mode: TDAGradientMode = "eigenvalue_only",
+        eigenvector_adjoint_tol: float = 1e-6,
+        eigenvector_adjoint_max_iter: int = 64,
+        response_kernel_options: Any | None = None,
         **kwargs: Any,
     ) -> None:
         if mf_or_molecule is None and "mf_or_reference" in kwargs:
@@ -105,6 +121,12 @@ class _BaseTD:
         self.davidson_tol = davidson_tol
         self.davidson_max_iter = davidson_max_iter
         self.davidson_max_subspace = davidson_max_subspace
+        self.davidson_initial_guess_count = davidson_initial_guess_count
+        self.davidson_max_trial_vectors = davidson_max_trial_vectors
+        self.tda_gradient_mode = tda_gradient_mode
+        self.eigenvector_adjoint_tol = eigenvector_adjoint_tol
+        self.eigenvector_adjoint_max_iter = eigenvector_adjoint_max_iter
+        self.response_kernel_options = response_kernel_options
 
         self.result: Any | None = None
         self.e: Any | None = None
@@ -151,6 +173,28 @@ class _BaseTD:
                 "davidson_tol": self.davidson_tol,
                 "davidson_max_iter": self.davidson_max_iter,
                 "davidson_max_subspace": self.davidson_max_subspace,
+                "davidson_initial_guess_count": self.davidson_initial_guess_count,
+                "davidson_max_trial_vectors": self.davidson_max_trial_vectors,
+                "tda_gradient_mode": self.tda_gradient_mode,
+                "eigenvector_adjoint_tol": self.eigenvector_adjoint_tol,
+                "eigenvector_adjoint_max_iter": self.eigenvector_adjoint_max_iter,
+                "response_kernel_options": self.response_kernel_options,
+            }
+        )
+        return kwargs
+
+    def _unrestricted_solver_kwargs(self, molecule: Any) -> dict[str, Any]:
+        kwargs = self._common_solver_kwargs(molecule)
+        kwargs.update(
+            {
+                "matrix_eps": self.matrix_eps,
+                "eigensolver": self.eigensolver,
+                "davidson_tol": self.davidson_tol,
+                "davidson_max_iter": self.davidson_max_iter,
+                "davidson_max_subspace": self.davidson_max_subspace,
+                "tda_gradient_mode": self.tda_gradient_mode,
+                "eigenvector_adjoint_tol": self.eigenvector_adjoint_tol,
+                "eigenvector_adjoint_max_iter": self.eigenvector_adjoint_max_iter,
             }
         )
         return kwargs
@@ -160,7 +204,11 @@ class _BaseTD:
         self.e = result.excitation_energies
         self.e_ev = self.e * HARTREE_TO_EV
         self.xy = _xy_from_result(result)
-        self.converged = True
+        converged = getattr(result, "converged", True)
+        try:
+            self.converged = bool(converged)
+        except (TypeError, ValueError):
+            self.converged = converged
         return result
 
     def _require_result(self) -> Any:
@@ -192,7 +240,9 @@ class TDA(_BaseTD):
     def _build_solver(self) -> Any:
         molecule = self.molecule
         if _is_unrestricted_molecule(molecule):
-            return UnrestrictedTDA(**self._common_solver_kwargs(molecule))
+            kwargs = self._unrestricted_solver_kwargs(molecule)
+            kwargs.pop("matrix_eps")
+            return UnrestrictedTDA(**kwargs)
         return RestrictedCasidaTDDFT(**self._restricted_solver_kwargs(molecule))
 
     def kernel(self, nstates: int | None = None) -> Any:
@@ -212,12 +262,18 @@ class TDA(_BaseTD):
 class TDDFT(_BaseTD):
     """PySCF-style full Casida TDDFT driver."""
 
+    def __init__(
+        self,
+        *args: Any,
+        davidson_max_iter: int = FULL_TDDFT_DAVIDSON_MAX_CYCLE,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, davidson_max_iter=davidson_max_iter, **kwargs)
+
     def _build_solver(self) -> Any:
         molecule = self.molecule
         if _is_unrestricted_molecule(molecule):
-            kwargs = self._common_solver_kwargs(molecule)
-            kwargs["matrix_eps"] = self.matrix_eps
-            return UnrestrictedCasidaTDDFT(**kwargs)
+            return UnrestrictedCasidaTDDFT(**self._unrestricted_solver_kwargs(molecule))
         return RestrictedCasidaTDDFT(**self._restricted_solver_kwargs(molecule))
 
     def kernel(self, nstates: int | None = None) -> Any:

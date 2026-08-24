@@ -2,16 +2,24 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
+import hashlib
 import json
 import os
 import time
 from dataclasses import dataclass, is_dataclass, replace
 from datetime import datetime
 from pathlib import Path
+import sys
 from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("MPLCONFIGDIR", str(Path("outputs") / ".mplconfig"))
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 import matplotlib
 
@@ -28,25 +36,28 @@ import optax
 from pyscf import dft, gto
 
 from td_graddft import neural_xc
+from td_graddft.data.hdf5_cache import read_restricted_molecule, write_restricted_molecule
 from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
 from td_graddft.neural_xc import (
-    GRADDFT_DEFAULT_DM21_HIDDEN_DIMS,
-    GRADDFT_DEFAULT_INPUT_FEATURE_MODE,
-    GRADDFT_DEFAULT_NETWORK_ARCHITECTURE,
+    DEFAULT_INPUT_FEATURE_MODE,
+    DEFAULT_NETWORK_ARCHITECTURE,
+    DEFAULT_NETWORK_HIDDEN_DIMS,
+    DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
 )
-from td_graddft.reference_legacy import restricted_reference_from_pyscf
+from td_graddft.data.reference import restricted_reference_from_pyscf
+from td_graddft.neural_xc.inputs import ChunkedHFXNu
 from td_graddft.spectra import HARTREE_TO_EV
 from td_graddft.training import (
-    ExcitedStateDatum,
-    GroundStateCoreDatum,
-    GroundStateDatum,
-    GroundStateTrainingConfig,
+    MolecularTrainingDatum,
+    MolecularTrainingConfig,
     create_train_state_from_molecule,
-    ground_state_mse_loss,
-    make_ground_state_train_step,
+    molecular_loss,
+    make_molecular_loss_and_grad,
+    make_molecular_train_step,
     predict_excitation_energies,
     predict_ground_state_molecule,
     predict_ground_state_total_energy,
+    load_params_checkpoint,
     save_params_checkpoint,
 )
 
@@ -79,6 +90,7 @@ class ReferenceRow:
     basis: str
     ccsd_total_energy_h: float
     s1_excitation_h: float
+    oscillator_strengths: tuple[float, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -87,7 +99,7 @@ class PreparedReference:
     molecule: Any
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=(
             "Train the neural functional on a reusable closed-shell EOM-EE-CCSD S1 CSV, "
@@ -104,34 +116,90 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr-decay-factor", type=float, default=0.5)
     p.add_argument("--training-mode", choices=("fixed_density", "self_consistent"), default="self_consistent")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--hidden-dims", type=int, nargs="+", default=list(GRADDFT_DEFAULT_DM21_HIDDEN_DIMS))
+    p.add_argument("--hidden-dims", type=int, nargs="+", default=list(DEFAULT_NETWORK_HIDDEN_DIMS))
     p.add_argument(
         "--network-architecture",
-        choices=("simple_mlp", "graddft_residual"),
-        default=GRADDFT_DEFAULT_NETWORK_ARCHITECTURE,
+        choices=("graddft_residual",),
+        default=DEFAULT_NETWORK_ARCHITECTURE,
     )
     p.add_argument(
         "--input-feature-mode",
-        choices=("enhanced", "dm21_original"),
-        default=GRADDFT_DEFAULT_INPUT_FEATURE_MODE,
+        choices=("enhanced", "canonical", "dm21_original"),
+        default=DEFAULT_INPUT_FEATURE_MODE,
     )
     p.add_argument("--include-pt2-channel", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--include-hfx-channel", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument(
+        "--response-hf-mode",
+        choices=("approx", "strict"),
+        default=DEFAULT_NEURAL_XC_RESPONSE_HF_MODE,
+        help=(
+            "Excited-state handling of the neural local-HF channel. 'approx' averages "
+            "the grid HF coefficient into a scalar hybrid fraction; 'strict' is gated "
+            "until chi/fxx second-response contractions are implemented."
+        ),
+    )
     p.add_argument(
         "--pt2-channel-mode",
         choices=("scaled_projected", "local_exact"),
         default="scaled_projected",
     )
+    p.add_argument(
+        "--scf-hfx-grid-block-size",
+        dest="scf_hfx_grid_block_size",
+        type=int,
+        default=1024,
+        help="Grid block size for SCF local-HF HFX nu cache reads and Fock contractions.",
+    )
     p.add_argument("--semilocal-xc", nargs="+", default=list(b3lyp_component_basis()))
-    p.add_argument("--s1-weight", type=float, default=1.0)
-    p.add_argument("--s1-use-tda", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--excitation-gap-mse-weight", type=float, default=1.0)
+    p.add_argument("--excitation-gap-mae-weight", type=float, default=1.0)
+    p.add_argument(
+        "--excited-state-solver",
+        choices=("tda", "casida"),
+        default="tda",
+    )
+    p.add_argument("--oscillator-strength-nstates", type=int, default=5)
+    p.add_argument("--oscillator-strength-mse-weight", type=float, default=0.0)
+    p.add_argument("--oscillator-strength-mae-weight", type=float, default=0.0)
+    p.add_argument(
+        "--tda-gradient-mode",
+        choices=("eigenvalue_only", "implicit_eigenvector"),
+        default="eigenvalue_only",
+    )
+    p.add_argument("--tda-eigenvector-adjoint-tolerance", type=float, default=1e-6)
+    p.add_argument("--tda-eigenvector-adjoint-max-iter", type=int, default=64)
     p.add_argument("--eval-use-tda", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--energy-mse-weight", type=float, default=0.0)
-    p.add_argument("--energy-mae-weight", type=float, default=0.0)
-    p.add_argument("--density-constraint-weight", type=float, default=0.0)
     p.add_argument("--grids-level", type=int, default=0)
     p.add_argument("--reference-scf-max-cycle", type=int, default=100)
     p.add_argument("--reference-scf-conv-tol", type=float, default=1e-10)
-    p.add_argument("--train-scf-max-cycle", type=int, default=16)
+    p.add_argument("--reference-jk-backend", choices=("full", "df"), default="full")
+    p.add_argument(
+        "--response-df-mode",
+        choices=("none", "df", "ris"),
+        default="none",
+        help="Optional response-factor cache content generated with each reference molecule.",
+    )
+    p.add_argument(
+        "--response-two-electron-mode",
+        choices=("auto", "direct", "df", "ris"),
+        default="auto",
+        help="Two-electron backend used by the TDDFT/TDA response kernel during training.",
+    )
+    p.add_argument("--response-ris-theta", type=float, default=0.2)
+    p.add_argument("--response-ris-j-fit", choices=("s", "sp", "spd"), default="sp")
+    p.add_argument("--response-ris-k-fit", choices=("s", "sp", "spd"), default="s")
+    p.add_argument("--response-ris-aux-chunk-size", type=int, default=256)
+    p.add_argument(
+        "--reference-cache",
+        default="outputs/reference_cache/closed_shell_s1_references.h5",
+        help=(
+            "HDF5 cache for prepared RKS/HFX reference molecules. Pass an empty "
+            "string to disable."
+        ),
+    )
+    p.add_argument("--rebuild-reference-cache", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--train-scf-max-cycle", type=int, default=128)
     p.add_argument("--train-scf-damping", type=float, default=0.25)
     p.add_argument("--train-scf-conv-tol-density", type=float, default=1e-8)
     p.add_argument("--train-scf-vxc-clip", type=float, default=20.0)
@@ -142,21 +210,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--scf-gradient-mode",
-        choices=("unrolled", "implicit_commutator"),
-        default="implicit_commutator",
-    )
-    p.add_argument(
-        "--scf-implicit-diff-solver",
-        choices=("normal_cg", "gmres", "bicgstab"),
-        default="normal_cg",
+        choices=("expl", "impl"),
+        default="impl",
     )
     p.add_argument("--scf-implicit-diff-tolerance", type=float, default=1e-6)
     p.add_argument("--scf-implicit-diff-regularization", type=float, default=1e-3)
-    p.add_argument("--scf-implicit-diff-restart", type=int, default=12)
-    p.add_argument("--scf-require-convergence", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--grad-clip-norm", type=float, default=None)
-    p.add_argument("--scf-stop-gradient-on-unconverged", action=argparse.BooleanOptionalAction, default=False)
-    p.add_argument("--scf-stop-gradient-rms-threshold", type=float, default=None)
     p.add_argument("--scf-warm-start", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--scf-warm-start-update-interval", type=int, default=1)
     p.add_argument(
@@ -170,9 +229,76 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--jit-eval", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--jit-train", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument(
+        "--eval-device",
+        choices=("auto", "cpu", "gpu"),
+        default="auto",
+        help=(
+            "Device used for train/validation forward-only evaluation. Use 'cpu' "
+            "to keep validation JIT graphs off the GPU while leaving training on GPU."
+        ),
+    )
+    p.add_argument(
+        "--stream-train",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Average one-molecule gradients instead of tracing the whole dataset as one batch.",
+    )
+    p.add_argument(
+        "--stream-update-mode",
+        choices=("accumulate", "per_molecule"),
+        default="accumulate",
+        help=(
+            "Optimizer update policy for --stream-train. 'accumulate' averages "
+            "one-molecule gradients over the training split before one update; "
+            "'per_molecule' applies one optimizer update per molecule, i.e. "
+            "traditional batch_size=1 while still evaluating per epoch."
+        ),
+    )
+    p.add_argument(
+        "--host-reference-cache",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Keep prepared reference arrays on host memory. By default this is enabled "
+            "for --stream-train so multiple molecules do not all keep hfx_nu on GPU."
+        ),
+    )
+    p.add_argument(
+        "--skip-initial-eval",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="In streaming mode, start step 1 without a pre-training full-dataset eval.",
+    )
     p.add_argument("--eval-interval", type=int, default=50)
+    p.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="Optional parameter checkpoint used to initialize training.",
+    )
+    p.add_argument(
+        "--start-step",
+        type=int,
+        default=0,
+        help="Global training step already completed by --init-checkpoint.",
+    )
+    p.add_argument(
+        "--checkpoint-interval",
+        type=int,
+        default=0,
+        help="Write streaming training parameter checkpoints every N steps; 0 disables periodic checkpoints.",
+    )
+    p.add_argument(
+        "--skip-final-evaluation",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Write training-only artifacts and checkpoint immediately after training, "
+            "skipping the per-molecule final train/validation/test prediction pass."
+        ),
+    )
     p.add_argument("--outdir", default="outputs/closed_shell_s1_self_consistent_train")
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def _metric_scalar(metrics: dict[str, Any], key: str, default: float = float("nan")) -> float:
@@ -193,6 +319,123 @@ def _metric_mean(metrics: dict[str, Any], key: str, default: float = float("nan"
     return float(jnp.mean(arr))
 
 
+def _resolve_eval_device(args: argparse.Namespace) -> jax.Device | None:
+    mode = str(getattr(args, "eval_device", "auto")).lower()
+    if mode == "auto":
+        return None
+    backends = ("cpu",) if mode == "cpu" else ("gpu", "cuda")
+    errors: list[str] = []
+    for backend in backends:
+        try:
+            devices = jax.devices(backend)
+        except Exception as exc:  # pragma: no cover - backend availability is platform-specific
+            errors.append(f"{backend}: {exc!r}")
+            continue
+        if devices:
+            return devices[0]
+    detail = "; ".join(errors) if errors else "no matching devices"
+    raise RuntimeError(
+        f"--eval-device={mode!r} requested, but no matching JAX device is available. "
+        "For CPU eval in a GPU run, launch with JAX_PLATFORMS=cuda,cpu. "
+        f"Details: {detail}"
+    )
+
+
+def _device_put_array_leaves(tree: Any, device: jax.Device) -> Any:
+    def put_leaf(value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, (np.ndarray, np.generic, jax.Array)):
+            return jax.device_put(value, device)
+        if hasattr(value, "__jax_array__"):
+            return jax.device_put(value, device)
+        return value
+
+    return jax.tree_util.tree_map(put_leaf, tree)
+
+
+def _call_eval_on_device(fn: Any, *args: Any, device: jax.Device | None = None) -> Any:
+    if device is None:
+        return fn(*args)
+    placed_args = tuple(_device_put_array_leaves(arg, device) for arg in args)
+    with jax.default_device(device):
+        return fn(*placed_args)
+
+
+def _ground_only_best_score(
+    args: argparse.Namespace,
+    *,
+    train_loss: float,
+    train_metrics: dict[str, Any],
+    val_loss: float | None,
+    val_metrics: dict[str, Any] | None,
+    has_validation: bool,
+) -> float:
+    if _oscillator_active(args):
+        if has_validation and val_loss is not None:
+            return float(val_loss)
+        return float(train_loss)
+    if not _gap_active(args):
+        if has_validation and val_loss is not None:
+            return float(val_loss)
+        return float(train_loss)
+    if has_validation and val_metrics is not None:
+        fallback = float(val_loss) if val_loss is not None else float("inf")
+        return _metric_mean(val_metrics, "excitation_gap_mae", fallback)
+    return _metric_mean(train_metrics, "excitation_gap_mae", float(train_loss))
+
+
+def _training_objective_label(args: argparse.Namespace) -> str:
+    label = f"s1_gap_{args.excited_state_solver}"
+    if any(
+        float(value) != 0.0
+        for value in (
+            args.oscillator_strength_mse_weight,
+            args.oscillator_strength_mae_weight,
+        )
+    ):
+        label += f"+oscillator_strength_s1_s{int(args.oscillator_strength_nstates)}"
+    return label
+
+
+def _gap_active(args: argparse.Namespace) -> bool:
+    return any(
+        float(value) != 0.0
+        for value in (
+            args.excitation_gap_mse_weight,
+            args.excitation_gap_mae_weight,
+        )
+    )
+
+
+def _oscillator_active(args: argparse.Namespace) -> bool:
+    return any(
+        float(value) != 0.0
+        for value in (
+            args.oscillator_strength_mse_weight,
+            args.oscillator_strength_mae_weight,
+        )
+    )
+
+
+def _normalize_input_feature_mode(value: str) -> str:
+    mode = str(value).strip().lower()
+    if mode == "dm21_original":
+        return "canonical"
+    if mode in {"canonical", "enhanced"}:
+        return mode
+    raise ValueError(f"Unsupported input feature mode {value!r}.")
+
+
+def _normalize_scf_gradient_mode(value: str) -> str:
+    mode = str(value).strip().lower()
+    if mode in {"impl", "implicit_commutator"}:
+        return "impl"
+    if mode in {"expl", "unrolled"}:
+        return "expl"
+    raise ValueError(f"Unsupported SCF gradient mode {value!r}.")
+
+
 def _with_scf_initial_density(molecule: Any, density: Any) -> Any:
     density_arr = jnp.asarray(density)
     if is_dataclass(molecule):
@@ -211,15 +454,15 @@ def _spin_summed_density_matrix(molecule: Any) -> jnp.ndarray:
 
 
 def _refresh_dataset_scf_warm_start_cache(
-    dataset: tuple[GroundStateDatum, ...],
+    dataset: tuple[MolecularTrainingDatum, ...],
     *,
     params: Any,
     functional: Any,
-    training_config: GroundStateTrainingConfig,
-) -> tuple[GroundStateDatum, ...]:
+    training_config: MolecularTrainingConfig,
+) -> tuple[MolecularTrainingDatum, ...]:
     if training_config.mode != "self_consistent":
         return dataset
-    refreshed: list[GroundStateDatum] = []
+    refreshed: list[MolecularTrainingDatum] = []
     for datum in dataset:
         predicted_molecule = predict_ground_state_molecule(
             params,
@@ -246,9 +489,306 @@ def _tree_all_finite(tree: Any) -> bool:
     return all(bool(jnp.all(jnp.isfinite(jnp.asarray(leaf)))) for leaf in leaves)
 
 
+def _tree_l2_norm(tree: Any) -> jnp.ndarray:
+    leaves = jax.tree_util.tree_leaves(tree)
+    if not leaves:
+        return jnp.asarray(0.0, dtype=jnp.float32)
+    total = jnp.asarray(0.0, dtype=jnp.float32)
+    for leaf in leaves:
+        arr = jnp.asarray(leaf)
+        arr = jnp.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+        total = total + jnp.sum(jnp.square(arr.astype(jnp.float32)))
+    return jnp.sqrt(total)
+
+
+def _tree_add(left: Any | None, right: Any) -> Any:
+    if left is None:
+        return right
+    return jax.tree_util.tree_map(lambda a, b: a + b, left, right)
+
+
+def _tree_scale(tree: Any, scale: float) -> Any:
+    return jax.tree_util.tree_map(lambda value: value * scale, tree)
+
+
 def _loss_and_metrics_all_finite(loss: Any, metrics: dict[str, Any]) -> bool:
     return bool(jnp.all(jnp.isfinite(jnp.asarray(loss)))) and _tree_all_finite(metrics)
 
+
+def _use_host_reference_cache(args: argparse.Namespace) -> bool:
+    if args.host_reference_cache is not None:
+        return bool(args.host_reference_cache)
+    return bool(args.stream_train)
+
+
+def _scf_hfx_grid_block_size(args: argparse.Namespace, *, default: int = 1024) -> int:
+    return int(getattr(args, "scf_hfx_grid_block_size", default))
+
+
+def _lr_transition_steps(args: argparse.Namespace, *, train_size: int) -> int:
+    transition_steps = int(args.lr_decay_every)
+    if (
+        bool(args.stream_train)
+        and str(getattr(args, "stream_update_mode", "accumulate")) == "per_molecule"
+    ):
+        transition_steps *= max(1, int(train_size))
+    return transition_steps
+
+
+def _stream_lr_schedule_index(
+    args: argparse.Namespace,
+    *,
+    step: int,
+    train_size: int,
+) -> int:
+    if str(getattr(args, "stream_update_mode", "accumulate")) == "per_molecule":
+        return max(0, int(step) - 1) * max(1, int(train_size))
+    return max(0, int(step) - 1)
+
+
+def _streaming_should_eval_step(args: argparse.Namespace, *, step: int) -> bool:
+    final_step = int(step) == int(args.steps)
+    if final_step and bool(args.skip_final_evaluation):
+        return False
+    return final_step or int(step) % max(1, int(args.eval_interval)) == 0
+
+
+def _streaming_should_log_train_step(args: argparse.Namespace, *, step: int) -> bool:
+    return (
+        int(step) == 1
+        or int(step) == int(args.steps)
+        or int(step) % max(1, int(args.eval_interval)) == 0
+    )
+
+
+def _host_cache_pytree(tree: Any) -> Any:
+    return jax.device_get(tree)
+
+
+def _reference_cache_path(args: argparse.Namespace) -> Path | None:
+    value = str(getattr(args, "reference_cache", "") or "").strip()
+    if not value or value.lower() in {"none", "off", "false"}:
+        return None
+    return Path(value)
+
+
+def _reference_cache_key(
+    row: ReferenceRow,
+    *,
+    args: argparse.Namespace,
+    input_feature_mode: str,
+) -> str:
+    payload = {
+        "version": 1,
+        "system": row.system,
+        "atom": row.atom,
+        "basis": row.basis,
+        "unit": row.unit,
+        "charge": int(row.charge),
+        "spin": int(row.spin),
+        "cart": True,
+        "xc": str(args.xc),
+        "grids_level": int(args.grids_level),
+        "reference_jk_backend": str(args.reference_jk_backend),
+        "response_df_mode": str(args.response_df_mode),
+        "response_ris_theta": float(args.response_ris_theta),
+        "response_ris_j_fit": str(args.response_ris_j_fit),
+        "response_ris_k_fit": str(args.response_ris_k_fit),
+        "input_feature_mode": str(input_feature_mode),
+        "include_hfx_channel": bool(args.include_hfx_channel),
+        "include_pt2_channel": bool(args.include_pt2_channel),
+    }
+    digest = hashlib.sha1(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+    return f"closed_shell_s1/v1/{digest[:2]}/{digest}"
+
+
+def _build_pyscf_mol_from_row(row: ReferenceRow) -> Any:
+    return gto.M(
+        atom=row.atom.replace(";", "\n"),
+        unit=row.unit,
+        basis=row.basis,
+        charge=row.charge,
+        spin=row.spin,
+        cart=True,
+        verbose=0,
+    )
+
+
+def _maybe_reattach_chunked_hfx_nu_api(
+    row: ReferenceRow,
+    molecule: Any,
+    *,
+    input_feature_mode: str,
+    logger: RunLogger,
+) -> Any:
+    if str(input_feature_mode) != "canonical":
+        return molecule
+    if getattr(molecule, "hfx_nu_api", None) is not None:
+        return molecule
+    mol = _build_pyscf_mol_from_row(row)
+    if int(getattr(mol, "natm", 0)) <= 3:
+        return molecule
+    omega_values = getattr(molecule, "hfx_omega_values", None)
+    coords = getattr(getattr(molecule, "grid", None), "coords", None)
+    ao = getattr(molecule, "ao", None)
+    if omega_values is None or coords is None or ao is None:
+        return molecule
+    omega_tuple = tuple(
+        float(value)
+        for value in np.asarray(jax.device_get(omega_values)).reshape(-1)
+    )
+    if not omega_tuple:
+        return molecule
+    api = ChunkedHFXNu.from_pyscf_mol(
+        mol,
+        np.asarray(jax.device_get(coords)),
+        omega_values=omega_tuple,
+        nao=int(np.asarray(jax.device_get(ao)).shape[1]),
+    )
+    logger.log(f"[ref_cache] reattached chunked hfx_nu_api for {row.system}")
+    return replace(molecule, hfx_nu=None, hfx_nu_api=api)
+
+
+def _cache_hfx_nu_storage(
+    molecule_group: Any,
+    *,
+    args: argparse.Namespace,
+    input_feature_mode: str,
+) -> str:
+    if not bool(args.include_hfx_channel):
+        return "array"
+    if str(input_feature_mode) != "canonical":
+        return "array"
+    if "hfx_nu" not in molecule_group:
+        return "array"
+    if "atom_coords" not in molecule_group:
+        return "array"
+    if int(molecule_group["atom_coords"].shape[0]) <= 3:
+        return "array"
+    return "chunked"
+
+
+def _load_reference_from_cache(
+    row: ReferenceRow,
+    *,
+    args: argparse.Namespace,
+    input_feature_mode: str,
+    host_reference_cache: bool,
+    logger: RunLogger,
+    ignore_rebuild: bool = False,
+) -> Any | None:
+    cache_path = _reference_cache_path(args)
+    if (
+        cache_path is None
+        or (bool(args.rebuild_reference_cache) and not bool(ignore_rebuild))
+        or not cache_path.exists()
+    ):
+        return None
+    key = _reference_cache_key(row, args=args, input_feature_mode=input_feature_mode)
+    try:
+        import h5py
+
+        with h5py.File(cache_path, "r") as handle:
+            if key not in handle:
+                return None
+            molecule_group = handle[key]["molecule"]
+            hfx_nu_storage = _cache_hfx_nu_storage(
+                molecule_group,
+                args=args,
+                input_feature_mode=input_feature_mode,
+            )
+            molecule = read_restricted_molecule(
+                molecule_group,
+                array_backend="host" if host_reference_cache else "jax",
+                hfx_nu_storage=hfx_nu_storage,
+                hfx_nu_chunk_size=_scf_hfx_grid_block_size(args, default=512),
+            )
+            molecule = _maybe_reattach_chunked_hfx_nu_api(
+                row,
+                molecule,
+                input_feature_mode=input_feature_mode,
+                logger=logger,
+            )
+    except Exception as exc:
+        logger.log(f"[ref_cache] miss/error {row.system}: {exc!r}; rebuilding")
+        return None
+    logger.log(f"[ref_cache] hit {row.system}: {cache_path}::{key}")
+    return molecule
+
+
+def _save_reference_to_cache(
+    row: ReferenceRow,
+    molecule: Any,
+    *,
+    args: argparse.Namespace,
+    input_feature_mode: str,
+    logger: RunLogger,
+) -> None:
+    cache_path = _reference_cache_path(args)
+    if cache_path is None:
+        return
+    key = _reference_cache_key(row, args=args, input_feature_mode=input_feature_mode)
+    try:
+        import h5py
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(cache_path, "a") as handle:
+            parent_name, leaf_name = key.rsplit("/", 1)
+            parent = handle.require_group(parent_name)
+            if leaf_name in parent:
+                del parent[leaf_name]
+            group = parent.create_group(leaf_name)
+            group.attrs["system"] = row.system
+            group.attrs["basis"] = row.basis
+            group.attrs["xc"] = str(args.xc)
+            group.attrs["grids_level"] = int(args.grids_level)
+            group.attrs["reference_jk_backend"] = str(args.reference_jk_backend)
+            group.attrs["input_feature_mode"] = str(input_feature_mode)
+            group.attrs["include_hfx_channel"] = bool(args.include_hfx_channel)
+            group.attrs["include_pt2_channel"] = bool(args.include_pt2_channel)
+            write_restricted_molecule(group.require_group("molecule"), molecule)
+    except Exception as exc:
+        logger.log(f"[ref_cache] write failed {row.system}: {exc!r}")
+        return
+    logger.log(f"[ref_cache] wrote {row.system}: {cache_path}::{key}")
+
+
+def _streaming_average_eval(
+    params: Any,
+    data: tuple[MolecularTrainingDatum, ...],
+    eval_kernel: Any,
+    *,
+    device: jax.Device | None = None,
+) -> tuple[float, dict[str, float]]:
+    if not data:
+        return float("nan"), {
+            "excitation_gap_mae": float("nan"),
+            "excitation_gap_mse": float("nan"),
+            "oscillator_strength_loss": float("nan"),
+            "oscillator_strength_mae": float("nan"),
+        }
+    losses: list[float] = []
+    excitation_gap_maes: list[float] = []
+    excitation_gap_mses: list[float] = []
+    oscillator_losses: list[float] = []
+    oscillator_maes: list[float] = []
+    for datum in data:
+        loss, metrics = _call_eval_on_device(eval_kernel, params, datum, device=device)
+        losses.append(float(loss))
+        excitation_gap_maes.append(_metric_mean(metrics, "excitation_gap_mae", 0.0))
+        excitation_gap_mses.append(_metric_mean(metrics, "excitation_gap_mse", 0.0))
+        oscillator_losses.append(
+            _metric_mean(metrics, "oscillator_strength_penalty", 0.0)
+        )
+        oscillator_maes.append(
+            _metric_mean(metrics, "oscillator_strength_mae", 0.0)
+        )
+    return float(np.mean(losses)), {
+        "excitation_gap_mae": float(np.mean(excitation_gap_maes)),
+        "excitation_gap_mse": float(np.mean(excitation_gap_mses)),
+        "oscillator_strength_loss": float(np.mean(oscillator_losses)),
+        "oscillator_strength_mae": float(np.mean(oscillator_maes)),
+    }
 
 def _load_reference_rows(path: Path, *, basis: str) -> list[ReferenceRow]:
     rows: list[ReferenceRow] = []
@@ -257,6 +797,12 @@ def _load_reference_rows(path: Path, *, basis: str) -> list[ReferenceRow]:
         for row in reader:
             if str(row["basis"]).lower() != str(basis).lower():
                 continue
+            strengths_json = str(row.get("oscillator_strengths_json", "") or "").strip()
+            strengths = (
+                tuple(float(value) for value in json.loads(strengths_json))
+                if strengths_json
+                else None
+            )
             rows.append(
                 ReferenceRow(
                     system=str(row["system"]),
@@ -268,6 +814,7 @@ def _load_reference_rows(path: Path, *, basis: str) -> list[ReferenceRow]:
                     basis=str(row["basis"]),
                     ccsd_total_energy_h=float(row["ccsd_total_energy_h"]),
                     s1_excitation_h=float(row["s1_excitation_h"]),
+                    oscillator_strengths=strengths,
                 )
             )
     if not rows:
@@ -283,15 +830,7 @@ def _run_rks_reference(
     scf_conv_tol: float,
     scf_max_cycle: int,
 ) -> Any:
-    mol = gto.M(
-        atom=row.atom.replace(";", "\n"),
-        unit=row.unit,
-        basis=row.basis,
-        charge=row.charge,
-        spin=row.spin,
-        cart=True,
-        verbose=0,
-    )
+    mol = _build_pyscf_mol_from_row(row)
     attempts = (
         dict(init_guess="minao", damping=0.15, level_shift=0.0, max_cycle=scf_max_cycle, use_newton=False),
         dict(init_guess="atom", damping=0.3, level_shift=0.5, max_cycle=max(scf_max_cycle, 180), use_newton=False),
@@ -328,7 +867,20 @@ def _prepare_references(
     logger: RunLogger,
 ) -> list[PreparedReference]:
     prepared: list[PreparedReference] = []
+    host_reference_cache = _use_host_reference_cache(args)
     for idx, row in enumerate(rows, start=1):
+        input_feature_mode = _normalize_input_feature_mode(str(args.input_feature_mode))
+        reference = _load_reference_from_cache(
+            row,
+            args=args,
+            input_feature_mode=input_feature_mode,
+            host_reference_cache=host_reference_cache,
+            logger=logger,
+        )
+        if reference is not None:
+            prepared.append(PreparedReference(row=row, molecule=reference))
+            continue
+
         logger.log(f"[ref] {idx}/{len(rows)} build {row.system} ({row.split})")
         mf = _run_rks_reference(
             row,
@@ -339,30 +891,63 @@ def _prepare_references(
         )
         reference = restricted_reference_from_pyscf(
             mf,
-            compute_local_hfx_features=(str(args.input_feature_mode) == "dm21_original"),
-            compute_local_hfx_aux=(str(args.input_feature_mode) == "dm21_original"),
+            compute_local_hfx_features=(
+                bool(args.include_hfx_channel) and input_feature_mode == "canonical"
+            ),
+            compute_local_hfx_aux=(
+                bool(args.include_hfx_channel) and input_feature_mode == "canonical"
+            ),
             compute_local_pt2_features=bool(args.include_pt2_channel),
+            array_backend="host" if host_reference_cache else "jax",
+            jk_backend=str(args.reference_jk_backend),
+            response_df_mode=str(args.response_df_mode),
+            response_ris_theta=float(args.response_ris_theta),
+            response_ris_j_fit=str(args.response_ris_j_fit),
+            response_ris_k_fit=str(args.response_ris_k_fit),
         )
+        if host_reference_cache:
+            reference = _host_cache_pytree(reference)
+            gc.collect()
+            logger.log(f"[ref] {idx}/{len(rows)} host-cached {row.system} ({row.split})")
+        _save_reference_to_cache(
+            row,
+            reference,
+            args=args,
+            input_feature_mode=input_feature_mode,
+            logger=logger,
+        )
+        cached_reference = _load_reference_from_cache(
+            row,
+            args=args,
+            input_feature_mode=input_feature_mode,
+            host_reference_cache=host_reference_cache,
+            logger=logger,
+            ignore_rebuild=True,
+        )
+        if cached_reference is not None:
+            reference = cached_reference
         prepared.append(PreparedReference(row=row, molecule=reference))
     return prepared
 
 
 def _build_dataset(
     prepared: list[PreparedReference],
-    *,
-    s1_weight: float,
-    density_constraint_weight: float,
-) -> tuple[GroundStateDatum, ...]:
+) -> tuple[MolecularTrainingDatum, ...]:
     return tuple(
-        GroundStateDatum.from_parts(
-            ref.molecule,
-            core=GroundStateCoreDatum(
-                target_total_energy=jnp.asarray(ref.row.ccsd_total_energy_h, dtype=jnp.float64),
-                density_constraint_weight=float(density_constraint_weight),
+        MolecularTrainingDatum(
+            molecule=ref.molecule,
+            target_e0_total_h=jnp.asarray(
+                ref.row.ccsd_total_energy_h,
+                dtype=jnp.float64,
             ),
-            excited_state=ExcitedStateDatum(
-                target_s1_energy=jnp.asarray(ref.row.s1_excitation_h, dtype=jnp.float64),
-                s1_constraint_weight=float(s1_weight),
+            target_excitation_gaps_h=jnp.asarray(
+                [ref.row.s1_excitation_h],
+                dtype=jnp.float64,
+            ),
+            target_oscillator_strengths=(
+                jnp.asarray(ref.row.oscillator_strengths, dtype=jnp.float64)
+                if ref.row.oscillator_strengths is not None
+                else None
             ),
         )
         for ref in prepared
@@ -374,7 +959,7 @@ def _evaluate_dataset(
     *,
     params: Any,
     functional: Any,
-    training_config: GroundStateTrainingConfig,
+    training_config: MolecularTrainingConfig,
     use_tda: bool,
 ) -> tuple[list[dict[str, Any]], dict[str, float]]:
     rows: list[dict[str, Any]] = []
@@ -395,7 +980,7 @@ def _evaluate_dataset(
                 training_config=training_config,
             )
         )
-        predicted_s1_h = float(
+        predicted_excitation_gap_h = float(
             np.asarray(
                 predict_excitation_energies(
                     params,
@@ -406,9 +991,9 @@ def _evaluate_dataset(
                 )
             ).reshape(-1)[0]
         )
-        s1_abs_err_ev = abs(predicted_s1_h - ref.row.s1_excitation_h) * HARTREE_TO_EV
+        excitation_gap_abs_err_ev = abs(predicted_excitation_gap_h - ref.row.s1_excitation_h) * HARTREE_TO_EV
         total_abs_err_ev = abs(predicted_total_h - ref.row.ccsd_total_energy_h) * HARTREE_TO_EV
-        s1_err_ev.append(float(s1_abs_err_ev))
+        s1_err_ev.append(float(excitation_gap_abs_err_ev))
         energy_err_ev.append(float(total_abs_err_ev))
         rows.append(
             {
@@ -416,17 +1001,17 @@ def _evaluate_dataset(
                 "split": ref.row.split,
                 "target_total_energy_h": float(ref.row.ccsd_total_energy_h),
                 "predicted_total_energy_h": float(predicted_total_h),
-                "target_s1_h": float(ref.row.s1_excitation_h),
-                "predicted_s1_h": float(predicted_s1_h),
-                "target_s1_ev": float(ref.row.s1_excitation_h * HARTREE_TO_EV),
-                "predicted_s1_ev": float(predicted_s1_h * HARTREE_TO_EV),
-                "s1_abs_err_ev": float(s1_abs_err_ev),
+                "target_excitation_gap_h": float(ref.row.s1_excitation_h),
+                "predicted_excitation_gap_h": float(predicted_excitation_gap_h),
+                "target_excitation_gap_ev": float(ref.row.s1_excitation_h * HARTREE_TO_EV),
+                "predicted_excitation_gap_ev": float(predicted_excitation_gap_h * HARTREE_TO_EV),
+                "excitation_gap_abs_err_ev": float(excitation_gap_abs_err_ev),
                 "total_abs_err_ev": float(total_abs_err_ev),
             }
         )
     metrics = {
-        "s1_mae_ev": float(np.mean(s1_err_ev)) if s1_err_ev else float("nan"),
-        "s1_max_ev": float(np.max(s1_err_ev)) if s1_err_ev else float("nan"),
+        "excitation_gap_mae_ev": float(np.mean(s1_err_ev)) if s1_err_ev else float("nan"),
+        "excitation_gap_max_ev": float(np.max(s1_err_ev)) if s1_err_ev else float("nan"),
         "total_mae_ev": float(np.mean(energy_err_ev)) if energy_err_ev else float("nan"),
     }
     return rows, metrics
@@ -444,34 +1029,16 @@ def _write_prediction_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _plot_training_history(path: Path, training: dict[str, Any], *, title: str) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2))
+    fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.2))
     steps = np.asarray(training["history_steps"], dtype=np.int64)
     loss = np.asarray(training["loss_history"], dtype=np.float64)
-    axes[0].plot(steps, np.maximum(loss, 1e-16), lw=1.6, label="pre-update train loss")
-    eval_steps = np.asarray(training["eval_steps"], dtype=np.int64)
-    train_eval_loss = np.asarray(training["eval_train_loss_history"], dtype=np.float64)
-    val_eval_loss = np.asarray(training["eval_val_loss_history"], dtype=np.float64)
-    train_eval_s1 = np.asarray(training["eval_train_s1_mae_history"], dtype=np.float64)
-    val_eval_s1 = np.asarray(training["eval_val_s1_mae_history"], dtype=np.float64)
-    axes[0].plot(eval_steps, np.maximum(train_eval_loss, 1e-16), "o-", ms=2.6, lw=1.0, label="train loss")
-    if val_eval_loss.size:
-        axes[0].plot(eval_steps, np.maximum(val_eval_loss, 1e-16), "o-", ms=2.6, lw=1.0, label="val loss")
-    axes[0].set_yscale("log")
-    axes[0].set_xlabel("Step")
-    axes[0].set_ylabel("Loss")
-    axes[0].set_title("Loss")
-    axes[0].grid(alpha=0.2)
-    axes[0].legend(frameon=False, fontsize=8)
-
-    axes[1].plot(eval_steps, np.maximum(train_eval_s1, 1e-16), "o-", ms=2.6, lw=1.0, label="train S1 MAE")
-    if val_eval_s1.size:
-        axes[1].plot(eval_steps, np.maximum(val_eval_s1, 1e-16), "o-", ms=2.6, lw=1.0, label="val S1 MAE")
-    axes[1].set_yscale("log")
-    axes[1].set_xlabel("Step")
-    axes[1].set_ylabel("S1 MAE (Eh)")
-    axes[1].set_title("Generalization")
-    axes[1].grid(alpha=0.2)
-    axes[1].legend(frameon=False, fontsize=8)
+    ax.plot(steps, np.maximum(loss, 1e-16), lw=1.6, label="train loss")
+    ax.set_yscale("log")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Loss")
+    ax.set_title("Training loss")
+    ax.grid(alpha=0.2)
+    ax.legend(frameon=False, fontsize=8)
     fig.suptitle(title)
     fig.tight_layout()
     fig.savefig(path, dpi=180)
@@ -484,16 +1051,16 @@ def _write_training_history_csv(path: Path, training: dict[str, Any]) -> None:
         writer.writerow(
             [
                 "step",
-                "loss_pre_update",
-                "s1_mae_pre_update",
+                "train_loss",
+                "train_excitation_gap_mae",
                 "grad_norm",
                 "grad_abs_max",
                 "param_update_norm",
                 "nonfinite_grad_fraction",
                 "train_loss_reevaluated",
-                "train_s1_mae_reevaluated",
+                "train_excitation_gap_mae_reevaluated",
                 "val_loss_reevaluated",
-                "val_s1_mae_reevaluated",
+                "val_excitation_gap_mae_reevaluated",
             ]
         )
         eval_map = {
@@ -506,9 +1073,9 @@ def _write_training_history_csv(path: Path, training: dict[str, Any]) -> None:
             for step, train_loss, train_s1, val_loss, val_s1 in zip(
                 training["eval_steps"],
                 training["eval_train_loss_history"],
-                training["eval_train_s1_mae_history"],
+                training["eval_train_excitation_gap_mae_history"],
                 training["eval_val_loss_history"],
-                training["eval_val_s1_mae_history"],
+                training["eval_val_excitation_gap_mae_history"],
                 strict=False,
             )
         }
@@ -521,7 +1088,7 @@ def _write_training_history_csv(path: Path, training: dict[str, Any]) -> None:
                 [
                     int(step),
                     float(training["loss_history"][idx]),
-                    float(training["s1_mae_history"][idx]),
+                    float(training["excitation_gap_mae_history"][idx]),
                     float(training["grad_norm_history"][idx]),
                     float(training["grad_abs_max_history"][idx]),
                     float(training["param_update_norm_history"][idx]),
@@ -534,9 +1101,392 @@ def _write_training_history_csv(path: Path, training: dict[str, Any]) -> None:
             )
 
 
+def _train_streaming(
+    state: Any,
+    train_dataset: tuple[MolecularTrainingDatum, ...],
+    val_dataset: tuple[MolecularTrainingDatum, ...],
+    *,
+    functional: Any,
+    training_config: MolecularTrainingConfig,
+    lr_schedule: Any,
+    args: argparse.Namespace,
+    logger: RunLogger,
+) -> dict[str, Any]:
+    loss_and_grad_kernel = make_molecular_loss_and_grad(
+        functional,
+        training_config=training_config,
+    )
+    eval_kernel = lambda params, datum: molecular_loss(  # noqa: E731
+        params,
+        functional,
+        datum,
+        training_config=training_config,
+    )
+    if bool(args.jit_train):
+        loss_and_grad_kernel = jax.jit(loss_and_grad_kernel)
+    if bool(args.jit_eval):
+        eval_kernel = jax.jit(eval_kernel)
+    eval_device = _resolve_eval_device(args)
+    if eval_device is not None:
+        logger.log(f"[train_init] eval_device={eval_device.platform}:{eval_device.id}")
+
+    stream_update_mode = str(getattr(args, "stream_update_mode", "accumulate"))
+    if stream_update_mode == "per_molecule":
+        logger.log(
+            "[train_init] streaming mode: one molecule per JIT call; "
+            "applying per-molecule optimizer updates"
+        )
+    else:
+        logger.log("[train_init] streaming mode: one molecule per JIT call; averaging grads")
+    if bool(args.skip_initial_eval):
+        initial_train_loss = float("nan")
+        initial_train_metrics = {"excitation_gap_mae": float("nan"), "excitation_gap_mse": float("nan")}
+        initial_val_loss = float("nan")
+        initial_val_metrics = {"excitation_gap_mae": float("nan"), "excitation_gap_mse": float("nan")}
+        best_score = float("inf")
+        logger.log("[train_init] skipped initial eval")
+    else:
+        initial_train_loss, initial_train_metrics = _streaming_average_eval(
+            state.params,
+            train_dataset,
+            eval_kernel,
+            device=eval_device,
+        )
+        initial_val_loss, initial_val_metrics = _streaming_average_eval(
+            state.params,
+            val_dataset,
+            eval_kernel,
+            device=eval_device,
+        )
+        best_score = _ground_only_best_score(
+            args,
+            train_loss=float(initial_train_loss),
+            train_metrics=initial_train_metrics,
+            val_loss=float(initial_val_loss),
+            val_metrics=initial_val_metrics,
+            has_validation=bool(val_dataset),
+        )
+    best_params = state.params
+    start_step = max(0, int(getattr(args, "start_step", 0)))
+    best_step = start_step
+
+    history_steps = [start_step]
+    loss_history = [initial_train_loss]
+    excitation_gap_mae_history = [initial_train_metrics["excitation_gap_mae"]]
+    grad_norm_history = [float("nan")]
+    grad_abs_max_history = [float("nan")]
+    param_update_norm_history = [float("nan")]
+    nonfinite_grad_fraction_history = [0.0]
+    eval_steps = [start_step]
+    eval_train_loss_history = [initial_train_loss]
+    eval_train_excitation_gap_mae_history = [initial_train_metrics["excitation_gap_mae"]]
+    eval_val_loss_history = [initial_val_loss]
+    eval_val_excitation_gap_mae_history = [initial_val_metrics["excitation_gap_mae"]]
+
+    logger.log(
+        "[train] "
+        f"steps={int(args.steps)} mode={str(args.training_mode)} "
+        f"objective={_training_objective_label(args)} "
+        f"start_step={start_step} "
+        f"train_step_mode=stream_single_molecule update_mode={stream_update_mode} "
+        f"train_size={len(train_dataset)} "
+        f"val_size={len(val_dataset)}"
+    )
+
+    t0 = time.perf_counter()
+    for step in range(start_step + 1, int(args.steps) + 1):
+        losses: list[float] = []
+        excitation_gap_maes: list[float] = []
+        oscillator_losses: list[float] = []
+        oscillator_maes: list[float] = []
+        grad_norms: list[float] = []
+        grad_abs_maxes: list[float] = []
+        nonfinite_fracs: list[float] = []
+        update_norms: list[float] = []
+        if stream_update_mode == "per_molecule":
+            for datum in train_dataset:
+                loss, metrics, grads = loss_and_grad_kernel(state.params, datum)
+                losses.append(float(loss))
+                excitation_gap_maes.append(_metric_mean(metrics, "excitation_gap_mae", 0.0))
+                oscillator_losses.append(
+                    _metric_mean(metrics, "oscillator_strength_penalty", 0.0)
+                )
+                oscillator_maes.append(
+                    _metric_mean(metrics, "oscillator_strength_mae", 0.0)
+                )
+                grad_norms.append(_metric_scalar(metrics, "grad_norm"))
+                grad_abs_maxes.append(_metric_scalar(metrics, "grad_abs_max"))
+                nonfinite_fracs.append(_metric_scalar(metrics, "nonfinite_grad_fraction", 0.0))
+                prev_state = state
+                state = state.apply_gradients(grads=grads)
+                param_delta = jax.tree_util.tree_map(
+                    lambda new, old: new - old,
+                    state.params,
+                    prev_state.params,
+                )
+                if not _tree_all_finite(state.params):
+                    state = prev_state
+                    update_norms.append(0.0)
+                    logger.log(
+                        f"[train] non-finite params at step {step}; "
+                        "reverted per-molecule update"
+                    )
+                else:
+                    update_norms.append(float(_tree_l2_norm(param_delta)))
+        else:
+            params_for_loss = state.params
+            grad_sum = None
+            for datum in train_dataset:
+                loss, metrics, grads = loss_and_grad_kernel(params_for_loss, datum)
+                losses.append(float(loss))
+                excitation_gap_maes.append(_metric_mean(metrics, "excitation_gap_mae", 0.0))
+                oscillator_losses.append(
+                    _metric_mean(metrics, "oscillator_strength_penalty", 0.0)
+                )
+                oscillator_maes.append(
+                    _metric_mean(metrics, "oscillator_strength_mae", 0.0)
+                )
+                grad_norms.append(_metric_scalar(metrics, "grad_norm"))
+                grad_abs_maxes.append(_metric_scalar(metrics, "grad_abs_max"))
+                nonfinite_fracs.append(_metric_scalar(metrics, "nonfinite_grad_fraction", 0.0))
+                grad_sum = _tree_add(grad_sum, grads)
+            grads_avg = _tree_scale(grad_sum, 1.0 / max(1, len(train_dataset)))
+            prev_state = state
+            state = state.apply_gradients(grads=grads_avg)
+            param_delta = jax.tree_util.tree_map(
+                lambda new, old: new - old,
+                state.params,
+                prev_state.params,
+            )
+            if not _tree_all_finite(state.params):
+                state = prev_state
+                update_norms.append(0.0)
+                logger.log(f"[train] non-finite params at step {step}; reverted update")
+            else:
+                update_norms.append(float(_tree_l2_norm(param_delta)))
+        train_loss_val = float(np.mean(losses))
+        train_excitation_gap_mae_val = float(np.mean(excitation_gap_maes))
+        train_oscillator_loss_val = float(np.mean(oscillator_losses))
+        train_oscillator_mae_val = float(np.mean(oscillator_maes))
+        grad_norm_val = float(np.mean(grad_norms))
+        grad_abs_max_val = float(np.max(grad_abs_maxes))
+        nonfinite_grad_fraction_val = float(np.mean(nonfinite_fracs))
+        update_norm_val = float(np.mean(update_norms))
+        checkpoint_train_loss = train_loss_val
+        checkpoint_train_excitation_gap_mae = train_excitation_gap_mae_val
+        checkpoint_val_loss = float("nan")
+        checkpoint_val_excitation_gap_mae = float("nan")
+
+        history_steps.append(step)
+        loss_history.append(train_loss_val)
+        excitation_gap_mae_history.append(train_excitation_gap_mae_val)
+        grad_norm_history.append(grad_norm_val)
+        grad_abs_max_history.append(grad_abs_max_val)
+        param_update_norm_history.append(update_norm_val)
+        nonfinite_grad_fraction_history.append(nonfinite_grad_fraction_val)
+
+        current_lr = (
+            float(
+                lr_schedule(
+                    _stream_lr_schedule_index(
+                        args,
+                        step=step,
+                        train_size=len(train_dataset),
+                    )
+                )
+            )
+            if lr_schedule is not None
+            else float(args.learning_rate)
+        )
+        if _streaming_should_eval_step(args, step=step):
+            eval_train_loss, eval_train_metrics = _streaming_average_eval(
+                state.params,
+                train_dataset,
+                eval_kernel,
+                device=eval_device,
+            )
+            eval_val_loss, eval_val_metrics = _streaming_average_eval(
+                state.params,
+                val_dataset,
+                eval_kernel,
+                device=eval_device,
+            )
+            eval_steps.append(step)
+            eval_train_loss_history.append(eval_train_loss)
+            eval_train_excitation_gap_mae_history.append(eval_train_metrics["excitation_gap_mae"])
+            eval_val_loss_history.append(eval_val_loss)
+            eval_val_excitation_gap_mae_history.append(eval_val_metrics["excitation_gap_mae"])
+            checkpoint_train_loss = float(eval_train_loss)
+            checkpoint_train_excitation_gap_mae = float(eval_train_metrics["excitation_gap_mae"])
+            checkpoint_val_loss = float(eval_val_loss)
+            checkpoint_val_excitation_gap_mae = float(eval_val_metrics["excitation_gap_mae"])
+            score = _ground_only_best_score(
+                args,
+                train_loss=float(eval_train_loss),
+                train_metrics=eval_train_metrics,
+                val_loss=float(eval_val_loss),
+                val_metrics=eval_val_metrics,
+                has_validation=bool(val_dataset),
+            )
+            if score < best_score:
+                best_score = score
+                best_params = state.params
+                best_step = step
+            logger.log(
+                "[train] "
+                f"step={step:4d}/{int(args.steps):4d} "
+                f"train_loss={eval_train_loss:.8e} "
+                f"train_excitation_gap_mae={eval_train_metrics['excitation_gap_mae']:.8e} "
+                f"train_osc_loss={eval_train_metrics['oscillator_strength_loss']:.8e} "
+                f"train_osc_mae={eval_train_metrics['oscillator_strength_mae']:.8e} "
+                f"val_loss={eval_val_loss:.8e} "
+                f"val_excitation_gap_mae={eval_val_metrics['excitation_gap_mae']:.8e} "
+                f"val_osc_loss={eval_val_metrics['oscillator_strength_loss']:.8e} "
+                f"val_osc_mae={eval_val_metrics['oscillator_strength_mae']:.8e} "
+                f"grad_norm={grad_norm_val:.8e} "
+                f"grad_abs_max={grad_abs_max_val:.8e} "
+                f"update_norm={update_norm_val:.8e} "
+                f"lr={current_lr:.8e}"
+            )
+        elif _streaming_should_log_train_step(args, step=step):
+            logger.log(
+                "[train] "
+                f"step={step:4d}/{int(args.steps):4d} "
+                f"train_loss={train_loss_val:.8e} "
+                f"train_excitation_gap_mae={train_excitation_gap_mae_val:.8e} "
+                f"train_osc_loss={train_oscillator_loss_val:.8e} "
+                f"train_osc_mae={train_oscillator_mae_val:.8e} "
+                "val_loss=nan val_excitation_gap_mae=nan "
+                f"grad_norm={grad_norm_val:.8e} "
+                f"grad_abs_max={grad_abs_max_val:.8e} "
+                f"update_norm={update_norm_val:.8e} "
+                f"lr={current_lr:.8e} "
+                "eval=skipped"
+            )
+        checkpoint_interval = max(0, int(getattr(args, "checkpoint_interval", 0)))
+        if checkpoint_interval > 0 and step % checkpoint_interval == 0:
+            checkpoint_dir = Path(str(args.outdir)) / "checkpoints"
+            checkpoint_path = checkpoint_dir / f"neural_xc_params_step{step:06d}.msgpack"
+            checkpoint_path, checkpoint_meta_path = save_params_checkpoint(
+                checkpoint_path,
+                state.params,
+                metadata={
+                    "step": int(step),
+                    "steps": int(args.steps),
+                    "reference_csv": str(args.reference_csv),
+                    "basis": str(args.basis),
+                    "xc": str(args.xc),
+                    "training_mode": str(args.training_mode),
+                    "include_hfx_channel": bool(args.include_hfx_channel),
+                    "response_hf_mode": str(args.response_hf_mode),
+                    "oscillator_strength_nstates": int(args.oscillator_strength_nstates),
+                    "oscillator_strength_mse_weight": float(args.oscillator_strength_mse_weight),
+                    "oscillator_strength_mae_weight": float(args.oscillator_strength_mae_weight),
+                    "tda_gradient_mode": str(args.tda_gradient_mode),
+                    "stream_train": bool(args.stream_train),
+                    "stream_update_mode": str(args.stream_update_mode),
+                    "learning_rate": float(current_lr),
+                    "train_loss": float(checkpoint_train_loss),
+                    "train_excitation_gap_mae": float(checkpoint_train_excitation_gap_mae),
+                    "val_loss": float(checkpoint_val_loss),
+                    "val_excitation_gap_mae": float(checkpoint_val_excitation_gap_mae),
+                    "grad_norm": float(grad_norm_val),
+                    "update_norm": float(update_norm_val),
+                },
+            )
+            progress = {
+                "step": int(step),
+                "steps": int(args.steps),
+                "checkpoint": str(checkpoint_path),
+                "checkpoint_meta": str(checkpoint_meta_path)
+                if checkpoint_meta_path is not None
+                else None,
+                "train_loss": float(checkpoint_train_loss),
+                "train_excitation_gap_mae": float(checkpoint_train_excitation_gap_mae),
+                "val_loss": float(checkpoint_val_loss),
+                "val_excitation_gap_mae": float(checkpoint_val_excitation_gap_mae),
+                "grad_norm": float(grad_norm_val),
+                "update_norm": float(update_norm_val),
+                "learning_rate": float(current_lr),
+            }
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            (checkpoint_dir / "latest_checkpoint.txt").write_text(
+                str(checkpoint_path) + "\n",
+                encoding="utf-8",
+            )
+            (checkpoint_dir / "latest_progress.json").write_text(
+                json.dumps(progress, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            logger.log(f"[checkpoint] step={step:4d} wrote {checkpoint_path}")
+
+    elapsed_s = time.perf_counter() - t0
+    if bool(args.skip_final_evaluation):
+        final_train_loss = float(loss_history[-1])
+        final_train_metrics = {
+            "excitation_gap_mae": float(excitation_gap_mae_history[-1]),
+            "excitation_gap_mse": float("nan"),
+        }
+        final_val_loss = float("nan")
+        final_val_metrics = {"excitation_gap_mae": float("nan"), "excitation_gap_mse": float("nan")}
+        if not np.isfinite(best_score):
+            best_params = state.params
+            best_step = int(args.steps)
+            best_score = (
+                float(final_train_loss)
+                if not _gap_active(args)
+                else float(final_train_metrics["excitation_gap_mae"])
+            )
+    else:
+        final_train_loss, final_train_metrics = _streaming_average_eval(
+            state.params,
+            train_dataset,
+            eval_kernel,
+            device=eval_device,
+        )
+        final_val_loss, final_val_metrics = _streaming_average_eval(
+            state.params,
+            val_dataset,
+            eval_kernel,
+            device=eval_device,
+        )
+    logger.log(
+        "[train] done "
+        f"final_train_loss={final_train_loss:.8e} "
+        f"best_objective={best_score:.8e}@{best_step} "
+        f"elapsed_s={elapsed_s:.2f}"
+    )
+    return {
+        "functional": functional,
+        "training_config": training_config,
+        "best_params": best_params,
+        "final_params": state.params,
+        "best_step": int(best_step),
+        "best_score": float(best_score),
+        "final_train_loss": float(final_train_loss),
+        "final_train_excitation_gap_mae": float(final_train_metrics["excitation_gap_mae"]),
+        "final_val_loss": float(final_val_loss),
+        "final_val_excitation_gap_mae": float(final_val_metrics["excitation_gap_mae"]),
+        "elapsed_s": float(elapsed_s),
+        "history_steps": history_steps,
+        "loss_history": loss_history,
+        "excitation_gap_mae_history": excitation_gap_mae_history,
+        "grad_norm_history": grad_norm_history,
+        "grad_abs_max_history": grad_abs_max_history,
+        "param_update_norm_history": param_update_norm_history,
+        "nonfinite_grad_fraction_history": nonfinite_grad_fraction_history,
+        "eval_steps": eval_steps,
+        "eval_train_loss_history": eval_train_loss_history,
+        "eval_train_excitation_gap_mae_history": eval_train_excitation_gap_mae_history,
+        "eval_val_loss_history": eval_val_loss_history,
+        "eval_val_excitation_gap_mae_history": eval_val_excitation_gap_mae_history,
+        "post_update_recoveries": 0,
+    }
+
+
 def _train(
-    train_dataset: tuple[GroundStateDatum, ...],
-    val_dataset: tuple[GroundStateDatum, ...],
+    train_dataset: tuple[MolecularTrainingDatum, ...],
+    val_dataset: tuple[MolecularTrainingDatum, ...],
     *,
     init_molecule: Any,
     args: argparse.Namespace,
@@ -546,38 +1496,65 @@ def _train(
         architecture=str(args.network_architecture),
         semilocal_xc=tuple(str(name) for name in args.semilocal_xc),
         hidden_dims=tuple(int(value) for value in args.hidden_dims),
-        input_feature_mode=str(args.input_feature_mode),
+        input_feature_mode=_normalize_input_feature_mode(str(args.input_feature_mode)),
+        include_hfx_channel=bool(args.include_hfx_channel),
+        response_hf_mode=str(args.response_hf_mode),
         include_pt2_channel=bool(args.include_pt2_channel),
         pt2_channel_mode=str(args.pt2_channel_mode),
         name=f"neural_xc_closed_shell_{str(args.training_mode)}",
     )
-    training_config = GroundStateTrainingConfig(
+    training_config = MolecularTrainingConfig(
         mode=str(args.training_mode),
-        energy_mse_weight=float(args.energy_mse_weight),
-        energy_mae_weight=float(args.energy_mae_weight),
-        s1_constraint_use_tda=bool(args.s1_use_tda),
+        excitation_gap_mse_weight=float(args.excitation_gap_mse_weight),
+        excitation_gap_mae_weight=float(args.excitation_gap_mae_weight),
+        excitation_gap_nstates=1,
+        excited_state_solver=str(args.excited_state_solver),
+        oscillator_strength_nstates=int(args.oscillator_strength_nstates),
+        oscillator_strength_mse_weight=float(
+            args.oscillator_strength_mse_weight
+        ),
+        oscillator_strength_mae_weight=float(
+            args.oscillator_strength_mae_weight
+        ),
+        tda_gradient_mode=str(args.tda_gradient_mode),
+        tda_eigenvector_adjoint_tolerance=float(
+            args.tda_eigenvector_adjoint_tolerance
+        ),
+        tda_eigenvector_adjoint_max_iter=int(
+            args.tda_eigenvector_adjoint_max_iter
+        ),
         scf_max_cycle=int(args.train_scf_max_cycle),
         scf_damping=float(args.train_scf_damping),
         scf_conv_tol_density=float(args.train_scf_conv_tol_density),
         scf_vxc_clip=float(args.train_scf_vxc_clip),
         scf_iterate_selection=str(args.scf_iterate_selection),
-        scf_require_convergence=bool(args.scf_require_convergence),
-        scf_stop_gradient_on_unconverged=bool(args.scf_stop_gradient_on_unconverged),
-        scf_stop_gradient_rms_threshold=args.scf_stop_gradient_rms_threshold,
-        scf_gradient_mode=str(args.scf_gradient_mode),
-        scf_implicit_diff_solver=str(args.scf_implicit_diff_solver),
+        scf_gradient_mode=_normalize_scf_gradient_mode(str(args.scf_gradient_mode)),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
-        scf_implicit_diff_restart=int(args.scf_implicit_diff_restart),
+        response_two_electron_mode=str(args.response_two_electron_mode),
+        response_ris_theta=float(args.response_ris_theta),
+        response_ris_j_fit=str(args.response_ris_j_fit),
+        response_ris_k_fit=str(args.response_ris_k_fit),
+        response_ris_aux_chunk_size=int(args.response_ris_aux_chunk_size),
     )
     if int(args.lr_decay_every) > 0:
+        transition_steps = _lr_transition_steps(args, train_size=len(train_dataset))
         lr_schedule = optax.exponential_decay(
             init_value=float(args.learning_rate),
-            transition_steps=int(args.lr_decay_every),
+            transition_steps=transition_steps,
             decay_rate=float(args.lr_decay_factor),
             staircase=True,
         )
-        base_optimizer = optax.adam(lr_schedule)
+        optimizer_lr_schedule = lr_schedule
+        start_step = max(0, int(getattr(args, "start_step", 0)))
+        if start_step > 0:
+            schedule_offset = _stream_lr_schedule_index(
+                args,
+                step=start_step + 1,
+                train_size=len(train_dataset),
+            )
+            optimizer_lr_schedule = lambda count: lr_schedule(count + schedule_offset)
+        base_optimizer = optax.adam(optimizer_lr_schedule)
     else:
         lr_schedule = None
         base_optimizer = optax.adam(float(args.learning_rate))
@@ -592,27 +1569,49 @@ def _train(
         init_molecule,
         optimizer,
     )
-    train_step = make_ground_state_train_step(functional, training_config=training_config)
+    if args.init_checkpoint is not None:
+        checkpoint_params = load_params_checkpoint(args.init_checkpoint, template=state.params)
+        state = state.replace(params=checkpoint_params)
+        logger.log(
+            "[train_init] loaded initial params checkpoint "
+            f"{args.init_checkpoint} at start_step={int(args.start_step)}"
+        )
+    if bool(args.stream_train):
+        return _train_streaming(
+            state,
+            train_dataset,
+            val_dataset,
+            functional=functional,
+            training_config=training_config,
+            lr_schedule=lr_schedule,
+            args=args,
+            logger=logger,
+        )
+    train_step = make_molecular_train_step(functional, training_config=training_config)
     use_warm_start = bool(args.scf_warm_start) and training_config.mode == "self_consistent"
     train_dataset_current = train_dataset
     val_dataset_current = val_dataset
-    if use_warm_start:
-        train_eval_fn = lambda params, dataset: ground_state_mse_loss(  # noqa: E731
+    eval_device = _resolve_eval_device(args)
+    if eval_device is not None:
+        logger.log(f"[train_init] eval_device={eval_device.platform}:{eval_device.id}")
+
+    train_eval_fn = lambda params, dataset: molecular_loss(  # noqa: E731
+        params,
+        functional,
+        dataset,
+        training_config=training_config,
+    )
+    val_eval_fn = (
+        (lambda params, dataset: molecular_loss(  # noqa: E731
             params,
             functional,
             dataset,
             training_config=training_config,
-        )
-        val_eval_fn = (
-            (lambda params, dataset: ground_state_mse_loss(  # noqa: E731
-                params,
-                functional,
-                dataset,
-                training_config=training_config,
-            ))
-            if val_dataset
-            else None
-        )
+        ))
+        if val_dataset
+        else None
+    )
+    if use_warm_start:
         eager_train_step = lambda current_state, dataset: train_step(current_state, dataset)  # noqa: E731
         compiled_train_eval = train_eval_fn
         compiled_val_eval = val_eval_fn
@@ -620,24 +1619,7 @@ def _train(
         train_step_mode = "eager"
         if bool(args.jit_train) or bool(args.jit_eval):
             logger.log("[train] disabled JIT because scf_warm_start requires dynamic dataset updates")
-        initial_train_loss, initial_train_metrics = compiled_train_eval(state.params, train_dataset_current)
     else:
-        train_eval_fn = lambda params: ground_state_mse_loss(  # noqa: E731
-            params,
-            functional,
-            train_dataset,
-            training_config=training_config,
-        )
-        val_eval_fn = (
-            (lambda params: ground_state_mse_loss(  # noqa: E731
-                params,
-                functional,
-                val_dataset,
-                training_config=training_config,
-            ))
-            if val_dataset
-            else None
-        )
         eager_train_step = lambda current_state: train_step(current_state, train_dataset)  # noqa: E731
         compiled_train_eval = jax.jit(train_eval_fn) if bool(args.jit_eval) else train_eval_fn
         compiled_val_eval = (
@@ -653,7 +1635,12 @@ def _train(
                 train_step_mode = "jit"
             except Exception as exc:
                 logger.log(f"[train] jit compilation failed for multi-molecule train step: {exc!r}")
-        initial_train_loss, initial_train_metrics = compiled_train_eval(state.params)
+    initial_train_loss, initial_train_metrics = _call_eval_on_device(
+        compiled_train_eval,
+        state.params,
+        train_dataset_current,
+        device=eval_device,
+    )
     if bool(args.scf_warm_start):
         train_dataset_current = _refresh_dataset_scf_warm_start_cache(
             train_dataset_current,
@@ -662,10 +1649,11 @@ def _train(
             training_config=training_config,
         )
     if compiled_val_eval is not None:
-        initial_val_loss, initial_val_metrics = (
-            compiled_val_eval(state.params, val_dataset_current)
-            if use_warm_start
-            else compiled_val_eval(state.params)
+        initial_val_loss, initial_val_metrics = _call_eval_on_device(
+            compiled_val_eval,
+            state.params,
+            val_dataset_current,
+            device=eval_device,
         )
         if bool(args.scf_warm_start):
             val_dataset_current = _refresh_dataset_scf_warm_start_cache(
@@ -674,29 +1662,43 @@ def _train(
                 functional=functional,
                 training_config=training_config,
             )
-        best_score = _metric_mean(initial_val_metrics, "s1_mae", float(initial_val_loss))
+        best_score = _ground_only_best_score(
+            args,
+            train_loss=float(initial_train_loss),
+            train_metrics=initial_train_metrics,
+            val_loss=float(initial_val_loss),
+            val_metrics=initial_val_metrics,
+            has_validation=True,
+        )
     else:
         initial_val_loss, initial_val_metrics = None, None
-        best_score = _metric_mean(initial_train_metrics, "s1_mae", float(initial_train_loss))
+        best_score = _ground_only_best_score(
+            args,
+            train_loss=float(initial_train_loss),
+            train_metrics=initial_train_metrics,
+            val_loss=None,
+            val_metrics=None,
+            has_validation=False,
+        )
     best_params = state.params
     best_step = 0
 
     history_steps = [0]
     loss_history = [float(initial_train_loss)]
-    s1_mae_history = [_metric_mean(initial_train_metrics, "s1_mae", 0.0)]
+    excitation_gap_mae_history = [_metric_mean(initial_train_metrics, "excitation_gap_mae", 0.0)]
     grad_norm_history = [float("nan")]
     grad_abs_max_history = [float("nan")]
     param_update_norm_history = [float("nan")]
     nonfinite_grad_fraction_history = [0.0]
     eval_steps = [0]
     eval_train_loss_history = [float(initial_train_loss)]
-    eval_train_s1_mae_history = [_metric_mean(initial_train_metrics, "s1_mae", float("nan"))]
+    eval_train_excitation_gap_mae_history = [_metric_mean(initial_train_metrics, "excitation_gap_mae", float("nan"))]
     eval_val_loss_history = [float(initial_val_loss) if initial_val_loss is not None else float("nan")]
-    eval_val_s1_mae_history = [_metric_mean(initial_val_metrics, "s1_mae", float("nan")) if initial_val_metrics is not None else float("nan")]
+    eval_val_excitation_gap_mae_history = [_metric_mean(initial_val_metrics, "excitation_gap_mae", float("nan")) if initial_val_metrics is not None else float("nan")]
 
     logger.log(
         "[train] "
-        f"steps={int(args.steps)} mode={str(args.training_mode)} objective=s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'} "
+        f"steps={int(args.steps)} mode={str(args.training_mode)} objective={_training_objective_label(args)} "
         f"train_step_mode={train_step_mode} train_size={len(train_dataset)} val_size={len(val_dataset)}"
     )
 
@@ -733,10 +1735,11 @@ def _train(
                 training_config=training_config,
             )
         if guard_post_update and not reverted_step:
-            guarded_train_loss, guarded_train_metrics = (
-                compiled_train_eval(state.params, train_dataset_current)
-                if use_warm_start
-                else compiled_train_eval(state.params)
+            guarded_train_loss, guarded_train_metrics = _call_eval_on_device(
+                compiled_train_eval,
+                state.params,
+                train_dataset_current,
+                device=eval_device,
             )
             if not _loss_and_metrics_all_finite(guarded_train_loss, guarded_train_metrics):
                 state = prev_state
@@ -747,8 +1750,8 @@ def _train(
                     f"[train] non-finite post-update train eval at step {step}; reverted update"
                 )
 
-        train_loss_val = _metric_scalar(train_metrics, "loss")
-        train_s1_mae_val = _metric_mean(train_metrics, "s1_mae", float("nan"))
+        train_loss_val = _metric_scalar(train_metrics, "total_loss")
+        train_excitation_gap_mae_val = _metric_mean(train_metrics, "excitation_gap_mae", float("nan"))
         grad_norm_val = _metric_scalar(train_metrics, "grad_norm")
         grad_abs_max_val = _metric_scalar(train_metrics, "grad_abs_max")
         update_norm_val = (
@@ -757,7 +1760,7 @@ def _train(
         nonfinite_grad_fraction_val = _metric_scalar(train_metrics, "nonfinite_grad_fraction", 0.0)
         history_steps.append(step)
         loss_history.append(train_loss_val)
-        s1_mae_history.append(train_s1_mae_val)
+        excitation_gap_mae_history.append(train_excitation_gap_mae_val)
         grad_norm_history.append(grad_norm_val)
         grad_abs_max_history.append(grad_abs_max_val)
         param_update_norm_history.append(update_norm_val)
@@ -769,19 +1772,21 @@ def _train(
             or step % max(1, int(args.eval_interval)) == 0
         )
         if should_eval:
-            eval_train_loss, eval_train_metrics = (
-                compiled_train_eval(state.params, train_dataset_current)
-                if use_warm_start
-                else compiled_train_eval(state.params)
+            eval_train_loss, eval_train_metrics = _call_eval_on_device(
+                compiled_train_eval,
+                state.params,
+                train_dataset_current,
+                device=eval_device,
             )
             eval_steps.append(step)
             eval_train_loss_history.append(float(eval_train_loss))
-            eval_train_s1_mae_history.append(_metric_mean(eval_train_metrics, "s1_mae", float("nan")))
+            eval_train_excitation_gap_mae_history.append(_metric_mean(eval_train_metrics, "excitation_gap_mae", float("nan")))
             if compiled_val_eval is not None:
-                eval_val_loss, eval_val_metrics = (
-                    compiled_val_eval(state.params, val_dataset_current)
-                    if use_warm_start
-                    else compiled_val_eval(state.params)
+                eval_val_loss, eval_val_metrics = _call_eval_on_device(
+                    compiled_val_eval,
+                    state.params,
+                    val_dataset_current,
+                    device=eval_device,
                 )
                 if bool(args.scf_warm_start):
                     val_dataset_current = _refresh_dataset_scf_warm_start_cache(
@@ -791,14 +1796,28 @@ def _train(
                         training_config=training_config,
                     )
                 val_loss_val = float(eval_val_loss)
-                val_s1_mae_val = _metric_mean(eval_val_metrics, "s1_mae", float("nan"))
+                val_excitation_gap_mae_val = _metric_mean(eval_val_metrics, "excitation_gap_mae", float("nan"))
                 eval_val_loss_history.append(val_loss_val)
-                eval_val_s1_mae_history.append(val_s1_mae_val)
-                score = val_s1_mae_val
+                eval_val_excitation_gap_mae_history.append(val_excitation_gap_mae_val)
+                score = _ground_only_best_score(
+                    args,
+                    train_loss=float(eval_train_loss),
+                    train_metrics=eval_train_metrics,
+                    val_loss=float(eval_val_loss),
+                    val_metrics=eval_val_metrics,
+                    has_validation=True,
+                )
             else:
                 eval_val_loss_history.append(float("nan"))
-                eval_val_s1_mae_history.append(float("nan"))
-                score = _metric_mean(eval_train_metrics, "s1_mae", float(eval_train_loss))
+                eval_val_excitation_gap_mae_history.append(float("nan"))
+                score = _ground_only_best_score(
+                    args,
+                    train_loss=float(eval_train_loss),
+                    train_metrics=eval_train_metrics,
+                    val_loss=None,
+                    val_metrics=None,
+                    has_validation=False,
+                )
             if score < best_score:
                 best_score = score
                 best_params = state.params
@@ -808,10 +1827,9 @@ def _train(
                 "[train] "
                 f"step={step:4d}/{int(args.steps):4d} "
                 f"train_loss={float(eval_train_loss):.8e} "
-                f"train_s1_mae={_metric_mean(eval_train_metrics, 's1_mae', float('nan')):.8e} "
+                f"train_excitation_gap_mae={_metric_mean(eval_train_metrics, 'excitation_gap_mae', float('nan')):.8e} "
                 f"val_loss={eval_val_loss_history[-1]:.8e} "
-                f"val_s1_mae={eval_val_s1_mae_history[-1]:.8e} "
-                f"train_scf_stop_grad_frac={_metric_mean(eval_train_metrics, 'scf_stop_gradient_fraction', float('nan')):.8e} "
+                f"val_excitation_gap_mae={eval_val_excitation_gap_mae_history[-1]:.8e} "
                 f"grad_norm={grad_norm_val:.8e} "
                 f"grad_abs_max={grad_abs_max_val:.8e} "
                 f"update_norm={update_norm_val:.8e} "
@@ -820,23 +1838,25 @@ def _train(
             )
 
     elapsed_s = time.perf_counter() - t0
-    final_train_loss, final_train_metrics = (
-        compiled_train_eval(state.params, train_dataset_current)
-        if use_warm_start
-        else compiled_train_eval(state.params)
+    final_train_loss, final_train_metrics = _call_eval_on_device(
+        compiled_train_eval,
+        state.params,
+        train_dataset_current,
+        device=eval_device,
     )
     final_val_loss = None
     final_val_metrics = None
     if compiled_val_eval is not None:
-        final_val_loss, final_val_metrics = (
-            compiled_val_eval(state.params, val_dataset_current)
-            if use_warm_start
-            else compiled_val_eval(state.params)
+        final_val_loss, final_val_metrics = _call_eval_on_device(
+            compiled_val_eval,
+            state.params,
+            val_dataset_current,
+            device=eval_device,
         )
     logger.log(
         "[train] done "
         f"final_train_loss={float(final_train_loss):.8e} "
-        f"best_val_s1_mae={best_score:.8e}@{best_step} "
+        f"best_objective={best_score:.8e}@{best_step} "
         f"elapsed_s={elapsed_s:.2f}"
     )
     return {
@@ -847,22 +1867,22 @@ def _train(
         "best_step": int(best_step),
         "best_score": float(best_score),
         "final_train_loss": float(final_train_loss),
-        "final_train_s1_mae": _metric_mean(final_train_metrics, "s1_mae", float("nan")),
+        "final_train_excitation_gap_mae": _metric_mean(final_train_metrics, "excitation_gap_mae", float("nan")),
         "final_val_loss": float(final_val_loss) if final_val_loss is not None else float("nan"),
-        "final_val_s1_mae": _metric_mean(final_val_metrics, "s1_mae", float("nan")) if final_val_metrics is not None else float("nan"),
+        "final_val_excitation_gap_mae": _metric_mean(final_val_metrics, "excitation_gap_mae", float("nan")) if final_val_metrics is not None else float("nan"),
         "elapsed_s": float(elapsed_s),
         "history_steps": history_steps,
         "loss_history": loss_history,
-        "s1_mae_history": s1_mae_history,
+        "excitation_gap_mae_history": excitation_gap_mae_history,
         "grad_norm_history": grad_norm_history,
         "grad_abs_max_history": grad_abs_max_history,
         "param_update_norm_history": param_update_norm_history,
         "nonfinite_grad_fraction_history": nonfinite_grad_fraction_history,
         "eval_steps": eval_steps,
         "eval_train_loss_history": eval_train_loss_history,
-        "eval_train_s1_mae_history": eval_train_s1_mae_history,
+        "eval_train_excitation_gap_mae_history": eval_train_excitation_gap_mae_history,
         "eval_val_loss_history": eval_val_loss_history,
-        "eval_val_s1_mae_history": eval_val_s1_mae_history,
+        "eval_val_excitation_gap_mae_history": eval_val_excitation_gap_mae_history,
         "post_update_recoveries": int(post_update_recoveries),
     }
 
@@ -882,25 +1902,31 @@ def main() -> None:
     logger.log(
         "Config: "
         f"reference_csv={args.reference_csv}, basis={args.basis}, xc={args.xc}, "
-        f"steps={args.steps}, mode={args.training_mode}, include_pt2_channel={bool(args.include_pt2_channel)}, "
+        f"steps={args.steps}, mode={args.training_mode}, include_hfx_channel={bool(args.include_hfx_channel)}, "
+        f"response_hf_mode={args.response_hf_mode}, "
+        f"include_pt2_channel={bool(args.include_pt2_channel)}, "
         f"pt2_channel_mode={args.pt2_channel_mode if bool(args.include_pt2_channel) else 'none'}, "
+        f"response_df_mode={args.response_df_mode}, "
+        f"response_two_electron_mode={args.response_two_electron_mode}, "
+        f"oscillator_strength=nstates:{int(args.oscillator_strength_nstates)}/"
+        f"mse:{float(args.oscillator_strength_mse_weight):.6g}/"
+        f"mae:{float(args.oscillator_strength_mae_weight):.6g}/"
+        f"gradient:{args.tda_gradient_mode}, "
+        f"response_ris=theta:{float(args.response_ris_theta):.6g}/J:{args.response_ris_j_fit}/K:{args.response_ris_k_fit}, "
+        f"stream_train={bool(args.stream_train)}, stream_update_mode={args.stream_update_mode}, "
         f"train={len(train_rows)}, validation={len(val_rows)}, test={len(test_rows)}"
     )
 
     prepared_train = _prepare_references(train_rows, args=args, logger=logger)
     prepared_val = _prepare_references(val_rows, args=args, logger=logger)
-    prepared_test = _prepare_references(test_rows, args=args, logger=logger)
+    if bool(args.skip_final_evaluation):
+        logger.log("[ref] skipped test split preparation because final evaluation is disabled")
+        prepared_test = []
+    else:
+        prepared_test = _prepare_references(test_rows, args=args, logger=logger)
 
-    train_dataset = _build_dataset(
-        prepared_train,
-        s1_weight=float(args.s1_weight),
-        density_constraint_weight=float(args.density_constraint_weight),
-    )
-    val_dataset = _build_dataset(
-        prepared_val,
-        s1_weight=float(args.s1_weight),
-        density_constraint_weight=float(args.density_constraint_weight),
-    )
+    train_dataset = _build_dataset(prepared_train)
+    val_dataset = _build_dataset(prepared_val)
 
     training = _train(
         train_dataset,
@@ -913,6 +1939,100 @@ def main() -> None:
     params = training["best_params"]
     functional = training["functional"]
     training_config = training["training_config"]
+    if bool(args.skip_final_evaluation):
+        training_png = outdir / "training_loss.png"
+        _plot_training_history(
+            training_png,
+            training,
+            title=f"Closed-shell S1 {str(args.excited_state_solver).upper()} training",
+        )
+        training_history_csv = outdir / "training_history.csv"
+        _write_training_history_csv(training_history_csv, training)
+        checkpoint_path = outdir / "neural_xc_params.msgpack"
+        checkpoint_path, checkpoint_meta_path = save_params_checkpoint(
+            checkpoint_path,
+            params,
+            metadata={
+                "reference_csv": str(args.reference_csv),
+                "basis": str(args.basis),
+                "xc": str(args.xc),
+                "training_mode": str(args.training_mode),
+                "skip_final_evaluation": True,
+                "include_hfx_channel": bool(args.include_hfx_channel),
+                "response_hf_mode": str(args.response_hf_mode),
+                "oscillator_strength_nstates": int(args.oscillator_strength_nstates),
+                "oscillator_strength_mse_weight": float(args.oscillator_strength_mse_weight),
+                "oscillator_strength_mae_weight": float(args.oscillator_strength_mae_weight),
+                "tda_gradient_mode": str(args.tda_gradient_mode),
+                "include_pt2_channel": bool(args.include_pt2_channel),
+                "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
+                "scf_hfx_grid_block_size": _scf_hfx_grid_block_size(args),
+                "stream_train": bool(args.stream_train),
+                "stream_update_mode": str(args.stream_update_mode),
+                "lr_decay_every": int(args.lr_decay_every),
+                "lr_decay_factor": float(args.lr_decay_factor),
+                "lr_transition_steps": _lr_transition_steps(args, train_size=len(train_dataset)),
+                "excited_state_solver": str(args.excited_state_solver),
+                "eval_use_tda": bool(args.eval_use_tda),
+                "steps": int(args.steps),
+                "best_step": int(training["best_step"]),
+                "train_systems": [row.system for row in train_rows],
+                "validation_systems": [row.system for row in val_rows],
+                "test_systems": [row.system for row in test_rows],
+            },
+        )
+        summary = {
+            "reference_csv": str(args.reference_csv),
+            "basis": str(args.basis),
+            "xc": str(args.xc),
+            "training_mode": str(args.training_mode),
+            "objective": _training_objective_label(args),
+            "evaluation_solver": None,
+            "skip_final_evaluation": True,
+            "include_hfx_channel": bool(args.include_hfx_channel),
+            "response_hf_mode": str(args.response_hf_mode),
+            "oscillator_strength_nstates": int(args.oscillator_strength_nstates),
+            "oscillator_strength_mse_weight": float(args.oscillator_strength_mse_weight),
+            "oscillator_strength_mae_weight": float(args.oscillator_strength_mae_weight),
+            "tda_gradient_mode": str(args.tda_gradient_mode),
+            "include_pt2_channel": bool(args.include_pt2_channel),
+            "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
+            "scf_hfx_grid_block_size": _scf_hfx_grid_block_size(args),
+            "stream_train": bool(args.stream_train),
+            "stream_update_mode": str(args.stream_update_mode),
+            "lr_decay_every": int(args.lr_decay_every),
+            "lr_decay_factor": float(args.lr_decay_factor),
+            "lr_transition_steps": _lr_transition_steps(args, train_size=len(train_dataset)),
+            "steps": int(args.steps),
+            "best_step": int(training["best_step"]),
+            "best_validation_objective": float(training["best_score"]),
+            "best_validation_excitation_gap_mae_h": (
+                None
+                if _oscillator_active(args)
+                else float(training["best_score"])
+            ),
+            "final_train_loss": float(training["final_train_loss"]),
+            "final_train_excitation_gap_mae_h": float(training["final_train_excitation_gap_mae"]),
+            "final_val_loss": float(training["final_val_loss"]),
+            "final_val_excitation_gap_mae_h": float(training["final_val_excitation_gap_mae"]),
+            "train_excitation_gap_mae_ev": None,
+            "validation_excitation_gap_mae_ev": None,
+            "test_excitation_gap_mae_ev": None,
+            "predictions_csv": None,
+            "training_curve_png": str(training_png),
+            "training_history_csv": str(training_history_csv),
+            "checkpoint": str(checkpoint_path),
+            "checkpoint_meta": str(checkpoint_meta_path) if checkpoint_meta_path is not None else None,
+            "train_systems": [row.system for row in train_rows],
+            "validation_systems": [row.system for row in val_rows],
+            "test_systems": [row.system for row in test_rows],
+        }
+        (outdir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+        logger.log("[eval] skipped final per-molecule prediction pass")
+        logger.log(f"Wrote summary   : {outdir / 'summary.json'}")
+        logger.log(f"Wrote checkpoint: {checkpoint_path}")
+        return
+
     use_tda = bool(args.eval_use_tda)
     train_pred_rows, train_metrics = _evaluate_dataset(
         prepared_train,
@@ -942,7 +2062,10 @@ def main() -> None:
     _plot_training_history(
         training_png,
         training,
-        title=f"Closed-shell S1 {'TDA' if bool(args.s1_use_tda) else 'Casida'} self-consistent training",
+        title=(
+            f"Closed-shell S1 {str(args.excited_state_solver).upper()} "
+            "self-consistent training"
+        ),
     )
     training_history_csv = outdir / "training_history.csv"
     _write_training_history_csv(training_history_csv, training)
@@ -956,19 +2079,27 @@ def main() -> None:
             "basis": str(args.basis),
             "xc": str(args.xc),
             "training_mode": str(args.training_mode),
-            "scf_stop_gradient_on_unconverged": bool(args.scf_stop_gradient_on_unconverged),
-            "scf_stop_gradient_rms_threshold": args.scf_stop_gradient_rms_threshold,
             "scf_warm_start": bool(args.scf_warm_start),
             "scf_warm_start_update_interval": int(args.scf_warm_start_update_interval),
             "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
             "scf_gradient_mode": str(args.scf_gradient_mode),
-            "scf_implicit_diff_solver": str(args.scf_implicit_diff_solver),
             "scf_implicit_diff_tolerance": float(args.scf_implicit_diff_tolerance),
             "scf_implicit_diff_regularization": float(args.scf_implicit_diff_regularization),
-            "scf_implicit_diff_restart": int(args.scf_implicit_diff_restart),
+            "include_hfx_channel": bool(args.include_hfx_channel),
+            "response_hf_mode": str(args.response_hf_mode),
+            "oscillator_strength_nstates": int(args.oscillator_strength_nstates),
+            "oscillator_strength_mse_weight": float(args.oscillator_strength_mse_weight),
+            "oscillator_strength_mae_weight": float(args.oscillator_strength_mae_weight),
+            "tda_gradient_mode": str(args.tda_gradient_mode),
             "include_pt2_channel": bool(args.include_pt2_channel),
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
-            "s1_use_tda": bool(args.s1_use_tda),
+            "scf_hfx_grid_block_size": _scf_hfx_grid_block_size(args),
+            "stream_train": bool(args.stream_train),
+            "stream_update_mode": str(args.stream_update_mode),
+            "lr_decay_every": int(args.lr_decay_every),
+            "lr_decay_factor": float(args.lr_decay_factor),
+            "lr_transition_steps": _lr_transition_steps(args, train_size=len(train_dataset)),
+            "excited_state_solver": str(args.excited_state_solver),
             "eval_use_tda": bool(args.eval_use_tda),
             "steps": int(args.steps),
             "best_step": int(training["best_step"]),
@@ -983,34 +2114,48 @@ def main() -> None:
         "reference_csv": str(args.reference_csv),
         "basis": str(args.basis),
         "xc": str(args.xc),
+        "reference_jk_backend": str(args.reference_jk_backend),
         "training_mode": str(args.training_mode),
-        "objective": f"s1_only_{'tda' if bool(args.s1_use_tda) else 'casida'}",
+        "objective": _training_objective_label(args),
         "evaluation_solver": "tda" if bool(args.eval_use_tda) else "casida",
-        "scf_stop_gradient_on_unconverged": bool(args.scf_stop_gradient_on_unconverged),
-        "scf_stop_gradient_rms_threshold": args.scf_stop_gradient_rms_threshold,
         "scf_warm_start": bool(args.scf_warm_start),
         "scf_warm_start_update_interval": int(args.scf_warm_start_update_interval),
         "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
         "scf_gradient_mode": str(args.scf_gradient_mode),
-        "scf_implicit_diff_solver": str(args.scf_implicit_diff_solver),
         "scf_implicit_diff_tolerance": float(args.scf_implicit_diff_tolerance),
         "scf_implicit_diff_regularization": float(args.scf_implicit_diff_regularization),
-        "scf_implicit_diff_restart": int(args.scf_implicit_diff_restart),
+        "include_hfx_channel": bool(args.include_hfx_channel),
+        "response_hf_mode": str(args.response_hf_mode),
+        "oscillator_strength_nstates": int(args.oscillator_strength_nstates),
+        "oscillator_strength_mse_weight": float(args.oscillator_strength_mse_weight),
+        "oscillator_strength_mae_weight": float(args.oscillator_strength_mae_weight),
+        "tda_gradient_mode": str(args.tda_gradient_mode),
         "include_pt2_channel": bool(args.include_pt2_channel),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
+        "scf_hfx_grid_block_size": _scf_hfx_grid_block_size(args),
+        "stream_train": bool(args.stream_train),
+        "stream_update_mode": str(args.stream_update_mode),
+        "lr_decay_every": int(args.lr_decay_every),
+        "lr_decay_factor": float(args.lr_decay_factor),
+        "lr_transition_steps": _lr_transition_steps(args, train_size=len(train_dataset)),
         "steps": int(args.steps),
         "best_step": int(training["best_step"]),
-        "best_validation_s1_mae_h": float(training["best_score"]),
+        "best_validation_objective": float(training["best_score"]),
+        "best_validation_excitation_gap_mae_h": (
+            None
+            if _oscillator_active(args)
+            else float(training["best_score"])
+        ),
         "final_train_loss": float(training["final_train_loss"]),
-        "final_train_s1_mae_h": float(training["final_train_s1_mae"]),
+        "final_train_excitation_gap_mae_h": float(training["final_train_excitation_gap_mae"]),
         "final_val_loss": float(training["final_val_loss"]),
-        "final_val_s1_mae_h": float(training["final_val_s1_mae"]),
-        "train_s1_mae_ev": float(train_metrics["s1_mae_ev"]),
-        "validation_s1_mae_ev": float(val_metrics["s1_mae_ev"]),
-        "test_s1_mae_ev": float(test_metrics["s1_mae_ev"]),
-        "benzene_s1_predicted_ev": float(benzene_row["predicted_s1_ev"]) if benzene_row is not None else None,
-        "benzene_s1_target_ev": float(benzene_row["target_s1_ev"]) if benzene_row is not None else None,
-        "benzene_s1_abs_err_ev": float(benzene_row["s1_abs_err_ev"]) if benzene_row is not None else None,
+        "final_val_excitation_gap_mae_h": float(training["final_val_excitation_gap_mae"]),
+        "train_excitation_gap_mae_ev": float(train_metrics["excitation_gap_mae_ev"]),
+        "validation_excitation_gap_mae_ev": float(val_metrics["excitation_gap_mae_ev"]),
+        "test_excitation_gap_mae_ev": float(test_metrics["excitation_gap_mae_ev"]),
+        "benzene_s1_predicted_ev": float(benzene_row["predicted_excitation_gap_ev"]) if benzene_row is not None else None,
+        "benzene_s1_target_ev": float(benzene_row["target_excitation_gap_ev"]) if benzene_row is not None else None,
+        "benzene_excitation_gap_abs_err_ev": float(benzene_row["excitation_gap_abs_err_ev"]) if benzene_row is not None else None,
         "predictions_csv": str(predictions_csv),
         "training_curve_png": str(training_png),
         "training_history_csv": str(training_history_csv),

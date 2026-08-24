@@ -3,7 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 import warnings
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 import jax
 import jax.numpy as jnp
@@ -43,6 +43,8 @@ from .core import _contains_jax_tracer
 from .init_guess import restricted_init_guess_from_pyscf, unrestricted_init_guess_from_pyscf
 from .rks import RKSConfig
 from .uks import UKSConfig
+
+_SCFConfig = TypeVar("_SCFConfig", RKSConfig, UKSConfig)
 
 _GRID_AO_INPUT_CACHE_MAXSIZE = 32
 _GRID_AO_INPUT_CACHE: dict[tuple[Any, ...], Any] = {}
@@ -146,6 +148,7 @@ class UKSIntegralInputs:
     ao_deriv1: Array
     ao_laplacian: Array | None
     dipole_integrals: Array
+    df_factors: Array | None = None
     init_density_alpha: Array | None = None
     init_density_beta: Array | None = None
     init_mo_coeff_alpha: Array | None = None
@@ -167,6 +170,7 @@ class UKSIntegralInputs:
             "overlap": self.overlap,
             "hcore": self.hcore,
             "eri": self.eri,
+            "df_factors": self.df_factors,
             "nalpha": self.nalpha,
             "nbeta": self.nbeta,
             "nuclear_repulsion": self.nuclear_repulsion,
@@ -184,10 +188,14 @@ class UKSIntegralInputs:
         }
 
 
-def _resolve_config(config: RKSConfig | None, xc_spec: str | None) -> tuple[RKSConfig, str]:
+def _resolve_config(
+    config: _SCFConfig | None,
+    xc_spec: str | None,
+    config_type: type[_SCFConfig],
+) -> tuple[_SCFConfig, str]:
     xc_spec_resolved = str(xc_spec if xc_spec is not None else (config.xc_spec if config is not None else "pbe"))
     parse_xc(xc_spec_resolved)
-    cfg = RKSConfig(xc_spec=xc_spec_resolved) if config is None else config
+    cfg = config_type(xc_spec=xc_spec_resolved) if config is None else config
     if cfg.xc_spec != xc_spec_resolved:
         cfg = replace(cfg, xc_spec=xc_spec_resolved)
     return cfg, xc_spec_resolved
@@ -226,22 +234,15 @@ def _grid_ao_input_cache_key(
     )
 
 
-def _cache_grid_ao_input_bundle(
-    key: tuple[Any, ...],
-    bundle: _GridAOInputBundle,
-) -> None:
-    if len(_GRID_AO_INPUT_CACHE) >= _GRID_AO_INPUT_CACHE_MAXSIZE:
-        _GRID_AO_INPUT_CACHE.pop(next(iter(_GRID_AO_INPUT_CACHE)))
-    _GRID_AO_INPUT_CACHE[key] = bundle
-
-
-def _cache_libcint_host_integral(
+def _cache_bounded(
+    cache: dict[tuple[Any, ...], Any],
     key: tuple[Any, ...],
     value: Any,
+    maxsize: int,
 ) -> None:
-    if len(_LIBCINT_HOST_INTEGRAL_CACHE) >= _LIBCINT_HOST_INTEGRAL_CACHE_MAXSIZE:
-        _LIBCINT_HOST_INTEGRAL_CACHE.pop(next(iter(_LIBCINT_HOST_INTEGRAL_CACHE)))
-    _LIBCINT_HOST_INTEGRAL_CACHE[key] = value
+    if len(cache) >= maxsize:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
 
 
 def _cached_libcint_host_integral(
@@ -262,12 +263,18 @@ def _cached_libcint_host_integral(
         integral_name=integral_name,
         geometry_grad_policy=geometry_grad_policy,
     )
-    _cache_libcint_host_integral(key, value)
+    _cache_bounded(
+        _LIBCINT_HOST_INTEGRAL_CACHE,
+        key,
+        value,
+        _LIBCINT_HOST_INTEGRAL_CACHE_MAXSIZE,
+    )
     return value
 
 
-def _gpu4pyscf_eri_pair_matrix(
+def _gpu4pyscf_eri(
     *,
+    packed: bool,
     atom: Any,
     basis: Any,
     unit: str,
@@ -287,31 +294,8 @@ def _gpu4pyscf_eri_pair_matrix(
         verbose=int(verbose),
         **mol_kwargs,
     )
-    return jnp.asarray(gpu4pyscf_int2e_s4(mol))
-
-
-def _gpu4pyscf_eri_tensor(
-    *,
-    atom: Any,
-    basis: Any,
-    unit: str,
-    charge: int,
-    spin: int,
-    cart: bool,
-    verbose: int,
-    mol_kwargs: dict[str, Any],
-) -> Array:
-    mol = build_libcint_mol(
-        atom=atom,
-        basis=basis,
-        unit=unit,
-        charge=int(charge),
-        spin=int(spin),
-        cart=bool(cart),
-        verbose=int(verbose),
-        **mol_kwargs,
-    )
-    return jnp.asarray(gpu4pyscf_int2e_full(mol))
+    integral_fn = gpu4pyscf_int2e_s4 if packed else gpu4pyscf_int2e_full
+    return jnp.asarray(integral_fn(mol))
 
 
 def _build_grid_ao_input_bundle(
@@ -380,7 +364,7 @@ def _cached_grid_ao_input_bundle(
         precompute_eri_groups=precompute_eri_groups,
         needs_ao_laplacian=needs_ao_laplacian,
     )
-    _cache_grid_ao_input_bundle(key, bundle)
+    _cache_bounded(_GRID_AO_INPUT_CACHE, key, bundle, _GRID_AO_INPUT_CACHE_MAXSIZE)
     return bundle
 
 
@@ -571,15 +555,6 @@ def _libcint_one_electron_from_mol(
     return overlap, hcore, dipole_integrals
 
 
-def _resolve_uks_config(config: UKSConfig | None, xc_spec: str | None) -> tuple[UKSConfig, str]:
-    xc_spec_resolved = str(xc_spec if xc_spec is not None else (config.xc_spec if config is not None else "pbe"))
-    parse_xc(xc_spec_resolved)
-    cfg = UKSConfig(xc_spec=xc_spec_resolved) if config is None else config
-    if cfg.xc_spec != xc_spec_resolved:
-        cfg = replace(cfg, xc_spec=xc_spec_resolved)
-    return cfg, xc_spec_resolved
-
-
 def _unrestricted_spin_electron_counts(
     total_electrons: int,
     spin: int,
@@ -633,23 +608,28 @@ def _build_rks_inputs_from_cpu_backbone(
     needs_ao_laplacian = xc_type(xc_spec_resolved) == "MGGA"
     precompute_eri_groups = cfg.jk_backend == "direct"
     executor: ThreadPoolExecutor | None = None
+    spec = atom if isinstance(atom, MoleculeSpec) else parse_molecule_spec(
+        atom,
+        unit=unit,
+        charge=charge,
+        spin=spin,
+    )
+    molecule_charge = int(spec.charge)
+    basis_grid = _prepare_basis_grid_context(
+        spec=spec,
+        basis=basis,
+        max_l=max_l,
+        grids_level=grids_level,
+        precompute_eri_groups=precompute_eri_groups,
+        needs_ao_laplacian=needs_ao_laplacian,
+    )
+    geometry_is_traced = basis_grid.geometry_is_traced
+    basis_cart = basis_grid.basis
 
     try:
-        if isinstance(atom, MoleculeSpec) and _contains_jax_tracer(atom.coords_bohr):
+        if geometry_is_traced:
             if not isinstance(basis, str):
                 raise TypeError("Traceable libcint geometry currently supports named basis strings only.")
-            spec = atom
-            molecule_charge = int(spec.charge)
-            basis_grid = _prepare_basis_grid_context(
-                spec=spec,
-                basis=basis,
-                max_l=max_l,
-                grids_level=grids_level,
-                precompute_eri_groups=precompute_eri_groups,
-                needs_ao_laplacian=needs_ao_laplacian,
-            )
-            geometry_is_traced = basis_grid.geometry_is_traced
-            basis_cart = basis_grid.basis
             coords_bohr = jnp.asarray(spec.coords_bohr)
             overlap, hcore, dipole_integrals = _libcint_one_electron_with_coords(
                 coords_bohr=coords_bohr,
@@ -702,8 +682,6 @@ def _build_rks_inputs_from_cpu_backbone(
             nuclear_repulsion = spec.nuclear_repulsion
             mol = None
         else:
-            spec = atom if isinstance(atom, MoleculeSpec) else parse_molecule_spec(atom, unit=unit, charge=charge, spin=spin)
-            molecule_charge = int(spec.charge)
             executor = ThreadPoolExecutor(max_workers=_LIBCINT_INPUT_PARALLEL_WORKERS)
             mol_future = executor.submit(
                 build_libcint_mol,
@@ -716,16 +694,6 @@ def _build_rks_inputs_from_cpu_backbone(
                 verbose=int(verbose),
                 **mol_kwargs,
             )
-            basis_grid = _prepare_basis_grid_context(
-                spec=spec,
-                basis=basis,
-                max_l=max_l,
-                grids_level=grids_level,
-                precompute_eri_groups=precompute_eri_groups,
-                needs_ao_laplacian=needs_ao_laplacian,
-            )
-            geometry_is_traced = basis_grid.geometry_is_traced
-            basis_cart = basis_grid.basis
             mol = mol_future.result()
             geometry_anchor = np.asarray(mol.atom_coords(), dtype=float)
             overlap, hcore, dipole_integrals = _libcint_one_electron_from_mol(
@@ -929,6 +897,7 @@ def _build_uks_inputs_from_cpu_backbone(
     *,
     atom: Any,
     basis: Any,
+    cfg: UKSConfig,
     xc_spec_resolved: str,
     unit: str,
     charge: int,
@@ -947,21 +916,30 @@ def _build_uks_inputs_from_cpu_backbone(
     libcint_grad_policy_mode: str,
     mol_kwargs: dict[str, Any],
 ) -> UKSIntegralInputs:
+    use_df = cfg.jk_backend == "df"
+    skip_cpu_eri = integral_backend_mode == "gpu" or use_df
+    df_factors = None
+    mol = None
+    spec = atom if isinstance(atom, MoleculeSpec) else parse_molecule_spec(
+        atom,
+        unit=unit,
+        charge=charge,
+        spin=spin,
+    )
+    molecule_charge = int(spec.charge)
+    basis_grid = _prepare_basis_grid_context(
+        spec=spec,
+        basis=basis,
+        max_l=max_l,
+        grids_level=grids_level,
+        precompute_eri_groups=False,
+        needs_ao_laplacian=True,
+    )
+    geometry_is_traced = basis_grid.geometry_is_traced
+    basis_cart = basis_grid.basis
     if isinstance(atom, MoleculeSpec):
         if not isinstance(basis, str):
             raise TypeError("Traceable libcint geometry currently supports named basis strings only.")
-        spec = atom
-        molecule_charge = int(spec.charge)
-        basis_grid = _prepare_basis_grid_context(
-            spec=spec,
-            basis=basis,
-            max_l=max_l,
-            grids_level=grids_level,
-            precompute_eri_groups=False,
-            needs_ao_laplacian=True,
-        )
-        geometry_is_traced = basis_grid.geometry_is_traced
-        basis_cart = basis_grid.basis
         coords_bohr = jnp.asarray(spec.coords_bohr)
         overlap, hcore, dipole_integrals = _libcint_one_electron_with_coords(
             coords_bohr=coords_bohr,
@@ -976,34 +954,41 @@ def _build_uks_inputs_from_cpu_backbone(
         )
         if precompile_eri:
             warnings.warn(
-                "precompile_eri is ignored for traceable libcint geometry.",
+                "precompile_eri is ignored for libcint UKS input construction.",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        eri = libcint_int2e_full_with_coords(
-            coords_bohr,
-            tuple(spec.symbols),
-            str(basis),
-            int(spec.charge),
-            int(spec.spin),
-            bool(cart),
-            int(verbose),
-            libcint_grad_policy_mode,
-        )
+        eri = jnp.zeros((0, 0, 0, 0), dtype=hcore.dtype)
+        if use_df:
+            eri_pair_matrix_for_df = libcint_int2e_s4_with_coords(
+                coords_bohr,
+                tuple(spec.symbols),
+                str(basis),
+                int(spec.charge),
+                int(spec.spin),
+                bool(cart),
+                int(verbose),
+                libcint_grad_policy_mode,
+            )
+            df_factors = eri_pair_matrix_to_df_factors_traceable(
+                eri_pair_matrix_for_df,
+                nao=basis_cart.nao,
+                tol=cfg.df_tol,
+                max_rank=cfg.df_max_rank,
+            )
+        elif not skip_cpu_eri:
+            eri = libcint_int2e_full_with_coords(
+                coords_bohr,
+                tuple(spec.symbols),
+                str(basis),
+                int(spec.charge),
+                int(spec.spin),
+                bool(cart),
+                int(verbose),
+                libcint_grad_policy_mode,
+            )
         nuclear_repulsion = spec.nuclear_repulsion
     else:
-        spec = atom if isinstance(atom, MoleculeSpec) else parse_molecule_spec(atom, unit=unit, charge=charge, spin=spin)
-        molecule_charge = int(spec.charge)
-        basis_grid = _prepare_basis_grid_context(
-            spec=spec,
-            basis=basis,
-            max_l=max_l,
-            grids_level=grids_level,
-            precompute_eri_groups=False,
-            needs_ao_laplacian=True,
-        )
-        geometry_is_traced = basis_grid.geometry_is_traced
-        basis_cart = basis_grid.basis
         mol = build_libcint_mol(
             atom=atom,
             basis=basis,
@@ -1023,18 +1008,28 @@ def _build_uks_inputs_from_cpu_backbone(
         )
         if precompile_eri:
             warnings.warn(
-                "precompile_eri is ignored when integral_backend='cpu'.",
+                "precompile_eri is ignored for libcint UKS input construction.",
                 RuntimeWarning,
                 stacklevel=2,
             )
-        eri_name = libcint_intor_name(mol, "int2e")
-        eri = _cached_libcint_host_integral(
-            mol=mol,
-            integral_name=eri_name,
-            geometry_anchor=geometry_anchor,
-            geometry_grad_policy=libcint_grad_policy_mode,
-            loader=lambda: jnp.asarray(mol.intor(eri_name)),
+        eri = jnp.zeros((0, 0, 0, 0), dtype=hcore.dtype)
+        if not skip_cpu_eri:
+            eri_name = libcint_intor_name(mol, "int2e")
+            eri = _cached_libcint_host_integral(
+                mol=mol,
+                integral_name=eri_name,
+                geometry_anchor=geometry_anchor,
+                geometry_grad_policy=libcint_grad_policy_mode,
+                loader=lambda: jnp.asarray(mol.intor(eri_name)),
         )
+        elif use_df:
+            df_factors = _cached_libcint_host_integral(
+                mol=mol,
+                integral_name="df_cholesky_eri",
+                geometry_anchor=geometry_anchor,
+                geometry_grad_policy=libcint_grad_policy_mode,
+                loader=lambda: true_df_factors_from_libcint_mol(mol),
+            )
         nuclear_repulsion = spec.nuclear_repulsion
 
     ao, ao_deriv1, ao_laplacian = _grid_ao_payload(
@@ -1065,6 +1060,7 @@ def _build_uks_inputs_from_cpu_backbone(
         overlap=overlap,
         hcore=hcore,
         eri=eri,
+        df_factors=df_factors,
         nalpha=nalpha,
         nbeta=nbeta,
         nuclear_repulsion=nuclear_repulsion,
@@ -1088,6 +1084,7 @@ def _build_uks_inputs_from_jax_backbone(
     *,
     atom: Any,
     basis: Any,
+    cfg: UKSConfig,
     xc_spec_resolved: str,
     unit: str,
     charge: int,
@@ -1125,7 +1122,16 @@ def _build_uks_inputs_from_jax_backbone(
             engine="jit",
             chunk_size=int(precompile_eri_chunk_size),
         )
-    eri = eri_tensor(basis_cart)
+    df_factors = None
+    eri = jnp.zeros((0, 0, 0, 0), dtype=hcore.dtype)
+    if cfg.jk_backend == "df":
+        df_factors = eri_to_df_factors_from_basis(
+            basis_cart,
+            tol=cfg.df_tol,
+            max_rank=cfg.df_max_rank,
+        )
+    else:
+        eri = eri_tensor(basis_cart)
     ao, ao_deriv1, ao_laplacian = _grid_ao_payload(
         basis_grid,
         needs_ao_laplacian=True,
@@ -1155,6 +1161,7 @@ def _build_uks_inputs_from_jax_backbone(
         overlap=overlap,
         hcore=hcore,
         eri=eri,
+        df_factors=df_factors,
         nalpha=nalpha,
         nbeta=nbeta,
         nuclear_repulsion=spec.nuclear_repulsion,
@@ -1210,7 +1217,7 @@ def build_rks_integral_inputs(
     if not bool(cart):
         raise NotImplementedError("build_rks_integral_inputs currently supports cart=True only.")
 
-    cfg, xc_spec_resolved = _resolve_config(config, xc_spec)
+    cfg, xc_spec_resolved = _resolve_config(config, xc_spec, RKSConfig)
     integral_backend_mode, grid_ao_backend_mode, libcint_grad_policy_mode = _resolve_integral_input_modes(
         integral_backend=integral_backend,
         grid_ao_backend=grid_ao_backend,
@@ -1265,7 +1272,8 @@ def build_rks_integral_inputs(
     if integral_backend_mode == "gpu" and cfg.jk_backend == "full":
         inputs = replace(
             inputs,
-            eri_pair_matrix=_gpu4pyscf_eri_pair_matrix(
+            eri_pair_matrix=_gpu4pyscf_eri(
+                packed=True,
                 atom=atom,
                 basis=basis,
                 unit=unit,
@@ -1312,16 +1320,17 @@ def build_uks_integral_inputs(
     if not bool(cart):
         raise NotImplementedError("build_uks_integral_inputs currently supports cart=True only.")
 
-    _, xc_spec_resolved = _resolve_uks_config(config, xc_spec)
+    cfg, xc_spec_resolved = _resolve_config(config, xc_spec, UKSConfig)
     integral_backend_mode, grid_ao_backend_mode, libcint_grad_policy_mode = _resolve_integral_input_modes(
         integral_backend=integral_backend,
         grid_ao_backend=grid_ao_backend,
         libcint_geometry_grad_policy=libcint_geometry_grad_policy,
     )
-    if integral_backend_mode == "cpu":
-        return _build_uks_inputs_from_cpu_backbone(
+    if integral_backend_mode in {"cpu", "gpu"}:
+        inputs = _build_uks_inputs_from_cpu_backbone(
             atom=atom,
             basis=basis,
+            cfg=cfg,
             xc_spec_resolved=xc_spec_resolved,
             unit=unit,
             charge=charge,
@@ -1340,9 +1349,26 @@ def build_uks_integral_inputs(
             libcint_grad_policy_mode=libcint_grad_policy_mode,
             mol_kwargs=dict(mol_kwargs),
         )
+        if integral_backend_mode == "gpu" and cfg.jk_backend == "full":
+            inputs = replace(
+                inputs,
+                eri=_gpu4pyscf_eri(
+                    packed=False,
+                    atom=atom,
+                    basis=basis,
+                    unit=unit,
+                    charge=charge,
+                    spin=spin,
+                    cart=bool(cart),
+                    verbose=verbose,
+                    mol_kwargs=dict(mol_kwargs),
+                ),
+            )
+        return inputs
     inputs = _build_uks_inputs_from_jax_backbone(
         atom=atom,
         basis=basis,
+        cfg=cfg,
         xc_spec_resolved=xc_spec_resolved,
         unit=unit,
         charge=charge,
@@ -1360,20 +1386,6 @@ def build_uks_integral_inputs(
         grid_ao_backend_mode=grid_ao_backend_mode,
         _precompile_eri_kernels=_precompile_eri_kernels,
     )
-    if integral_backend_mode == "gpu":
-        inputs = replace(
-            inputs,
-            eri=_gpu4pyscf_eri_tensor(
-                atom=atom,
-                basis=basis,
-                unit=unit,
-                charge=charge,
-                spin=spin,
-                cart=bool(cart),
-                verbose=verbose,
-                mol_kwargs=dict(mol_kwargs),
-            ),
-        )
     return inputs
 
 

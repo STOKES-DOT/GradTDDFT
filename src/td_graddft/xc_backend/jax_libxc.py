@@ -681,6 +681,35 @@ def eval_xc_energy_density(
     return jnp.sum(jnp.stack(values, axis=0), axis=0)
 
 
+def eval_xc_energy_density_unrestricted(
+    spec: str,
+    features: RestrictedFeatureBundle,
+    *,
+    omega: Array | float | None = None,
+    allow_experimental_jax_xc: bool = False,
+) -> Array:
+    """Return spin-polarized local XC grid contribution e_xc(r)."""
+
+    from . import jax_xc_adapter
+
+    values = []
+    for term in semilocal_terms(
+        spec,
+        allow_experimental_jax_xc=allow_experimental_jax_xc,
+    ):
+        term_omega = omega if term.name == "gga_x_wpbeh" else None
+        eps = jax_xc_adapter.eval_jax_xc_from_unrestricted_features(
+            term.name,
+            features,
+            omega=term_omega,
+            allow_experimental_jax_xc=allow_experimental_jax_xc,
+        )
+        values.append(term.coefficient * features.rho * eps)
+    if not values:
+        return jnp.zeros_like(features.rho)
+    return jnp.sum(jnp.stack(values, axis=0), axis=0)
+
+
 @lru_cache(maxsize=None)
 def _point_xc_response_kernel(
     spec: str,

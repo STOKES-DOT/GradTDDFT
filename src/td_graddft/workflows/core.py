@@ -22,16 +22,13 @@ from td_graddft.scf.builders import (
 from td_graddft.scf import RHFConfig, RKSConfig, UKSConfig
 from td_graddft.spectra import HARTREE_TO_EV, lorentzian_spectrum, oscillator_strengths
 from td_graddft.training import (
-    ExcitedStateDatum,
-    ExcitedStateTrainingConfig,
-    GroundStateCoreDatum,
-    GroundStateCoreTrainingConfig,
-    GroundStateDatum,
-    GroundStateTrainingConfig,
+    MolecularTrainingConfig,
+    MolecularTrainingDatum,
     create_train_state_from_molecule,
-    make_ground_state_eval,
+    density_on_grid,
     make_ground_state_predictor,
-    make_ground_state_train_step,
+    make_molecular_eval,
+    make_molecular_train_step,
 )
 
 from .types import (
@@ -95,38 +92,47 @@ def _canonicalize_graddft_ground_state_config(
     if not use_graddft_core:
         return config
 
+    objective = replace(
+        config.objective,
+        grid_density_spin="spin_resolved",
+        e0_total_mse_weight=0.0,
+        e0_total_mae_weight=1.0,
+        orbital_energy_mse_weight=0.0,
+        orbital_energy_mae_weight=0.0,
+    )
     aligned = replace(
         config,
-        network_architecture="graddft_residual",
         input_feature_mode="canonical",
+        network_architecture="graddft_residual",
         hf_input_mode="spin_resolved",
-        response_hf_mode="strict",
         response_pt2_mode="approx",
-        density_supervision="spin_resolved",
         strict_feature_alignment=True,
         hfx_channels=max(int(config.hfx_channels), 2),
-        energy_mse_weight=0.0,
-        energy_mae_weight=1.0,
-        orbital_energy_mse_weight=0.0,
-        orbital_energy_mae_weight=1.0,
+        objective=objective,
     )
 
     if not bool(config.strict_graddft_ground_state):
         return aligned
 
+    objective = aligned.objective
     forbidden_weights = {
-        "stationarity_constraint_weight": float(aligned.stationarity_constraint_weight),
-        "dm21_scf_regularization_weight": float(aligned.dm21_scf_regularization_weight),
-        "orbital_energy_constraint_weight": float(aligned.orbital_energy_constraint_weight),
-        "janak_frontier_constraint_weight": float(aligned.janak_frontier_constraint_weight),
-        "coefficient_prior_weight": float(aligned.coefficient_prior_weight),
-        "s1_constraint_weight": float(aligned.s1_constraint_weight),
-        "excitation_constraint_weight": float(aligned.excitation_constraint_weight),
-        "oscillator_strength_constraint_weight": float(
-            aligned.oscillator_strength_constraint_weight
-        ),
-        "spectrum_constraint_weight": float(aligned.spectrum_constraint_weight),
-        "fractional_linearity_weight": float(aligned.fractional_linearity_weight),
+        name: float(getattr(objective, name))
+        for name in (
+            "density_stationarity_weight",
+            "dm21_scf_regularization_weight",
+            "orbital_energy_mse_weight",
+            "orbital_energy_mae_weight",
+            "coefficient_prior_weight",
+            "s1_total_mse_weight",
+            "s1_total_mae_weight",
+            "excitation_gap_mse_weight",
+            "excitation_gap_mae_weight",
+            "oscillator_strength_mse_weight",
+            "oscillator_strength_mae_weight",
+            "spectrum_mse_weight",
+            "spectrum_mae_weight",
+            "fractional_linearity_weight",
+        )
     }
     active_forbidden = {name: value for name, value in forbidden_weights.items() if value != 0.0}
     if active_forbidden:
@@ -312,6 +318,7 @@ def run_molecule_from_spec(
                 libcint_geometry_grad_policy=simulation.jax_libcint_geometry_grad_policy,
                 compute_local_hfx_features=compute_local_hfx_features,
                 compute_local_hfx_aux=compute_local_hfx_aux,
+                compute_local_pt2_features=compute_local_pt2_features,
                 hfx_omega_values=hfx_omega_values,
                 hfx_chunk_size=hfx_chunk_size,
                 precompile_eri=simulation.jax_precompile_eri,
@@ -401,8 +408,8 @@ def train_neural_xc(
         input_feature_mode=config.input_feature_mode,
         hf_input_mode=config.hf_input_mode,
         include_pt2_channel=config.include_pt2_channel,
+        ground_state_pt2_mode=config.ground_state_pt2_mode,
         pt2_channel_mode=config.pt2_channel_mode,
-        response_hf_mode=config.response_hf_mode,
         response_pt2_mode=config.response_pt2_mode,
         strict_feature_alignment=config.strict_feature_alignment,
         hidden_dims=config.hidden_dims,
@@ -411,65 +418,59 @@ def train_neural_xc(
         hfx_channels=config.hfx_channels,
         name=config.functional_name,
     )
-    s1_target = None
-    if float(config.s1_constraint_weight) != 0.0:
-        if config.s1_target_energy_au is not None:
-            s1_target = jnp.asarray(float(config.s1_target_energy_au))
-        elif int(reference.energies_au.size) > 0:
-            s1_target = jnp.asarray(reference.energies_au[0])
-        else:
-            raise ValueError(
-                "s1_constraint_weight != 0 but no reference excited states are available. "
-                "Set simulation.nstates >= 1 or provide s1_target_energy_au explicitly."
-            )
-    excitation_targets = None
-    if float(config.excitation_constraint_weight) != 0.0:
-        if config.excitation_target_energies_au is not None:
-            excitation_targets = jnp.asarray(
-                tuple(float(value) for value in config.excitation_target_energies_au)
-            )
-        else:
-            ref_energies = jnp.asarray(reference.energies_au)
-            if int(ref_energies.size) <= 0:
-                raise ValueError(
-                    "excitation_constraint_weight != 0 but no reference excited states are "
-                    "available. Set simulation.nstates >= 1 or provide "
-                    "excitation_target_energies_au explicitly."
-                )
-            requested_excited_states = max(1, int(config.excitation_constraint_nstates))
-            n_take = min(requested_excited_states, int(ref_energies.size))
-            excitation_targets = ref_energies[:n_take]
+    objective = config.objective
+    ref_gaps_h = jnp.asarray(reference.energies_au)
+    gap_active = (
+        objective.excitation_gap_mse_weight != 0.0
+        or objective.excitation_gap_mae_weight != 0.0
+    )
+    gap_targets = None
+    if gap_active:
+        gap_targets = (
+            jnp.asarray(config.target_excitation_gaps_h)
+            if config.target_excitation_gaps_h is not None
+            else ref_gaps_h
+        )
+        if int(gap_targets.size) == 0:
+            raise ValueError("The active excitation-gap objective has no reference gaps.")
+        if objective.excitation_gap_nstates is not None:
+            gap_targets = gap_targets[: int(objective.excitation_gap_nstates)]
+
+    s1_total_target = None
+    if objective.s1_total_mse_weight != 0.0 or objective.s1_total_mae_weight != 0.0:
+        if int(ref_gaps_h.size) == 0:
+            raise ValueError("The active S1-total objective has no reference S1 gap.")
+        s1_total_target = jnp.asarray(reference.molecule.mf_energy) + ref_gaps_h[0]
+
     oscillator_strength_targets = None
-    oscillator_strength_nstates = 0
-    if float(config.oscillator_strength_constraint_weight) != 0.0:
-        ref_energies = jnp.asarray(reference.energies_au)
+    oscillator_active = (
+        objective.oscillator_strength_mse_weight != 0.0
+        or objective.oscillator_strength_mae_weight != 0.0
+    )
+    if oscillator_active:
         ref_strengths = jnp.asarray(reference.oscillator_strengths)
-        if int(ref_energies.size) <= 0 or int(ref_strengths.size) <= 0:
-            raise ValueError(
-                "oscillator_strength_constraint_weight != 0 but no reference oscillator "
-                "strengths are available. Set simulation.nstates >= 1 so the reference run returns "
-                "excitation energies and oscillator strengths."
-            )
-        oscillator_strength_nstates = min(
-            max(1, int(config.oscillator_strength_constraint_nstates)),
-            int(ref_energies.size),
+        if int(ref_strengths.size) == 0:
+            raise ValueError("The active oscillator-strength objective has no targets.")
+        nstates = min(
+            int(objective.oscillator_strength_nstates or ref_strengths.size),
+            int(ref_gaps_h.size),
             int(ref_strengths.size),
         )
-        oscillator_strength_targets = ref_strengths[:oscillator_strength_nstates]
+        oscillator_strength_targets = ref_strengths[:nstates]
+
     spectrum_target_grid_ev = None
     spectrum_target_curve = None
-    spectrum_nstates = 0
-    if float(config.spectrum_constraint_weight) != 0.0:
-        ref_energies = jnp.asarray(reference.energies_au)
+    spectrum_active = (
+        objective.spectrum_mse_weight != 0.0
+        or objective.spectrum_mae_weight != 0.0
+    )
+    if spectrum_active:
         ref_strengths = jnp.asarray(reference.oscillator_strengths)
-        if int(ref_energies.size) <= 0 or int(ref_strengths.size) <= 0:
-            raise ValueError(
-                "spectrum_constraint_weight != 0 but no reference spectrum is available. "
-                "Set simulation.nstates >= 1 so the reference run returns excitation energies and oscillator strengths."
-            )
+        if int(ref_gaps_h.size) == 0 or int(ref_strengths.size) == 0:
+            raise ValueError("The active spectrum objective has no reference spectrum.")
         spectrum_nstates = min(
-            max(1, int(config.spectrum_constraint_nstates)),
-            int(ref_energies.size),
+            int(objective.spectrum_nstates or ref_gaps_h.size),
+            int(ref_gaps_h.size),
             int(ref_strengths.size),
         )
         spectrum_target_grid_ev = jnp.linspace(
@@ -479,106 +480,45 @@ def train_neural_xc(
                     spectrum_config.grid_min_ev,
                     spectrum_config.grid_min_ev
                     + spectrum_config.max_padding_ev
-                    + float(jnp.max(ref_energies * HARTREE_TO_EV)),
+                    + float(jnp.max(ref_gaps_h * HARTREE_TO_EV)),
                 )
             ),
             int(spectrum_config.grid_points),
         )
         spectrum_target_curve = lorentzian_spectrum(
-            ref_energies[:spectrum_nstates] * HARTREE_TO_EV,
+            ref_gaps_h[:spectrum_nstates] * HARTREE_TO_EV,
             ref_strengths[:spectrum_nstates],
             spectrum_target_grid_ev,
             eta=float(spectrum_config.eta_ev),
         )
 
-    datum_core = GroundStateCoreDatum(
-        target_total_energy=jnp.asarray(reference.molecule.mf_energy),
-        density_constraint_weight=config.density_constraint_weight,
-        stationarity_constraint_weight=config.stationarity_constraint_weight,
-        dm21_scf_regularization_weight=config.dm21_scf_regularization_weight,
-        target_orbital_energies=jnp.asarray(reference.molecule.mo_energy),
-        target_orbital_occupations=jnp.asarray(reference.molecule.mo_occ),
-        orbital_energy_constraint_weight=config.orbital_energy_constraint_weight,
-        orbital_energy_constraint_window=int(config.orbital_energy_constraint_window),
-        janak_frontier_constraint_weight=config.janak_frontier_constraint_weight,
-    )
-    datum_excited = ExcitedStateDatum(
-        target_s1_energy=s1_target,
-        s1_constraint_weight=float(config.s1_constraint_weight),
-        target_excitation_energies=excitation_targets,
-        excitation_constraint_weight=float(config.excitation_constraint_weight),
-        excitation_constraint_nstates=int(config.excitation_constraint_nstates),
+    datum = MolecularTrainingDatum(
+        molecule=reference.molecule,
+        target_e0_total_h=jnp.asarray(reference.molecule.mf_energy),
+        target_grid_density=(
+            density_on_grid(reference.molecule)
+            if objective.grid_density_mse_weight != 0.0
+            else None
+        ),
+        target_density_matrix=(
+            jnp.asarray(reference.molecule.rdm1)
+            if objective.density_matrix_mse_weight != 0.0
+            else None
+        ),
+        target_s1_total_h=s1_total_target,
+        target_excitation_gaps_h=gap_targets,
         target_oscillator_strengths=oscillator_strength_targets,
-        oscillator_strength_constraint_weight=float(
-            config.oscillator_strength_constraint_weight
-        ),
-        oscillator_strength_constraint_nstates=(
-            oscillator_strength_nstates if oscillator_strength_nstates > 0 else None
-        ),
         target_spectrum_grid_ev=spectrum_target_grid_ev,
         target_spectrum_curve=spectrum_target_curve,
-        spectrum_constraint_weight=float(config.spectrum_constraint_weight),
-        spectrum_constraint_nstates=(spectrum_nstates if spectrum_nstates > 0 else None),
-    )
-    datum = GroundStateDatum.from_parts(
-        reference.molecule,
-        core=datum_core,
-        excited_state=datum_excited,
+        target_orbital_energies=jnp.asarray(reference.molecule.mo_energy),
+        target_orbital_occupations=jnp.asarray(reference.molecule.mo_occ),
     )
     selected_scf_gradient_mode = _resolve_training_scf_gradient_mode(config)
-    gs_core_training = GroundStateCoreTrainingConfig(
-        mode=config.training_mode,
-        energy_mse_weight=config.energy_mse_weight,
-        energy_mae_weight=config.energy_mae_weight,
-        orbital_energy_mse_weight=config.orbital_energy_mse_weight,
-        orbital_energy_mae_weight=config.orbital_energy_mae_weight,
-        energy_normalization=config.energy_normalization,
-        density_supervision=config.density_supervision,
-        coefficient_prior_weight=config.coefficient_prior_weight,
+    molecular_config = replace(
+        objective,
         coefficient_prior_values=coefficient_prior_values,
-        coefficient_prior_mode=config.coefficient_prior_mode,
-        fractional_linearity_weight=config.fractional_linearity_weight,
-        fractional_linearity_delta=config.fractional_linearity_delta,
-        janak_frontier_mode=config.janak_frontier_mode,
-        janak_frontier_delta=config.janak_frontier_delta,
-        dm21_scf_gap_floor=config.dm21_scf_gap_floor,
-        occupation_tolerance=1e-8,
-        scf_max_cycle=config.scf_max_cycle,
-        scf_damping=config.scf_damping,
-        scf_conv_tol_density=config.scf_conv_tol_density,
-        scf_orthogonalization_eps=config.scf_orthogonalization_eps,
-        scf_vxc_clip=config.scf_vxc_clip,
-        scf_iterate_selection=config.scf_iterate_selection,
-        scf_require_convergence=config.scf_require_convergence,
-        scf_stop_gradient_on_unconverged=config.scf_stop_gradient_on_unconverged,
-        scf_stop_gradient_rms_threshold=config.scf_stop_gradient_rms_threshold,
+        spectrum_eta_ev=float(spectrum_config.eta_ev),
         scf_gradient_mode=selected_scf_gradient_mode,
-        scf_implicit_diff_max_iter=config.scf_implicit_diff_max_iter,
-        scf_implicit_diff_step_size=config.scf_implicit_diff_step_size,
-        scf_implicit_diff_clip=config.scf_implicit_diff_clip,
-        scf_implicit_diff_solver=config.scf_implicit_diff_solver,
-        scf_implicit_diff_tolerance=config.scf_implicit_diff_tolerance,
-        scf_implicit_diff_regularization=config.scf_implicit_diff_regularization,
-        scf_implicit_diff_restart=config.scf_implicit_diff_restart,
-    )
-    gs_excited_training = ExcitedStateTrainingConfig(
-        s1_constraint_use_tda=bool(config.s1_constraint_use_tda),
-        excitation_constraint_use_tda=bool(config.excitation_constraint_use_tda),
-        excitation_mse_weight=config.excitation_mse_weight,
-        excitation_mae_weight=config.excitation_mae_weight,
-        oscillator_strength_constraint_use_tda=bool(
-            config.oscillator_strength_constraint_use_tda
-        ),
-        oscillator_strength_mse_weight=config.oscillator_strength_mse_weight,
-        oscillator_strength_mae_weight=config.oscillator_strength_mae_weight,
-        spectrum_constraint_use_tda=bool(config.spectrum_constraint_use_tda),
-        spectrum_constraint_eta_ev=float(spectrum_config.eta_ev),
-        spectrum_mse_weight=config.spectrum_mse_weight,
-        spectrum_mae_weight=config.spectrum_mae_weight,
-    )
-    gs_training = GroundStateTrainingConfig.from_parts(
-        core=gs_core_training,
-        excited_state=gs_excited_training,
     )
     if config.lr_decay_every > 0:
         lr_schedule = optax.exponential_decay(
@@ -603,12 +543,12 @@ def train_neural_xc(
         reference.molecule,
         optimizer,
     )
-    train_step = make_ground_state_train_step(functional, training_config=gs_training)
-    eval_loss = make_ground_state_eval(functional, training_config=gs_training)
+    train_step = make_molecular_train_step(functional, training_config=molecular_config)
+    eval_loss = make_molecular_eval(functional, training_config=molecular_config)
     fallback_train_step = None
     if config.recover_nonfinite_steps and selected_scf_gradient_mode != "impl":
-        fallback_training = replace(gs_training, scf_gradient_mode="impl")
-        fallback_train_step = make_ground_state_train_step(
+        fallback_training = replace(molecular_config, scf_gradient_mode="impl")
+        fallback_train_step = make_molecular_train_step(
             functional,
             training_config=fallback_training,
         )
@@ -616,12 +556,21 @@ def train_neural_xc(
     # an internal eigen-solve in the objective and is not worth JIT-compiling
     # during rapid prototyping loops.
     use_jit_train = (
-        gs_training.mode == "fixed_density"
+        molecular_config.mode == "fixed_density"
         and config.jit_train
-        and float(config.s1_constraint_weight) == 0.0
-        and float(config.excitation_constraint_weight) == 0.0
-        and float(config.oscillator_strength_constraint_weight) == 0.0
-        and float(config.spectrum_constraint_weight) == 0.0
+        and all(
+            float(getattr(molecular_config, name)) == 0.0
+            for name in (
+                "s1_total_mse_weight",
+                "s1_total_mae_weight",
+                "excitation_gap_mse_weight",
+                "excitation_gap_mae_weight",
+                "oscillator_strength_mse_weight",
+                "oscillator_strength_mae_weight",
+                "spectrum_mse_weight",
+                "spectrum_mae_weight",
+            )
+        )
     )
     if use_jit_train:
         compiled_train_step = jax.jit(lambda current_state: train_step(current_state, datum))
@@ -632,9 +581,16 @@ def train_neural_xc(
 
     initial_loss, initial_metrics = compiled_eval(state.params)
     initial_loss = float(initial_loss)
-    initial_density_penalty = float(initial_metrics["density_penalty"][0])
-    initial_stationarity_penalty = float(initial_metrics["stationarity_penalty"][0])
-    initial_coefficient_prior_penalty = float(initial_metrics["coefficient_prior_penalty"][0])
+    initial_density_penalty = float(
+        initial_metrics["grid_density_loss"][0]
+        + initial_metrics["density_matrix_loss"][0]
+    )
+    initial_stationarity_penalty = float(
+        initial_metrics["density_stationarity_loss"][0]
+    )
+    initial_coefficient_prior_penalty = float(
+        initial_metrics["coefficient_prior_loss"][0]
+    )
     min_loss = initial_loss
     min_loss_step = 0
     loss_history = [initial_loss]
@@ -658,7 +614,7 @@ def train_neural_xc(
     t0 = time.perf_counter()
     fallback_recoveries = 0
     guard_post_update = (
-        gs_training.mode == "self_consistent"
+        molecular_config.mode == "self_consistent"
         and selected_scf_gradient_mode == "impl"
     )
     for step in range(1, config.steps + 1):
@@ -689,12 +645,20 @@ def train_neural_xc(
             0.0 if reverted_step else _metric_scalar(train_metrics, "param_update_norm")
         )
         nonfinite_grad_fraction_val = _metric_scalar(train_metrics, "nonfinite_grad_fraction", 0.0)
-        train_loss_val = _metric_scalar(train_metrics, "loss")
-        train_density_penalty_val = _metric_scalar(train_metrics, "density_penalty", 0.0)
-        train_stationarity_penalty_val = _metric_scalar(train_metrics, "stationarity_penalty", 0.0)
+        train_loss_val = _metric_scalar(train_metrics, "total_loss")
+        train_density_penalty_val = _metric_scalar(
+            train_metrics,
+            "grid_density_loss",
+            0.0,
+        ) + _metric_scalar(train_metrics, "density_matrix_loss", 0.0)
+        train_stationarity_penalty_val = _metric_scalar(
+            train_metrics,
+            "density_stationarity_loss",
+            0.0,
+        )
         train_coefficient_prior_penalty_val = _metric_scalar(
             train_metrics,
-            "coefficient_prior_penalty",
+            "coefficient_prior_loss",
             0.0,
         )
         grad_norm_history.append(grad_norm_val)
@@ -720,18 +684,24 @@ def train_neural_xc(
         ):
             step_loss, step_metrics = compiled_eval(state.params)
             loss_val = float(step_loss)
-            density_penalty_val = float(step_metrics["density_penalty"][0])
-            stationarity_penalty_val = float(step_metrics["stationarity_penalty"][0])
-            dm21_scf_penalty_val = float(step_metrics["dm21_scf_penalty"][0])
-            orbital_energy_penalty_val = float(step_metrics["orbital_energy_penalty"][0])
-            janak_frontier_penalty_val = float(step_metrics["janak_frontier_penalty"][0])
-            coefficient_prior_penalty_val = float(step_metrics["coefficient_prior_penalty"][0])
-            s1_penalty_val = float(step_metrics["s1_penalty"][0])
-            excitation_penalty_val = float(step_metrics["excitation_penalty"][0])
-            oscillator_strength_penalty_val = float(
-                step_metrics["oscillator_strength_penalty"][0]
+            density_penalty_val = float(
+                step_metrics["grid_density_loss"][0]
+                + step_metrics["density_matrix_loss"][0]
             )
-            spectrum_penalty_val = float(step_metrics["spectrum_penalty"][0])
+            stationarity_penalty_val = float(
+                step_metrics["density_stationarity_loss"][0]
+            )
+            dm21_scf_penalty_val = float(step_metrics["dm21_scf_loss"][0])
+            orbital_energy_penalty_val = float(step_metrics["orbital_energy_loss"][0])
+            coefficient_prior_penalty_val = float(
+                step_metrics["coefficient_prior_loss"][0]
+            )
+            s1_penalty_val = float(step_metrics["s1_total_loss"][0])
+            excitation_penalty_val = float(step_metrics["excitation_gap_loss"][0])
+            oscillator_strength_penalty_val = float(
+                step_metrics["oscillator_strength_loss"][0]
+            )
+            spectrum_penalty_val = float(step_metrics["spectrum_loss"][0])
             scf_converged_fraction_val = _metric_scalar(
                 step_metrics,
                 "scf_converged_fraction",
@@ -750,7 +720,6 @@ def train_neural_xc(
                 f"stationarity_penalty={stationarity_penalty_val:.6e} "
                 f"dm21_scf_penalty={dm21_scf_penalty_val:.6e} "
                 f"orbital_energy_penalty={orbital_energy_penalty_val:.6e} "
-                f"janak_frontier_penalty={janak_frontier_penalty_val:.6e} "
                 f"coefficient_prior_penalty={coefficient_prior_penalty_val:.6e} "
                 f"s1_penalty={s1_penalty_val:.6e} "
                 f"excitation_penalty={excitation_penalty_val:.6e} "
@@ -771,9 +740,16 @@ def train_neural_xc(
 
     final_loss, final_metrics = compiled_eval(state.params)
     final_loss = float(final_loss)
-    final_density_penalty = float(final_metrics["density_penalty"][0])
-    final_stationarity_penalty = float(final_metrics["stationarity_penalty"][0])
-    final_coefficient_prior_penalty = float(final_metrics["coefficient_prior_penalty"][0])
+    final_density_penalty = float(
+        final_metrics["grid_density_loss"][0]
+        + final_metrics["density_matrix_loss"][0]
+    )
+    final_stationarity_penalty = float(
+        final_metrics["density_stationarity_loss"][0]
+    )
+    final_coefficient_prior_penalty = float(
+        final_metrics["coefficient_prior_loss"][0]
+    )
     loss_history.append(final_loss)
     density_penalty_history.append(final_density_penalty)
     stationarity_penalty_history.append(final_stationarity_penalty)
@@ -785,7 +761,7 @@ def train_neural_xc(
 
     trained_energy_predictor = make_ground_state_predictor(
         functional,
-        training_config=gs_training,
+        training_config=molecular_config,
     )
     trained_energy = float(trained_energy_predictor(best_params, reference.molecule)[0])
     trained_hybrid_fraction = float(

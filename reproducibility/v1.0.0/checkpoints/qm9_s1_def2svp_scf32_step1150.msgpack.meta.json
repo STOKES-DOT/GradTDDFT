@@ -1,0 +1,19 @@
+{
+  "basis": "def2-svp",
+  "grad_norm": 0.2724808998405933,
+  "include_hfx_channel": true,
+  "learning_rate": 3.125e-05,
+  "reference_csv": "reproducibility/v1.0.0/references/qm9gwbse_s1_def2svp_train40_val10.csv",
+  "response_hf_mode": "approx",
+  "step": 1150,
+  "steps": 2000,
+  "stream_train": true,
+  "stream_update_mode": "per_molecule",
+  "train_loss": 0.0024531829086272315,
+  "train_s1_mae": 0.0024390909399092876,
+  "training_mode": "self_consistent",
+  "update_norm": 0.002000455994857475,
+  "val_loss": 0.0036408100450794553,
+  "val_s1_mae": 0.0036116560893875854,
+  "xc": "b3lyp"
+}

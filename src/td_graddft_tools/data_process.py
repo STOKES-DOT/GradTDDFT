@@ -8,14 +8,15 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 
-from td_graddft.training.config import GroundStateDatum
+from td_graddft.training.config import MolecularTrainingDatum
 
 
 _ARRAY_FIELD_NAMES = (
-    "target_total_energy",
-    "target_s1_energy",
-    "target_first_excited_total_energy",
-    "target_excitation_energies",
+    "target_e0_total_h",
+    "target_grid_density",
+    "target_density_matrix",
+    "target_s1_total_h",
+    "target_excitation_gaps_h",
     "target_oscillator_strengths",
     "target_spectrum_grid_ev",
     "target_spectrum_curve",
@@ -27,23 +28,7 @@ _ARRAY_FIELD_NAMES = (
 
 _SCALAR_FIELD_NAMES = (
     "weight",
-    "density_constraint_weight",
-    "xc_potential_constraint_weight",
-    "xc_kernel_constraint_weight",
-    "xc_kernel_normalization_scale",
-    "stationarity_constraint_weight",
-    "dm21_scf_regularization_weight",
-    "orbital_energy_constraint_weight",
-    "orbital_energy_constraint_window",
-    "janak_frontier_constraint_weight",
-    "s1_constraint_weight",
-    "first_excited_total_energy_constraint_weight",
-    "excitation_constraint_weight",
-    "excitation_constraint_nstates",
-    "oscillator_strength_constraint_weight",
-    "oscillator_strength_constraint_nstates",
-    "spectrum_constraint_weight",
-    "spectrum_constraint_nstates",
+    "target_xc_kernel_normalization_scale",
 )
 
 _METADATA_KEY = "__td_graddft_target_bundle_metadata_json__"
@@ -276,45 +261,30 @@ class InputInfo:
 
 
 @dataclass(frozen=True)
-class GroundStateTargetBundle:
+class MolecularTargetBundle:
     input_info: InputInfo
-    target_total_energy: np.ndarray
-    target_s1_energy: np.ndarray | None = None
-    target_first_excited_total_energy: np.ndarray | None = None
-    target_excitation_energies: np.ndarray | None = None
+    target_e0_total_h: np.ndarray | None = None
+    target_grid_density: np.ndarray | None = None
+    target_density_matrix: np.ndarray | None = None
+    target_s1_total_h: np.ndarray | None = None
+    target_excitation_gaps_h: np.ndarray | None = None
     target_oscillator_strengths: np.ndarray | None = None
     target_spectrum_grid_ev: np.ndarray | None = None
     target_spectrum_curve: np.ndarray | None = None
     target_xc_potential: np.ndarray | None = None
     target_xc_kernel: np.ndarray | None = None
     weight: float = 1.0
-    density_constraint_weight: float = 0.0
-    xc_potential_constraint_weight: float = 0.0
-    xc_kernel_constraint_weight: float = 0.0
-    xc_kernel_normalization_scale: float | None = None
-    stationarity_constraint_weight: float = 0.0
-    dm21_scf_regularization_weight: float = 0.0
+    target_xc_kernel_normalization_scale: float | None = None
     target_orbital_energies: np.ndarray | None = None
     target_orbital_occupations: np.ndarray | None = None
-    orbital_energy_constraint_weight: float = 0.0
-    orbital_energy_constraint_window: int | None = None
-    janak_frontier_constraint_weight: float = 0.0
-    s1_constraint_weight: float = 0.0
-    first_excited_total_energy_constraint_weight: float = 0.0
-    excitation_constraint_weight: float = 0.0
-    excitation_constraint_nstates: int | None = None
-    oscillator_strength_constraint_weight: float = 0.0
-    oscillator_strength_constraint_nstates: int | None = None
-    spectrum_constraint_weight: float = 0.0
-    spectrum_constraint_nstates: int | None = None
 
-    def to_datum(self, molecule: Any) -> GroundStateDatum:
+    def to_datum(self, molecule: Any) -> MolecularTrainingDatum:
         kwargs = {
             name: _to_jax_or_none(getattr(self, name))
             for name in _ARRAY_FIELD_NAMES
         }
         kwargs.update({name: getattr(self, name) for name in _SCALAR_FIELD_NAMES})
-        return GroundStateDatum(molecule=molecule, **kwargs)
+        return MolecularTrainingDatum(molecule=molecule, **kwargs)
 
     def save(self, path: str | Path) -> Path:
         data_path = _bundle_path(path)
@@ -337,7 +307,7 @@ class GroundStateTargetBundle:
         return data_path
 
     @classmethod
-    def load(cls, path: str | Path) -> "GroundStateTargetBundle":
+    def load(cls, path: str | Path) -> "MolecularTargetBundle":
         data_path = _bundle_path(path)
         with np.load(data_path, allow_pickle=False) as handle:
             arrays = {name: np.asarray(handle[name]) for name in handle.files}
@@ -390,20 +360,20 @@ def prepare_input_info(
     )
 
 
-def bundle_ground_state_datum(
-    datum: GroundStateDatum,
+def bundle_molecular_datum(
+    datum: MolecularTrainingDatum,
     *,
     input_source: Any | None = None,
     system_label: str | None = None,
     basis_name: str | None = None,
-) -> GroundStateTargetBundle:
+) -> MolecularTargetBundle:
     source = datum.molecule if input_source is None else input_source
     kwargs = {
         name: _to_numpy_or_none(getattr(datum, name))
         for name in _ARRAY_FIELD_NAMES
     }
     kwargs.update({name: getattr(datum, name) for name in _SCALAR_FIELD_NAMES})
-    return GroundStateTargetBundle(
+    return MolecularTargetBundle(
         input_info=prepare_input_info(
             source,
             system_label=system_label,
@@ -413,68 +383,35 @@ def bundle_ground_state_datum(
     )
 
 
-def build_ground_state_target_bundle(
+def build_molecular_target_bundle(
     molecule: Any,
     *,
     system_label: str | None = None,
     basis_name: str | None = None,
-    target_total_energy: Any | None = None,
-    target_s1_energy: Any | None = None,
-    target_first_excited_total_energy: Any | None = None,
-    target_excitation_energies: Any | None = None,
+    target_e0_total_h: Any | None = None,
+    target_grid_density: Any | None = None,
+    target_density_matrix: Any | None = None,
+    target_s1_total_h: Any | None = None,
+    target_excitation_gaps_h: Any | None = None,
     target_oscillator_strengths: Any | None = None,
     target_spectrum_grid_ev: Any | None = None,
     target_spectrum_curve: Any | None = None,
     target_xc_potential: Any | None = None,
     target_xc_kernel: Any | None = None,
-    weight: float = 1.0,
-    density_constraint_weight: float = 0.0,
-    xc_potential_constraint_weight: float = 0.0,
-    xc_kernel_constraint_weight: float = 0.0,
-    xc_kernel_normalization_scale: float | None = None,
-    stationarity_constraint_weight: float = 0.0,
-    dm21_scf_regularization_weight: float = 0.0,
+    target_xc_kernel_normalization_scale: float | None = None,
     target_orbital_energies: Any | None = None,
     target_orbital_occupations: Any | None = None,
-    orbital_energy_constraint_weight: float = 0.0,
-    orbital_energy_constraint_window: int | None = None,
-    janak_frontier_constraint_weight: float = 0.0,
-    s1_constraint_weight: float = 0.0,
-    first_excited_total_energy_constraint_weight: float = 0.0,
-    excitation_constraint_weight: float = 0.0,
-    excitation_constraint_nstates: int | None = None,
-    oscillator_strength_constraint_weight: float = 0.0,
-    oscillator_strength_constraint_nstates: int | None = None,
-    spectrum_constraint_weight: float = 0.0,
-    spectrum_constraint_nstates: int | None = None,
-) -> GroundStateTargetBundle:
-    inferred_total_energy = (
-        getattr(molecule, "mf_energy", None)
-        if target_total_energy is None
-        else target_total_energy
-    )
-    if inferred_total_energy is None:
-        raise ValueError(
-            "target_total_energy must be provided when molecule.mf_energy is unavailable."
-        )
-    inferred_orbital_energies = (
-        getattr(molecule, "mo_energy", None)
-        if target_orbital_energies is None
-        else target_orbital_energies
-    )
-    inferred_orbital_occupations = (
-        getattr(molecule, "mo_occ", None)
-        if target_orbital_occupations is None
-        else target_orbital_occupations
-    )
-    datum = GroundStateDatum(
+    weight: float = 1.0,
+) -> MolecularTargetBundle:
+    datum = MolecularTrainingDatum(
         molecule=molecule,
-        target_total_energy=jnp.asarray(inferred_total_energy),
-        target_s1_energy=_to_jax_or_none(_to_numpy_or_none(target_s1_energy)),
-        target_first_excited_total_energy=_to_jax_or_none(
-            _to_numpy_or_none(target_first_excited_total_energy)
+        target_e0_total_h=_to_jax_or_none(_to_numpy_or_none(target_e0_total_h)),
+        target_grid_density=_to_jax_or_none(_to_numpy_or_none(target_grid_density)),
+        target_density_matrix=_to_jax_or_none(_to_numpy_or_none(target_density_matrix)),
+        target_s1_total_h=_to_jax_or_none(_to_numpy_or_none(target_s1_total_h)),
+        target_excitation_gaps_h=_to_jax_or_none(
+            _to_numpy_or_none(target_excitation_gaps_h)
         ),
-        target_excitation_energies=_to_jax_or_none(_to_numpy_or_none(target_excitation_energies)),
         target_oscillator_strengths=_to_jax_or_none(
             _to_numpy_or_none(target_oscillator_strengths)
         ),
@@ -482,30 +419,16 @@ def build_ground_state_target_bundle(
         target_spectrum_curve=_to_jax_or_none(_to_numpy_or_none(target_spectrum_curve)),
         target_xc_potential=_to_jax_or_none(_to_numpy_or_none(target_xc_potential)),
         target_xc_kernel=_to_jax_or_none(_to_numpy_or_none(target_xc_kernel)),
-        weight=float(weight),
-        density_constraint_weight=float(density_constraint_weight),
-        xc_potential_constraint_weight=float(xc_potential_constraint_weight),
-        xc_kernel_constraint_weight=float(xc_kernel_constraint_weight),
-        xc_kernel_normalization_scale=xc_kernel_normalization_scale,
-        stationarity_constraint_weight=float(stationarity_constraint_weight),
-        dm21_scf_regularization_weight=float(dm21_scf_regularization_weight),
-        target_orbital_energies=_to_jax_or_none(_to_numpy_or_none(inferred_orbital_energies)),
-        target_orbital_occupations=_to_jax_or_none(_to_numpy_or_none(inferred_orbital_occupations)),
-        orbital_energy_constraint_weight=float(orbital_energy_constraint_weight),
-        orbital_energy_constraint_window=orbital_energy_constraint_window,
-        janak_frontier_constraint_weight=float(janak_frontier_constraint_weight),
-        s1_constraint_weight=float(s1_constraint_weight),
-        first_excited_total_energy_constraint_weight=float(
-            first_excited_total_energy_constraint_weight
+        target_xc_kernel_normalization_scale=target_xc_kernel_normalization_scale,
+        target_orbital_energies=_to_jax_or_none(
+            _to_numpy_or_none(target_orbital_energies)
         ),
-        excitation_constraint_weight=float(excitation_constraint_weight),
-        excitation_constraint_nstates=excitation_constraint_nstates,
-        oscillator_strength_constraint_weight=float(oscillator_strength_constraint_weight),
-        oscillator_strength_constraint_nstates=oscillator_strength_constraint_nstates,
-        spectrum_constraint_weight=float(spectrum_constraint_weight),
-        spectrum_constraint_nstates=spectrum_constraint_nstates,
+        target_orbital_occupations=_to_jax_or_none(
+            _to_numpy_or_none(target_orbital_occupations)
+        ),
+        weight=float(weight),
     )
-    return bundle_ground_state_datum(
+    return bundle_molecular_datum(
         datum,
         input_source=molecule,
         system_label=system_label,
@@ -513,30 +436,30 @@ def build_ground_state_target_bundle(
     )
 
 
-def save_ground_state_target_bundle(
-    bundle: GroundStateTargetBundle,
+def save_molecular_target_bundle(
+    bundle: MolecularTargetBundle,
     path: str | Path,
 ) -> Path:
     return bundle.save(path)
 
 
-def load_ground_state_target_bundle(path: str | Path) -> GroundStateTargetBundle:
-    return GroundStateTargetBundle.load(path)
+def load_molecular_target_bundle(path: str | Path) -> MolecularTargetBundle:
+    return MolecularTargetBundle.load(path)
 
 
-def load_ground_state_datum(path: str | Path, molecule: Any) -> GroundStateDatum:
-    return load_ground_state_target_bundle(path).to_datum(molecule)
+def load_molecular_datum(path: str | Path, molecule: Any) -> MolecularTrainingDatum:
+    return load_molecular_target_bundle(path).to_datum(molecule)
 
 
 __all__ = [
     "InputInfo",
-    "GroundStateTargetBundle",
+    "MolecularTargetBundle",
     "input_info_atom_rows",
     "input_info_to_geometry_string",
     "prepare_input_info",
-    "bundle_ground_state_datum",
-    "build_ground_state_target_bundle",
-    "save_ground_state_target_bundle",
-    "load_ground_state_target_bundle",
-    "load_ground_state_datum",
+    "bundle_molecular_datum",
+    "build_molecular_target_bundle",
+    "save_molecular_target_bundle",
+    "load_molecular_target_bundle",
+    "load_molecular_datum",
 ]

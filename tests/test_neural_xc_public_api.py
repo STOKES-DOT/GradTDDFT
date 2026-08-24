@@ -54,6 +54,50 @@ def test_neural_xc_dm21_preset_returns_example_config():
     assert functional.semilocal_xc == tuple(DEFAULT_NEURAL_XC_SEMILOCAL_XC)
 
 
+def test_neural_xc_config_exposes_ground_state_pt2_mode():
+    config = neural_xc.Config(
+        channels=neural_xc.ChannelSpec(
+            pt2="local_exact",
+            ground_state_pt2="nograd",
+        ),
+        network=neural_xc.NetworkSpec(hidden_dims=(8,)),
+    )
+
+    functional = neural_xc.Functional(config=config)
+
+    assert functional.include_pt2_channel is True
+    assert functional.ground_state_pt2_mode == "nograd"
+    assert functional.pt2_channel_mode == "local_exact"
+
+
+@pytest.mark.parametrize(
+    ("mode_argument", "unsupported_mode"),
+    (
+        ("ground_state_hf_mode", "scf"),
+        ("ground_state_hf_mode", "frozen"),
+        ("ground_state_pt2_mode", "scf"),
+        ("ground_state_pt2_mode", "frozen"),
+    ),
+)
+def test_ground_state_nonlocal_channels_reject_unsupported_mode(
+    mode_argument,
+    unsupported_mode,
+):
+    with pytest.raises(ValueError, match="must be 'off' or 'nograd'"):
+        neural_xc.make_functional(
+            hidden_dims=(8,),
+            **{mode_argument: unsupported_mode},
+        )
+
+
+def test_neural_xc_rejects_unimplemented_simple_mlp_architecture():
+    with pytest.raises(ValueError, match="Expected 'graddft_residual'"):
+        neural_xc.make_functional(
+            hidden_dims=(8,),
+            network_architecture="simple_mlp",
+        )
+
+
 def test_neural_xc_lists_wrapped_jax_xc_components_and_exposes_status():
     names = neural_xc.available_semilocal_components()
     infos = neural_xc.available_semilocal_component_infos()
@@ -212,20 +256,24 @@ def _toy_trainable_density_functional():
 
 def test_neural_xc_trainer_runs_50_ground_state_steps_and_lowers_loss():
     molecule = _ToyMolecule()
-    datum = training.GroundStateDatum(
+    datum = training.MolecularTrainingDatum(
         molecule=molecule,
-        target_total_energy=jnp.asarray(2.125),
+        target_e0_total_h=jnp.asarray(2.125),
     )
     trainer = training.NeuralXCTrainer(
         functional=_toy_trainable_density_functional(),
         molecules=[datum],
     )
 
-    result = trainer.kernel(steps=50, learning_rate=0.1)
+    result = trainer.kernel(
+        steps=50,
+        learning_rate=0.1,
+        training_config=training.MolecularTrainingConfig(e0_total_mae_weight=1.0),
+    )
 
-    assert len(result.history["loss"]) == 50
-    assert result.history["loss"][-1] < result.history["loss"][0]
-    assert result.final_metrics["loss"] == result.history["loss"][-1]
+    assert len(result.history["total_loss"]) == 50
+    assert result.history["total_loss"][-1] < result.history["total_loss"][0]
+    assert result.final_metrics["total_loss"] == result.history["total_loss"][-1]
     assert result.params is not None
 
 
@@ -239,9 +287,10 @@ def test_neural_xc_trainer_accepts_explicit_training_config(monkeypatch):
         def _step(state, data):
             del data
             return state, {
-                "loss": jnp.asarray([0.0]),
-                "energy_mae": jnp.asarray([0.0]),
-                "density_mse": jnp.asarray([0.0]),
+                "total_loss": jnp.asarray([0.0]),
+                "e0_total_mae": jnp.asarray([0.0]),
+                "grid_density_mse": jnp.asarray([0.0]),
+                "density_matrix_mse": jnp.asarray([0.0]),
                 "orbital_energy_mae": jnp.asarray([0.0]),
                 "scf_cycles_mean": jnp.asarray([1.0]),
                 "scf_converged_fraction": jnp.asarray([1.0]),
@@ -251,15 +300,15 @@ def test_neural_xc_trainer_accepts_explicit_training_config(monkeypatch):
 
     monkeypatch.setattr(
         neural_xc_trainer_module,
-        "make_ground_state_train_step",
+        "make_molecular_train_step",
         _fake_make_train_step,
     )
     molecule = _ToyMolecule()
-    datum = training.GroundStateDatum(
+    datum = training.MolecularTrainingDatum(
         molecule=molecule,
-        target_total_energy=jnp.asarray(0.0),
+        target_e0_total_h=jnp.asarray(0.0),
     )
-    cfg = training.GroundStateTrainingConfig(
+    cfg = training.MolecularTrainingConfig(
         mode="self_consistent",
         scf_gradient_mode="impl",
     )
@@ -272,71 +321,6 @@ def test_neural_xc_trainer_accepts_explicit_training_config(monkeypatch):
 
     assert captured["training_config"] is cfg
     assert result.history["scf_converged"] == [1.0]
-
-
-def test_ground_state_datum_from_molecule_requires_cached_hfx_features():
-    molecule = _ToyMolecule()
-
-    with pytest.raises(ValueError, match="hfx_local"):
-        training.GroundStateDatum.from_molecule(
-            molecule,
-            target_total_energy=jnp.asarray(0.0),
-            require_hfx=True,
-        )
-
-    molecule.hfx_local = jnp.zeros((2, 2, 1))
-    datum = training.GroundStateDatum.from_molecule(
-        molecule,
-        target_total_energy=jnp.asarray(0.0),
-        require_hfx=True,
-    )
-
-    assert datum.molecule is molecule
-    assert getattr(datum.molecule, "hfx_nu", None) is None
-
-
-def test_ground_state_datum_from_molecule_requires_pt2_fields_when_pt2_enabled():
-    from td_graddft.scf.molecules import QuadratureGrid, RestrictedMolecule
-
-    grid = QuadratureGrid(coords=jnp.zeros((2, 3)), weights=jnp.ones((2,)))
-    molecule = RestrictedMolecule(
-        ao=jnp.ones((2, 2)),
-        ao_deriv1=jnp.ones((4, 2, 2)),
-        grid=grid,
-        dipole_integrals=jnp.zeros((3, 2, 2)),
-        rep_tensor=jnp.zeros((2, 2, 2, 2)),
-        rdm1=jnp.stack([jnp.eye(2), jnp.eye(2)], axis=0),
-        h1e=jnp.eye(2),
-        nuclear_repulsion=0.0,
-        mo_coeff=jnp.stack([jnp.eye(2), jnp.eye(2)], axis=0),
-        mo_occ=jnp.asarray([[1.0, 0.0], [1.0, 0.0]]),
-        mo_energy=jnp.asarray([[-0.5, 0.1], [-0.5, 0.1]]),
-        mf_energy=-1.0,
-        hfx_local=jnp.zeros((2, 2, 1)),
-        hfx_nu=jnp.zeros((1, 2, 2, 2)),
-    )
-    functional = neural_xc.Functional(
-        hidden_dims=(8,),
-        include_pt2_channel=True,
-        pt2_channel_mode="local_exact",
-    )
-
-    with pytest.raises(ValueError, match="compute_local_pt2_features=True"):
-        training.GroundStateDatum.from_molecule(
-            molecule,
-            target_total_energy=-1.0,
-            functional=functional,
-        )
-
-
-def test_ground_state_datum_from_reference_alias_remains_available():
-    molecule = _ToyMolecule()
-    datum = training.GroundStateDatum.from_reference(
-        molecule,
-        target_total_energy=jnp.asarray(0.0),
-    )
-
-    assert datum.molecule is molecule
 
 
 def test_training_coulomb_energy_accepts_packed_eri_pair_matrix():

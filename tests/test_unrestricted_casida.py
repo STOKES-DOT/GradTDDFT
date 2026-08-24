@@ -53,15 +53,10 @@ def test_unrestricted_casida_gen_tdhf_vind_shapes():
     reference = unrestricted_reference_from_pyscf(mf)
 
     solver = UnrestrictedCasidaTDDFT(reference)
-    matrices = solver.build_matrices()
-    vind, flat_a, flat_b = solver.gen_tdhf_vind()
+    vind = solver.gen_tdhf_vind()
 
-    assert flat_a.shape == flat_b.shape
-    assert flat_a.shape[0] == flat_a.shape[1]
-    assert flat_a.shape == matrices.a_matrix.shape
-    assert flat_b.shape == matrices.b_matrix.shape
-
-    n = flat_a.shape[0]
+    n = int(reference.nocc_alpha * (reference.mo_coeff.shape[-1] - reference.nocc_alpha))
+    n += int(reference.nocc_beta * (reference.mo_coeff.shape[-1] - reference.nocc_beta))
     z = np.random.default_rng(0).normal(size=(3, 2 * n))
     out = np.asarray(vind(z))
     assert out.shape == z.shape

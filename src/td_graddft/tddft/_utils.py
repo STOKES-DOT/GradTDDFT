@@ -12,20 +12,6 @@ def _symmetrize(matrix: Array) -> Array:
     return 0.5 * (matrix + matrix.T.conj())
 
 
-def _matrix_power_symmetric(matrix: Array, power: float, eps: float) -> Array:
-    eigvals, eigvecs = jnp.linalg.eigh(_symmetrize(matrix))
-    clipped = jnp.maximum(eigvals, eps)
-    return (eigvecs * (clipped**power)) @ eigvecs.T.conj()
-
-
-def _casida_metric_factor(matrix: Array, eps: float) -> Array:
-    """Lower-triangular factor L with L L^T ~= matrix for Casida transforms."""
-
-    sym = _symmetrize(matrix)
-    eye = jnp.eye(sym.shape[0], dtype=sym.dtype)
-    return jnp.linalg.cholesky(sym + eps * eye)
-
-
 def _restricted_channel(molecule: Any) -> tuple[Array, Array, Array]:
     mo_coeff = jnp.asarray(molecule.mo_coeff)
     mo_occ = jnp.asarray(molecule.mo_occ)

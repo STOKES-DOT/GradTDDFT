@@ -1,16 +1,16 @@
 """Standalone tooling modules for TD-GradDFT experiments."""
 
 from .data_process import (
-    GroundStateTargetBundle,
+    MolecularTargetBundle,
     InputInfo,
-    build_ground_state_target_bundle,
-    bundle_ground_state_datum,
+    build_molecular_target_bundle,
+    bundle_molecular_datum,
     input_info_atom_rows,
     input_info_to_geometry_string,
-    load_ground_state_datum,
-    load_ground_state_target_bundle,
+    load_molecular_datum,
+    load_molecular_target_bundle,
     prepare_input_info,
-    save_ground_state_target_bundle,
+    save_molecular_target_bundle,
 )
 from .fractional_charge import (
     FractionalChargeAnalysisConfig,
@@ -28,15 +28,15 @@ from .fractional_charge import (
 
 __all__ = [
     "InputInfo",
-    "GroundStateTargetBundle",
+    "MolecularTargetBundle",
     "input_info_atom_rows",
     "input_info_to_geometry_string",
     "prepare_input_info",
-    "bundle_ground_state_datum",
-    "build_ground_state_target_bundle",
-    "save_ground_state_target_bundle",
-    "load_ground_state_target_bundle",
-    "load_ground_state_datum",
+    "bundle_molecular_datum",
+    "build_molecular_target_bundle",
+    "save_molecular_target_bundle",
+    "load_molecular_target_bundle",
+    "load_molecular_datum",
     "FractionalChargeAnalysisConfig",
     "FractionalChargeAnalysisResult",
     "FractionalChargeOutputConfig",

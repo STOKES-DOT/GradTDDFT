@@ -216,10 +216,10 @@ def plot_training_curves(path: Path, training: TrainingRun, *, title: str) -> No
     axes[0].grid(alpha=0.2)
 
     if np.any(density_penalty_values > 0.0):
-        axes[1].plot(steps, np.maximum(density_penalty_values, 1e-16), lw=1.8)
+        axes[1].plot(steps, np.maximum(density_penalty_values, 1e-16), lw=1.8, label="grid")
         axes[1].set_yscale("log")
     else:
-        axes[1].plot(steps, density_penalty_values, lw=1.8)
+        axes[1].plot(steps, density_penalty_values, lw=1.8, label="grid")
         axes[1].set_yscale("linear")
         axes[1].text(
             0.03,
@@ -231,7 +231,7 @@ def plot_training_curves(path: Path, training: TrainingRun, *, title: str) -> No
             va="top",
         )
     axes[1].set_xlabel("Step")
-    axes[1].set_ylabel("Density Penalty")
+    axes[1].set_ylabel("Penalty")
     axes[1].set_title("Density Matching")
     axes[1].grid(alpha=0.2)
 

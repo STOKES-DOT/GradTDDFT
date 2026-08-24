@@ -7,16 +7,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..data.integrals import eri_pair_matrix_to_mo_eri_slices, precompile_eri_kernels
+from ..data.integrals import precompile_eri_kernels
 from ..data.integrals.libcint import LibcintGeometryGradPolicy
 from ..data.molecule import MoleculeSpec
 from ..xc_backend.jax_libxc import hybrid_coeff, parse_xc
 from ..neural_xc.inputs import (
     _local_hfx_features_from_basis_dm,
-    _local_pt2_feature_from_restricted_orbitals,
+    _local_pt2_feature_and_fock_response_from_restricted_orbitals,
+    _local_pt2_feature_from_unrestricted_orbitals,
 )
 from .core import _contains_jax_tracer, _host_float_unless_traced
-from .features import _restricted_response_eri_slices_from_mo_tensor
 from .inputs import build_rks_integral_inputs, build_uks_integral_inputs
 from .molecules import QuadratureGrid, RestrictedMolecule, UnrestrictedMolecule
 from .rks import RKSConfig, run_rks_from_integrals
@@ -39,23 +39,7 @@ def _restricted_reference_array_packaging(
     overlap: Any,
     df_factors: Any | None,
     dtype: Any,
-    traced: bool,
 ) -> dict[str, Any]:
-    if traced:
-        return {
-            "mo_coeff": jnp.stack([jnp.asarray(mo_coeff, dtype=dtype)] * 2, axis=0),
-            "mo_occ": jnp.stack([jnp.asarray(mo_occ, dtype=dtype)] * 2, axis=0),
-            "mo_energy": jnp.stack([jnp.asarray(mo_energy, dtype=dtype)] * 2, axis=0),
-            "rdm1": jnp.stack([jnp.asarray(half_dm, dtype=dtype)] * 2, axis=0),
-            "h1e": jnp.asarray(h1e, dtype=dtype),
-            "atom_coords": jnp.asarray(atom_coords, dtype=dtype),
-            "atom_charges": jnp.asarray(atom_charges, dtype=dtype),
-            "overlap_matrix": jnp.asarray(overlap, dtype=dtype),
-            "df_factors": (
-                jnp.asarray(df_factors, dtype=dtype) if df_factors is not None else None
-            ),
-        }
-
     host_dtype = np.dtype(dtype)
     mo_coeff_arr = _host_array(mo_coeff, host_dtype)
     mo_occ_arr = _host_array(mo_occ, host_dtype)
@@ -76,11 +60,8 @@ def _restricted_reference_array_packaging(
     }
 
 
-def _empty_rep_tensor_like(overlap: Any, *, traced: bool) -> Any:
-    dtype = jnp.asarray(overlap).dtype if traced else np.asarray(overlap).dtype
-    if traced:
-        return jnp.zeros((0, 0, 0, 0), dtype=dtype)
-    return np.zeros((0, 0, 0, 0), dtype=dtype)
+def _empty_rep_tensor_like(overlap: Any) -> np.ndarray:
+    return np.zeros((0, 0, 0, 0), dtype=np.asarray(overlap).dtype)
 
 
 def restricted_molecule_from_spec_with_jax_rks(
@@ -116,30 +97,11 @@ def restricted_molecule_from_spec_with_jax_rks(
 ) -> RestrictedMolecule:
     """Build a restricted strict-JAX RKS reference directly from molecule specs."""
 
-    if isinstance(atom, MoleculeSpec):
-        charge = int(atom.charge)
-        spin = int(atom.spin)
-    if int(spin) != 0:
-        raise NotImplementedError(
-            "restricted_molecule_from_spec_with_jax_rks only supports closed-shell systems."
-        )
-    if not bool(cart):
-        raise NotImplementedError(
-            "restricted_molecule_from_spec_with_jax_rks currently supports cart=True only."
-        )
-
     xc_spec_resolved = str(xc_spec)
     parse_xc(xc_spec_resolved)
     cfg = RKSConfig(xc_spec=xc_spec_resolved) if rks_config is None else rks_config
     if cfg.xc_spec != xc_spec_resolved:
         cfg = replace(cfg, xc_spec=xc_spec_resolved)
-
-    libcint_grad_policy_mode = str(libcint_geometry_grad_policy).lower()
-    if libcint_grad_policy_mode not in {"analytic", "error", "zero"}:
-        raise ValueError(
-            f"Unsupported libcint_geometry_grad_policy={libcint_geometry_grad_policy!r}. "
-            "Expected 'analytic', 'error', or 'zero'."
-        )
 
     exact_exchange_fraction = float(hybrid_coeff(xc_spec_resolved))
     scf_inputs = build_rks_integral_inputs(
@@ -206,7 +168,9 @@ def restricted_molecule_from_spec_with_jax_rks(
     mo_energy = _host_array(rks.mo_energy)
     hfx_local = None
     hfx_nu = None
+    hfx_fxx = None
     pt2_local = None
+    pt2_fock_response = None
     reference_eri_pair_matrix = None
     if compute_local_hfx_features:
         hfx_result = _local_hfx_features_from_basis_dm(
@@ -217,11 +181,12 @@ def restricted_molecule_from_spec_with_jax_rks(
             omega_values=tuple(float(omega) for omega in hfx_omega_values),
             chunk_size=hfx_chunk_size,
             return_nu=bool(compute_local_hfx_aux),
+            return_fxx=True,
         )
         if compute_local_hfx_aux:
-            hfx_local, hfx_nu = hfx_result
+            hfx_local, hfx_nu, hfx_fxx = hfx_result
         else:
-            hfx_local = hfx_result
+            hfx_local, hfx_fxx = hfx_result
     mf_energy = (
         _host_float_unless_traced(rks.total_energy)
         if energy_target is None
@@ -231,46 +196,32 @@ def restricted_molecule_from_spec_with_jax_rks(
     if cfg.jk_backend == "df":
         if df_factors is None:
             raise RuntimeError("DF backend requested but df_factors were not constructed.")
-        eri_ovov = None
-        eri_ovvo = None
-        eri_oovv = None
-        rep_tensor = _empty_rep_tensor_like(s, traced=False)
+        rep_tensor = _empty_rep_tensor_like(s)
     else:
         if eri is None and eri_pair_matrix is None:
             if cfg.jk_backend == "direct":
                 eri_pair_matrix = scf_inputs.response_eri_pair_matrix()
             else:
                 raise RuntimeError("Full ERI backend requested but exact ERI data is missing.")
-        needs_exchange_slices = abs(exact_exchange_fraction) > 1e-14
         if eri_pair_matrix is not None:
             reference_eri_pair_matrix = _host_array(eri_pair_matrix, np.asarray(s).dtype)
-            eri_ovov, eri_ovvo, eri_oovv = eri_pair_matrix_to_mo_eri_slices(
-                eri_pair_matrix,
-                rks.mo_coeff,
-                nocc=nocc,
-                include_oovv=needs_exchange_slices,
-            )
-            rep_tensor = _empty_rep_tensor_like(s, traced=False)
+            rep_tensor = _empty_rep_tensor_like(s)
         else:
-            eri_ovov, eri_ovvo, eri_oovv = _restricted_response_eri_slices_from_mo_tensor(
-                np.asarray(eri),
-                np.asarray(rks.mo_coeff),
-                nocc,
-                include_oovv=needs_exchange_slices,
-            )
             rep_tensor = jnp.asarray(eri)
 
     if compute_local_pt2_features:
-        pt2_local = _local_pt2_feature_from_restricted_orbitals(
-            ao,
-            mo_coeff,
-            mo_occ,
-            mo_energy,
-            rep_tensor=rep_tensor,
-            eri_ovov=eri_ovov,
-            df_factors=df_factors,
-            nocc=nocc,
-            density_floor=cfg.density_floor,
+        pt2_local, pt2_fock_response = (
+            _local_pt2_feature_and_fock_response_from_restricted_orbitals(
+                ao,
+                mo_coeff,
+                mo_occ,
+                mo_energy,
+                rep_tensor=rep_tensor,
+                eri_pair_matrix=eri_pair_matrix,
+                df_factors=df_factors,
+                nocc=nocc,
+                density_floor=cfg.density_floor,
+            )
         )
 
     reference_arrays = _restricted_reference_array_packaging(
@@ -284,7 +235,6 @@ def restricted_molecule_from_spec_with_jax_rks(
         overlap=s,
         df_factors=df_factors,
         dtype=jnp.asarray(s).dtype,
-        traced=False,
     )
     return RestrictedMolecule(
         ao=ao,
@@ -311,13 +261,12 @@ def restricted_molecule_from_spec_with_jax_rks(
             else None
         ),
         hfx_local=hfx_local,
+        hfx_fxx=hfx_fxx,
         hfx_nu=hfx_nu,
         pt2_local=pt2_local,
+        pt2_fock_response=pt2_fock_response,
         df_factors=reference_arrays["df_factors"],
         eri_pair_matrix=reference_eri_pair_matrix,
-        eri_ovov=eri_ovov,
-        eri_ovvo=eri_ovvo,
-        eri_oovv=eri_oovv,
         scf_converged=bool(rks.converged),
     )
 
@@ -446,6 +395,7 @@ def unrestricted_molecule_from_spec_with_jax_uks(
     energy_target: float | None = None,
     compute_local_hfx_features: bool = False,
     compute_local_hfx_aux: bool = False,
+    compute_local_pt2_features: bool = False,
     hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
     hfx_chunk_size: int = 512,
     init_guess: Any = "minao",
@@ -459,29 +409,11 @@ def unrestricted_molecule_from_spec_with_jax_uks(
 ) -> UnrestrictedMolecule:
     """Build an unrestricted strict-JAX UKS reference directly from molecule specs."""
 
-    if not bool(cart):
-        raise NotImplementedError(
-            "unrestricted_molecule_from_spec_with_jax_uks currently supports cart=True only."
-        )
-    if isinstance(atom, MoleculeSpec):
-        charge = int(atom.charge)
-        spin = int(atom.spin)
-
     xc_spec_resolved = str(xc_spec)
     parse_xc(xc_spec_resolved)
     cfg = UKSConfig(xc_spec=xc_spec_resolved) if uks_config is None else uks_config
     if cfg.xc_spec != xc_spec_resolved:
-        cfg = UKSConfig(
-            xc_spec=xc_spec_resolved,
-            max_cycle=cfg.max_cycle,
-            conv_tol=cfg.conv_tol,
-            conv_tol_density=cfg.conv_tol_density,
-            damping=cfg.damping,
-            level_shift=cfg.level_shift,
-            orthogonalization_eps=cfg.orthogonalization_eps,
-            density_floor=cfg.density_floor,
-            potential_clip=cfg.potential_clip,
-        )
+        cfg = replace(cfg, xc_spec=xc_spec_resolved)
 
     scf_inputs = build_uks_integral_inputs(
         atom=atom,
@@ -538,6 +470,9 @@ def unrestricted_molecule_from_spec_with_jax_uks(
 
     hfx_local = None
     hfx_nu = None
+    hfx_fxx = None
+    pt2_local = None
+    pt2_fock_response = None
     if compute_local_hfx_features:
         hfx_result = _local_hfx_features_from_basis_dm(
             basis_cart,
@@ -547,11 +482,22 @@ def unrestricted_molecule_from_spec_with_jax_uks(
             omega_values=tuple(float(omega) for omega in hfx_omega_values),
             chunk_size=hfx_chunk_size,
             return_nu=bool(compute_local_hfx_aux),
+            return_fxx=True,
         )
         if compute_local_hfx_aux:
-            hfx_local, hfx_nu = hfx_result
+            hfx_local, hfx_nu, hfx_fxx = hfx_result
         else:
-            hfx_local = hfx_result
+            hfx_local, hfx_fxx = hfx_result
+    if compute_local_pt2_features:
+        pt2_local, pt2_fock_response = _local_pt2_feature_from_unrestricted_orbitals(
+            ao,
+            jnp.stack([uks.mo_coeff_alpha, uks.mo_coeff_beta], axis=0),
+            jnp.stack([uks.mo_occ_alpha, uks.mo_occ_beta], axis=0),
+            jnp.stack([uks.mo_energy_alpha, uks.mo_energy_beta], axis=0),
+            rep_tensor=jnp.asarray(eri),
+            density_floor=cfg.density_floor,
+            return_fock_response=True,
+        )
 
     mf_energy = (
         _host_float_unless_traced(uks.total_energy)
@@ -586,7 +532,11 @@ def unrestricted_molecule_from_spec_with_jax_uks(
             else None
         ),
         hfx_local=hfx_local,
+        hfx_fxx=hfx_fxx,
         hfx_nu=hfx_nu,
+        pt2_local=pt2_local,
+        pt2_fock_response=pt2_fock_response,
+        df_factors=scf_inputs.df_factors,
     )
 
 
@@ -605,8 +555,15 @@ def build_unrestricted_reference_from_facade(
     chkfile: str | None,
     sap_basis: Any | None,
     init_guess_chkfile_project: bool | None,
-    reference_builder: Any,
+    compute_local_hfx_features: bool = False,
+    compute_local_hfx_aux: bool = False,
+    compute_local_pt2_features: bool = False,
+    hfx_omega_values: tuple[float, ...] = (0.0, 0.4),
+    hfx_chunk_size: int = 512,
+    reference_builder: Any | None = None,
 ) -> Any:
+    if reference_builder is None:
+        raise ValueError("reference_builder must be provided for unrestricted facade references.")
     return reference_builder(
         atom=spec,
         basis=mol.basis,
@@ -621,6 +578,11 @@ def build_unrestricted_reference_from_facade(
         grid_ao_backend=grid_ao_backend,
         integral_backend=integral_backend,
         libcint_geometry_grad_policy=geometry_grad_policy,
+        compute_local_hfx_features=compute_local_hfx_features,
+        compute_local_hfx_aux=compute_local_hfx_aux,
+        compute_local_pt2_features=compute_local_pt2_features,
+        hfx_omega_values=hfx_omega_values,
+        hfx_chunk_size=hfx_chunk_size,
         init_guess=init_guess,
         chkfile=chkfile,
         init_guess_sap_basis=sap_basis,
