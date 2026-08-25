@@ -24,6 +24,19 @@ def _bounded_ratio(numerator: Any, denominator: Any) -> jnp.ndarray:
     return beta * ratio / (1.0 + beta * ratio)
 
 
+@jax.custom_jvp
+def _safe_sqrt_nonnegative(value: Any) -> jnp.ndarray:
+    return jnp.sqrt(jnp.maximum(jnp.asarray(value), 0.0))
+
+
+@_safe_sqrt_nonnegative.defjvp
+def _safe_sqrt_nonnegative_jvp(primals, tangents):
+    (value,), (tangent,) = primals, tangents
+    root = _safe_sqrt_nonnegative(value)
+    denominator = jnp.where(root > 0.0, 2.0 * root, 1.0)
+    return root, jnp.where(jnp.asarray(value) > 0.0, tangent / denominator, 0.0)
+
+
 def canonical_input_features(
     features: RestrictedFeatureBundle,
     hfx_a: Any,
@@ -40,9 +53,15 @@ def canonical_input_features(
     norm_grad_b = jnp.maximum(features.sigma_bb, 0.0)
     norm_grad = jnp.maximum(features.sigma, 0.0)
     tau_prefactor = (3.0 / 5.0) * (6.0 * jnp.pi**2) ** (2.0 / 3.0)
-    reduced_grad = _bounded_ratio(jnp.sqrt(norm_grad), rho ** (4.0 / 3.0))
-    reduced_grad_a = _bounded_ratio(jnp.sqrt(norm_grad_a), rho_a ** (4.0 / 3.0))
-    reduced_grad_b = _bounded_ratio(jnp.sqrt(norm_grad_b), rho_b ** (4.0 / 3.0))
+    reduced_grad = _bounded_ratio(
+        _safe_sqrt_nonnegative(norm_grad), rho ** (4.0 / 3.0)
+    )
+    reduced_grad_a = _bounded_ratio(
+        _safe_sqrt_nonnegative(norm_grad_a), rho_a ** (4.0 / 3.0)
+    )
+    reduced_grad_b = _bounded_ratio(
+        _safe_sqrt_nonnegative(norm_grad_b), rho_b ** (4.0 / 3.0)
+    )
     reduced_tau_a = _bounded_ratio(tau_a, tau_prefactor * rho_a ** (5.0 / 3.0))
     reduced_tau_b = _bounded_ratio(tau_b, tau_prefactor * rho_b ** (5.0 / 3.0))
     hfx_a = jnp.asarray(hfx_a)

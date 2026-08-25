@@ -7,7 +7,10 @@ import optax
 import pytest
 from flax import linen as nn
 
-from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis
+from td_graddft.xc_backend.jax_libxc import (
+    RestrictedFeatureBundle,
+    b3lyp_component_basis,
+)
 from td_graddft.xc_backend import jax_xc_adapter
 from td_graddft.neural_xc import (
     ResidualMixingMLP,
@@ -181,6 +184,26 @@ def _make_open_shell_toy_molecule():
         ),
         hfx_omega_values=(0.0, 0.233),
     )
+
+
+def test_canonical_inputs_have_finite_derivative_for_empty_spin_channel():
+    def objective(beta_gradient):
+        features = RestrictedFeatureBundle(
+            rho_a=jnp.array([1.0]),
+            rho_b=jnp.array([0.0]),
+            sigma_aa=jnp.array([0.2]),
+            sigma_ab=jnp.array([0.0]),
+            sigma_bb=jnp.array([jnp.vdot(beta_gradient, beta_gradient).real]),
+            tau_a=jnp.array([0.2]),
+            tau_b=jnp.array([0.0]),
+        )
+        hfx = jnp.zeros((1, 2))
+        return jnp.sum(canonical_input_features(features, hfx, hfx))
+
+    gradient = jax.grad(objective)(jnp.zeros(3))
+
+    assert jnp.all(jnp.isfinite(gradient))
+    assert jnp.allclose(gradient, 0.0)
 
 
 def _toy_hfx_nu_cache():
