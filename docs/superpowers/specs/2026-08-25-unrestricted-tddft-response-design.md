@@ -207,10 +207,18 @@ Implementation follows red-green-refactor order.
 
 ### Traditional numerical tests
 
-- H2+ B3LYP/def2-SVP, grid level 2, using identical PySCF orbitals:
-  compare the first four TDA and full-TDDFT roots against PySCF.
-- Repeat a smaller PBE case to exercise a non-hybrid GGA.
+- H2+ B3LYP/def2-SVP, grid level 2, using identical PySCF orbitals, covers an
+  empty beta occupied space.
+- OH B3LYP/def2-SVP covers a conventional doublet with alpha and beta
+  occupied-virtual channels.
+- O2 PBE/def2-SVP covers a triplet and a non-hybrid GGA.
+- Compare the first four TDA and full-TDDFT roots and oscillator strengths
+  against PySCF for H2+ and the lowest stable matched roots for OH and O2.
 - Compare raw operator columns where root matching alone is insufficient.
+- Compare oscillator strengths root by root for isolated roots. For degenerate
+  or numerically near-degenerate manifolds, compare the sum of oscillator
+  strengths over the matched manifold because eigenvectors may rotate within
+  that subspace.
 
 ### Neural tests
 
@@ -231,11 +239,17 @@ The change is complete when:
 
 1. Explicit B3LYP and PBE unrestricted TDA/full-TDDFT no longer raise for a
    missing spin kernel.
-2. The first four H2+ B3LYP/def2-SVP TDA and full-TDDFT roots agree with PySCF
-   within `1e-2 eV` on identical orbitals.
-3. JAX UKS orbitals give consistent excitation energies within the known SCF
+2. Traditional unrestricted excitation energies use the same tolerance as the
+   existing restricted B3LYP comparison: `atol=8e-4 Hartree` and `rtol=2e-3`.
+3. Unrestricted oscillator strengths use the same tolerance as the existing
+   restricted B3LYP comparison: `atol=2e-3` and `rtol=2e-2`, with summed
+   strengths used for matched degenerate manifolds.
+4. H2+, OH, and O2 cover empty-beta, doublet, and triplet response behavior,
+   respectively; the applicable TDA and full-TDDFT comparisons pass on
+   identical PySCF orbitals.
+5. JAX UKS orbitals give consistent excitation energies within the known SCF
    orbital tolerance.
-4. Neural unrestricted response is fully differentiable and uses all GGA
+6. Neural unrestricted response is fully differentiable and uses all GGA
    response variables.
-5. No restricted source file is modified.
-6. No dense `(ngrids, 8, 8)` Hessian is retained or cached.
+7. No restricted source file is modified.
+8. No dense `(ngrids, 8, 8)` Hessian is retained or cached.
