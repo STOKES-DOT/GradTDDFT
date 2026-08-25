@@ -32,8 +32,7 @@ from .rks import (
     _vxc_matrix_from_grid_potential,
 )
 from ..xc_backend.jax_libxc import (
-    RestrictedFeatureBundle,
-    eval_xc_energy_density_unrestricted,
+    eval_xc_energy_density_unrestricted_from_density_gradients,
     hybrid_coeff,
     parse_xc,
     xc_type,
@@ -110,8 +109,8 @@ def _point_unrestricted_xc_value_and_grad_kernel(
     xc_kind_norm = str(xc_kind).upper()
 
     def point_energy(variables: Array) -> Array:
-        rho_a = jnp.maximum(variables[0], 0.0)
-        rho_b = jnp.maximum(variables[1], 0.0)
+        rho_a = jnp.where(variables[0] >= 0.0, variables[0], 0.0)
+        rho_b = jnp.where(variables[1] >= 0.0, variables[1], 0.0)
         zero_grad = jnp.zeros((3,), dtype=variables.dtype)
         if xc_kind_norm == "LDA":
             grad_a = zero_grad
@@ -121,16 +120,13 @@ def _point_unrestricted_xc_value_and_grad_kernel(
             grad_b = variables[5:8]
         else:
             raise ValueError(f"Unsupported XC kind={xc_kind_norm!r}.")
-        features = RestrictedFeatureBundle(
-            rho_a=rho_a,
-            rho_b=rho_b,
-            sigma_aa=jnp.dot(grad_a, grad_a),
-            sigma_ab=jnp.dot(grad_a, grad_b),
-            sigma_bb=jnp.dot(grad_b, grad_b),
-            tau_a=jnp.asarray(0.0, dtype=variables.dtype),
-            tau_b=jnp.asarray(0.0, dtype=variables.dtype),
+        return eval_xc_energy_density_unrestricted_from_density_gradients(
+            xc_spec_norm,
+            rho_a,
+            rho_b,
+            grad_a,
+            grad_b,
         )
-        return eval_xc_energy_density_unrestricted(xc_spec_norm, features)
 
     return jax.jit(jax.vmap(jax.value_and_grad(point_energy)))
 

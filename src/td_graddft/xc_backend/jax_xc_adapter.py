@@ -25,6 +25,7 @@ class JAXXCFunctionalInfo:
 
 
 _DENSITY_FLOOR = 1e-12
+_UNRESTRICTED_DERIVATIVE_FLOOR = 1e-15
 
 _STRICT_JAX_XC_FUNCTIONALS = {
     "lda_x",
@@ -418,6 +419,58 @@ def _evaluate_factory_from_unrestricted_features(
     else:
         value = jax.vmap(point_eval)(rho_a, rho_b, grad_a, grad_b, tau_a, tau_b)
     return jnp.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def eval_jax_xc_energy_density_from_unrestricted_density_gradients(
+    name: str,
+    rho_a: Any,
+    rho_b: Any,
+    grad_a: Any,
+    grad_b: Any,
+    *,
+    omega: Any | None = None,
+    allow_experimental_jax_xc: bool = False,
+) -> jnp.ndarray:
+    """Evaluate one polarized local XC contribution from spin densities and gradients."""
+
+    info = jax_xc_functional_info(name)
+    _raise_if_not_allowed(info, allow_experimental_jax_xc=allow_experimental_jax_xc)
+    if info.family == "MGGA":
+        raise ValueError("Direct unrestricted density-gradient evaluation does not support MGGA.")
+    module, _ = load_jax_xc()
+    try:
+        factory = getattr(module, info.name)
+    except AttributeError as exc:
+        raise KeyError(f"Installed jax_xc does not expose functional {info.name!r}.") from exc
+    functional = factory(
+        polarized=True,
+        **_factory_kwargs(info.name, omega),
+    )
+
+    # Evaluate the one-sided derivative where a spin density or its gradient vanishes.
+    rho_a_eff = jnp.asarray(rho_a) + _UNRESTRICTED_DERIVATIVE_FLOOR
+    rho_b_eff = jnp.asarray(rho_b) + _UNRESTRICTED_DERIVATIVE_FLOOR
+    grad_a = jnp.asarray(grad_a)
+    grad_b = jnp.asarray(grad_b)
+    gradient_floor = jnp.zeros_like(grad_a).at[0].set(_UNRESTRICTED_DERIVATIVE_FLOOR)
+    grad_a_eff = grad_a + gradient_floor
+    grad_b_eff = grad_b + gradient_floor
+    origin = jnp.zeros((3,), dtype=rho_a_eff.dtype)
+
+    def rho_fn(displacement):
+        return jnp.asarray(
+            [
+                rho_a_eff + jnp.dot(grad_a_eff, displacement),
+                rho_b_eff + jnp.dot(grad_b_eff, displacement),
+            ],
+            dtype=rho_a_eff.dtype,
+        )
+
+    epsilon_xc = functional(rho_fn, origin)
+    return (rho_a_eff + rho_b_eff) * jnp.asarray(
+        _coerce_functional_value(epsilon_xc),
+        dtype=rho_a_eff.dtype,
+    )
 
 
 def eval_jax_xc_from_restricted_features(

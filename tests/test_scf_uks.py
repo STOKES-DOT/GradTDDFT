@@ -1,10 +1,14 @@
 import numpy as np
 import pytest
+import jax
 import jax.numpy as jnp
 
 from td_graddft.scf import UKSConfig, run_uks_from_integrals
 from td_graddft.scf.inputs import build_uks_integral_inputs
-from td_graddft.scf.uks import run_unrestricted_scf_scan
+from td_graddft.scf.uks import (
+    _point_unrestricted_xc_value_and_grad_kernel,
+    run_unrestricted_scf_scan,
+)
 
 
 def _toy_grid():
@@ -173,23 +177,25 @@ def test_h2plus_uks_b3lyp_matches_pyscf_reference_energy():
     del pyscf
     from pyscf import dft, gto
 
-    atom = "H 0 0 -0.9; H 0 0 0.9"
+    atom = "H 0 0 -0.53; H 0 0 0.53"
     mol = gto.M(atom=atom, unit="Angstrom", basis="def2-svp", charge=1, spin=1, cart=True, verbose=0)
     mf = dft.UKS(mol)
     mf.xc = "b3lyp"
     mf.grids.level = 2
     mf.conv_tol = 1e-10
-    mf.max_cycle = 128
+    mf.conv_tol_grad = 1e-8
+    mf.max_cycle = 200
+    mf.init_guess = "minao"
     reference_energy = float(mf.kernel())
+    reference_dm = np.asarray(mf.make_rdm1())
     assert mf.converged
 
     cfg = UKSConfig(
         xc_spec="b3lyp",
-        max_cycle=128,
+        max_cycle=200,
         conv_tol=1e-10,
         conv_tol_density=1e-8,
-        damping=0.15,
-        potential_clip=20.0,
+        convergence_metric="energy_and_residual",
     )
     inputs = build_uks_integral_inputs(
         atom=atom,
@@ -208,4 +214,28 @@ def test_h2plus_uks_b3lyp_matches_pyscf_reference_energy():
     result = run_uks_from_integrals(**inputs.as_uks_kwargs(), config=cfg)
 
     assert result.converged
-    assert abs(float(result.total_energy) - reference_energy) < 1e-3
+    assert abs(float(result.total_energy) - reference_energy) < 1e-5
+    assert np.max(np.abs(np.asarray(result.density_matrix_alpha) - reference_dm[0])) < 1e-3
+    assert np.max(np.abs(np.asarray(result.density_matrix_beta) - reference_dm[1])) < 1e-10
+
+
+def test_unrestricted_b88_derivative_is_finite_with_empty_beta_channel():
+    variables = jnp.asarray(
+        [[0.4, 0.0, 0.1, -0.2, 0.3, 0.0, 0.0, 0.0]],
+        dtype=jnp.float64,
+    )
+
+    energy, gradient = _point_unrestricted_xc_value_and_grad_kernel(
+        "gga_x_b88",
+        "GGA",
+    )(variables)
+
+    assert jnp.all(jnp.isfinite(energy))
+    assert jnp.all(jnp.isfinite(gradient))
+    response = jax.jacfwd(
+        lambda point: _point_unrestricted_xc_value_and_grad_kernel(
+            "gga_x_b88",
+            "GGA",
+        )(point[None, :])[1][0]
+    )(variables[0])
+    assert jnp.all(jnp.isfinite(response))
