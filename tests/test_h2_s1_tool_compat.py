@@ -30,6 +30,15 @@ def test_h2_s1_tool_imports_with_current_public_api():
     assert module.DEFAULT_NETWORK_ARCHITECTURE == "graddft_residual"
 
 
+def test_h2plus_cache_version_invalidates_pre_uks_derivative_references():
+    module = _load_tool_module(
+        "tools/h2plus_fci_ground_train5_dense100.py",
+        "h2plus_fci_ground_train5_dense100_test_cache_version",
+    )
+
+    assert module._JAX_UKS_CACHE_VERSION == "spinpolarized-fci-dm-v4"
+
+
 def test_h2_ground_tool_normalizes_legacy_cli_aliases():
     module = _load_tool_module(
         "tools/h2_self_consistent_ground_train5_dense100_vs_fci.py",
