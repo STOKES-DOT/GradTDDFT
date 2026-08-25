@@ -2,7 +2,6 @@ from td_graddft.xc_backend.jax_libxc import b3lyp_component_basis, b3lyp_compone
 from td_graddft.neural_xc import (
     DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_MODE,
     DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_VALUES,
-    DEFAULT_NEURAL_XC_DENSITY_SUPERVISION,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
     resolve_coefficient_prior_values,
 )
@@ -12,7 +11,6 @@ def test_default_neural_xc_basis_matches_component_basis() -> None:
     assert DEFAULT_NEURAL_XC_SEMILOCAL_XC == b3lyp_component_basis()
     assert DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_VALUES == b3lyp_component_coefficients()
     assert DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_MODE == "mean"
-    assert DEFAULT_NEURAL_XC_DENSITY_SUPERVISION == "spin_resolved"
 
 
 def test_resolve_coefficient_prior_values_uses_explicit_values() -> None:

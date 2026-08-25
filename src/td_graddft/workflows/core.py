@@ -94,7 +94,6 @@ def _canonicalize_graddft_ground_state_config(
 
     objective = replace(
         config.objective,
-        grid_density_spin="spin_resolved",
         e0_total_mse_weight=0.0,
         e0_total_mae_weight=1.0,
         orbital_energy_mse_weight=0.0,
@@ -118,7 +117,6 @@ def _canonicalize_graddft_ground_state_config(
     forbidden_weights = {
         name: float(getattr(objective, name))
         for name in (
-            "density_stationarity_weight",
             "dm21_scf_regularization_weight",
             "orbital_energy_mse_weight",
             "orbital_energy_mae_weight",
@@ -500,11 +498,6 @@ def train_neural_xc(
             if objective.grid_density_mse_weight != 0.0
             else None
         ),
-        target_density_matrix=(
-            jnp.asarray(reference.molecule.rdm1)
-            if objective.density_matrix_mse_weight != 0.0
-            else None
-        ),
         target_s1_total_h=s1_total_target,
         target_excitation_gaps_h=gap_targets,
         target_oscillator_strengths=oscillator_strength_targets,
@@ -581,13 +574,7 @@ def train_neural_xc(
 
     initial_loss, initial_metrics = compiled_eval(state.params)
     initial_loss = float(initial_loss)
-    initial_density_penalty = float(
-        initial_metrics["grid_density_loss"][0]
-        + initial_metrics["density_matrix_loss"][0]
-    )
-    initial_stationarity_penalty = float(
-        initial_metrics["density_stationarity_loss"][0]
-    )
+    initial_density_penalty = float(initial_metrics["grid_density_loss"][0])
     initial_coefficient_prior_penalty = float(
         initial_metrics["coefficient_prior_loss"][0]
     )
@@ -595,7 +582,6 @@ def train_neural_xc(
     min_loss_step = 0
     loss_history = [initial_loss]
     density_penalty_history = [initial_density_penalty]
-    stationarity_penalty_history = [initial_stationarity_penalty]
     coefficient_prior_penalty_history = [initial_coefficient_prior_penalty]
     grad_norm_history = [float("nan")]
     grad_abs_max_history = [float("nan")]
@@ -650,11 +636,6 @@ def train_neural_xc(
             train_metrics,
             "grid_density_loss",
             0.0,
-        ) + _metric_scalar(train_metrics, "density_matrix_loss", 0.0)
-        train_stationarity_penalty_val = _metric_scalar(
-            train_metrics,
-            "density_stationarity_loss",
-            0.0,
         )
         train_coefficient_prior_penalty_val = _metric_scalar(
             train_metrics,
@@ -673,7 +654,6 @@ def train_neural_xc(
             tracked_step = step - 1
             loss_history.append(train_loss_val)
             density_penalty_history.append(train_density_penalty_val)
-            stationarity_penalty_history.append(train_stationarity_penalty_val)
             coefficient_prior_penalty_history.append(train_coefficient_prior_penalty_val)
             if train_loss_val < min_loss:
                 min_loss = train_loss_val
@@ -684,13 +664,7 @@ def train_neural_xc(
         ):
             step_loss, step_metrics = compiled_eval(state.params)
             loss_val = float(step_loss)
-            density_penalty_val = float(
-                step_metrics["grid_density_loss"][0]
-                + step_metrics["density_matrix_loss"][0]
-            )
-            stationarity_penalty_val = float(
-                step_metrics["density_stationarity_loss"][0]
-            )
+            density_penalty_val = float(step_metrics["grid_density_loss"][0])
             dm21_scf_penalty_val = float(step_metrics["dm21_scf_loss"][0])
             orbital_energy_penalty_val = float(step_metrics["orbital_energy_loss"][0])
             coefficient_prior_penalty_val = float(
@@ -717,7 +691,6 @@ def train_neural_xc(
                 f"step={step}/{config.steps} "
                 f"loss={loss_val:.6e} "
                 f"density_penalty={density_penalty_val:.6e} "
-                f"stationarity_penalty={stationarity_penalty_val:.6e} "
                 f"dm21_scf_penalty={dm21_scf_penalty_val:.6e} "
                 f"orbital_energy_penalty={orbital_energy_penalty_val:.6e} "
                 f"coefficient_prior_penalty={coefficient_prior_penalty_val:.6e} "
@@ -740,19 +713,12 @@ def train_neural_xc(
 
     final_loss, final_metrics = compiled_eval(state.params)
     final_loss = float(final_loss)
-    final_density_penalty = float(
-        final_metrics["grid_density_loss"][0]
-        + final_metrics["density_matrix_loss"][0]
-    )
-    final_stationarity_penalty = float(
-        final_metrics["density_stationarity_loss"][0]
-    )
+    final_density_penalty = float(final_metrics["grid_density_loss"][0])
     final_coefficient_prior_penalty = float(
         final_metrics["coefficient_prior_loss"][0]
     )
     loss_history.append(final_loss)
     density_penalty_history.append(final_density_penalty)
-    stationarity_penalty_history.append(final_stationarity_penalty)
     coefficient_prior_penalty_history.append(final_coefficient_prior_penalty)
     if final_loss < min_loss:
         min_loss = final_loss
@@ -777,13 +743,10 @@ def train_neural_xc(
         min_loss_step=min_loss_step,
         initial_density_penalty=initial_density_penalty,
         final_density_penalty=final_density_penalty,
-        initial_stationarity_penalty=initial_stationarity_penalty,
-        final_stationarity_penalty=final_stationarity_penalty,
         initial_coefficient_prior_penalty=initial_coefficient_prior_penalty,
         final_coefficient_prior_penalty=final_coefficient_prior_penalty,
         loss_history=loss_history,
         density_penalty_history=density_penalty_history,
-        stationarity_penalty_history=stationarity_penalty_history,
         coefficient_prior_penalty_history=coefficient_prior_penalty_history,
         grad_norm_history=grad_norm_history,
         grad_abs_max_history=grad_abs_max_history,

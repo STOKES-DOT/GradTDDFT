@@ -60,7 +60,6 @@ class MolecularTrainingDatum:
     molecule: Any
     target_e0_total_h: Array | None = None
     target_grid_density: Array | None = None
-    target_density_matrix: Array | None = None
     target_s1_total_h: Array | None = None
     target_excitation_gaps_h: Array | None = None
     target_oscillator_strengths: Array | None = None
@@ -102,12 +101,9 @@ class MolecularTrainingConfig:
     e0_total_mae_weight: float = 0.0
     e0_normalization: Literal["none", "per_electron", "per_atom"] = "none"
     e0_normalization_eps: float = 1e-8
-    grid_density_spin: Literal["spin_summed", "spin_resolved"] = "spin_summed"
     grid_density_mse_weight: float = 0.0
-    density_matrix_mse_weight: float = 0.0
     xc_potential_mse_weight: float = 0.0
     xc_kernel_mse_weight: float = 0.0
-    density_stationarity_weight: float = 0.0
     dm21_scf_regularization_weight: float = 0.0
     self_consistent_e0_weight: float = 0.0
     orbital_energy_mse_weight: float = 0.0
@@ -188,10 +184,6 @@ class MolecularTrainingConfig:
         if self.e0_normalization not in {"none", "per_electron", "per_atom"}:
             raise ValueError(
                 "e0_normalization must be 'none', 'per_electron', or 'per_atom'."
-            )
-        if self.grid_density_spin not in {"spin_summed", "spin_resolved"}:
-            raise ValueError(
-                "grid_density_spin must be 'spin_summed' or 'spin_resolved'."
             )
         for name in (
             "excitation_gap_nstates",

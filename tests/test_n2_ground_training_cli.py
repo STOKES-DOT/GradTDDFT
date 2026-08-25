@@ -195,7 +195,7 @@ def test_write_prediction_csv_records_unstable_scf_guard(tmp_path, monkeypatch):
         correlation_energy_h=-0.177210,
         perturbative_corr_h=0.0,
         reference_method="graddft_data",
-        target_density_matrix=None,
+        target_grid_density=None,
     )
 
     monkeypatch.setattr(

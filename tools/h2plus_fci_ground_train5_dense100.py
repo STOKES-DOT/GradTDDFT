@@ -336,7 +336,7 @@ def _training_point_rows(
     npoints = len(points)
     predicted = _metric_vector(metrics, "predicted_e0_total_h", npoints)
     energy_mae = _metric_vector(metrics, "e0_total_mae", npoints)
-    density_matrix_mse = _metric_vector(metrics, "density_matrix_mse", npoints)
+    grid_density_mse = _metric_vector(metrics, "grid_density_mse", npoints)
     scf_converged = _metric_vector(metrics, "scf_converged", npoints)
     scf_cycles = _metric_vector(metrics, "scf_cycles", npoints)
     scf_selected_rms = _metric_vector(metrics, "scf_selected_rms_density", npoints)
@@ -357,7 +357,7 @@ def _training_point_rows(
                 "energy_signed_err_h": pred - target,
                 "energy_abs_err_ev": abs(pred - target) * HARTREE_TO_EV,
                 "energy_mae_h": float(energy_mae[idx]),
-                "density_matrix_mse": float(density_matrix_mse[idx]),
+                "grid_density_mse": float(grid_density_mse[idx]),
                 "scf_converged": float(scf_converged[idx]),
                 "scf_cycles": float(scf_cycles[idx]),
                 "scf_selected_rms_density": float(scf_selected_rms[idx]),
@@ -375,15 +375,13 @@ def _tree_all_finite(tree: Any) -> bool:
 
 def build_training_data(
     points: list[ReferencePoint],
-    *,
-    density_matrix_mse_weight: float,
 ) -> tuple[MolecularTrainingDatum, ...]:
     return tuple(
         MolecularTrainingDatum(
             molecule=point.molecule,
             target_e0_total_h=jnp.asarray(point.exact_energy_h, dtype=jnp.float64),
-            target_density_matrix=jnp.asarray(
-                point.exact_density_matrix,
+            target_grid_density=jnp.asarray(
+                point.exact_density_grid,
                 dtype=jnp.float64,
             ),
         )
@@ -392,10 +390,7 @@ def build_training_data(
 
 
 def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, logger: RunLogger):
-    train_data = build_training_data(
-        points,
-        density_matrix_mse_weight=float(args.density_matrix_mse_weight),
-    )
+    train_data = build_training_data(points)
     functional = neural_xc.Functional(
         semilocal_xc=tuple(str(name) for name in args.semilocal_xc),
         hidden_dims=tuple(int(value) for value in args.hidden_dims),
@@ -421,7 +416,7 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
         e0_total_mse_weight=float(args.e0_total_mse_weight),
         e0_total_mae_weight=float(args.e0_total_mae_weight),
         e0_normalization=str(args.e0_normalization),
-        density_matrix_mse_weight=float(args.density_matrix_mse_weight),
+        grid_density_mse_weight=float(args.grid_density_mse_weight),
         coefficient_prior_weight=float(args.coefficient_prior_weight),
         coefficient_prior_values=coefficient_prior,
         scf_max_cycle=(
@@ -474,8 +469,8 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
             "step": 0,
             "loss": float(initial_loss),
             "energy_mae_h": _metric_mean(initial_metrics, "e0_total_mae"),
-            "density_matrix_mse": _metric_mean(initial_metrics, "density_matrix_mse"),
-            "density_matrix_loss": _metric_mean(initial_metrics, "density_matrix_loss"),
+            "grid_density_mse": _metric_mean(initial_metrics, "grid_density_mse"),
+            "grid_density_loss": _metric_mean(initial_metrics, "grid_density_loss"),
             "scf_converged_fraction": _metric_mean(initial_metrics, "scf_converged_fraction"),
             "scf_cycles_mean": _metric_mean(initial_metrics, "scf_cycles_mean"),
             "scf_cycles_max": _metric_mean(initial_metrics, "scf_cycles_max"),
@@ -506,8 +501,8 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
             "step": step,
             "loss": loss,
             "energy_mae_h": _metric_mean(metrics, "e0_total_mae"),
-            "density_matrix_mse": _metric_mean(metrics, "density_matrix_mse"),
-            "density_matrix_loss": _metric_mean(metrics, "density_matrix_loss"),
+            "grid_density_mse": _metric_mean(metrics, "grid_density_mse"),
+            "grid_density_loss": _metric_mean(metrics, "grid_density_loss"),
             "scf_converged_fraction": _metric_mean(metrics, "scf_converged_fraction"),
             "scf_cycles_mean": _metric_mean(metrics, "scf_cycles_mean"),
             "scf_cycles_max": _metric_mean(metrics, "scf_cycles_max"),
@@ -522,7 +517,7 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
                 "[train] "
                 f"step={step:4d}/{int(args.steps):4d} loss={row['loss']:.8e} "
                 f"energy_mae={row['energy_mae_h']:.8e} "
-                f"density_mse={row['density_matrix_mse']:.8e} "
+                f"density_mse={row['grid_density_mse']:.8e} "
                 f"scf_conv_frac={row['scf_converged_fraction']:.6f} "
                 f"scf_cycles_max={row['scf_cycles_max']:.6f} "
                 f"grad_norm={row['grad_norm']:.8e} lr={row['lr']:.8e}"
@@ -611,7 +606,7 @@ def plot_outputs(
 
     steps = series(history, "step")
     loss = series(history, "loss")
-    density_penalty = series(history, "density_matrix_loss", 0.0)
+    density_penalty = series(history, "grid_density_loss", 0.0)
 
     r = series(curve_rows, "r_angstrom")
     exact = series(curve_rows, "exact_energy_h")
@@ -717,7 +712,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--e0-total-mse-weight", type=float, default=1.0)
     p.add_argument("--e0-total-mae-weight", type=float, default=1.0)
     p.add_argument("--e0-normalization", choices=("none", "per_electron", "per_atom"), default="none")
-    p.add_argument("--density-matrix-mse-weight", type=float, default=1.0)
+    p.add_argument("--grid-density-mse-weight", type=float, default=1.0)
     p.add_argument("--coefficient-prior-weight", type=float, default=0.0)
     p.add_argument("--grids-level", type=int, default=2)
     p.add_argument("--max-l", type=int, default=3)
@@ -813,7 +808,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "basis": str(args.basis),
             "grid_level": int(args.grids_level),
             "steps": int(args.steps),
-            "density_matrix_mse_weight": float(args.density_matrix_mse_weight),
+            "grid_density_mse_weight": float(args.grid_density_mse_weight),
             "integral_backend": str(args.integral_backend),
             "include_hfx_channel": bool(args.include_hfx_channel),
             "ground_state_hf_mode": str(args.ground_state_hf_mode),
@@ -831,7 +826,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "learning_rate": float(args.learning_rate),
         "lr_decay_every": int(args.lr_decay_every),
         "lr_decay_factor": float(args.lr_decay_factor),
-        "density_matrix_mse_weight": float(args.density_matrix_mse_weight),
+        "grid_density_mse_weight": float(args.grid_density_mse_weight),
         "integral_backend": str(args.integral_backend),
         "include_hfx_channel": bool(args.include_hfx_channel),
         "ground_state_hf_mode": str(args.ground_state_hf_mode),
@@ -864,7 +859,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 "x": ["step", "r_angstrom"],
                 "y": [
                     "loss",
-                    "density_matrix_mse",
+                    "grid_density_mse",
                     "exact_energy_h",
                     "predicted_energy_h",
                 ],

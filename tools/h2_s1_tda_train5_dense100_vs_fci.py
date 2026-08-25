@@ -105,7 +105,7 @@ def _has_ground_supervision(args: argparse.Namespace) -> bool:
         for weight in (
             args.e0_total_mse_weight,
             args.e0_total_mae_weight,
-            args.density_matrix_mse_weight,
+            args.grid_density_mse_weight,
         )
     )
 
@@ -127,7 +127,7 @@ def _resolved_objective_kind(args: argparse.Namespace) -> str:
     if has_s1:
         return "s1_total"
     raise ValueError(
-        "No active E0-total, S1-total, or density-matrix loss weight."
+        "No active E0-total, S1-total, or grid-density loss weight."
     )
 
 
@@ -405,10 +405,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Ground-state energy MAE weight. Keep at 0 for S1-total-only training.",
     )
     p.add_argument(
-        "--density-matrix-mse-weight",
+        "--grid-density-mse-weight",
         type=float,
         default=0.0,
-        help="AO density-matrix MSE weight.",
+        help="Electron-normalized real-space density integral weight.",
     )
     p.add_argument("--grids-level", type=int, default=2)
     p.add_argument("--max-l", type=int, default=3)
@@ -760,7 +760,7 @@ def _training_checkpoint_metadata(
         "s1_total_mae_weight": float(args.s1_total_mae_weight),
         "e0_total_mse_weight": float(args.e0_total_mse_weight),
         "e0_total_mae_weight": float(args.e0_total_mae_weight),
-        "density_matrix_mse_weight": float(args.density_matrix_mse_weight),
+        "grid_density_mse_weight": float(args.grid_density_mse_weight),
         "excited_state_solver": str(args.excited_state_solver),
         "eval_use_tda": resolved_eval_use_tda,
         "scf_warm_start": bool(args.scf_warm_start),
@@ -937,8 +937,8 @@ def build_s1_training_data(
             MolecularTrainingDatum(
                 molecule=point.molecule,
                 target_e0_total_h=jnp.asarray(point.fci_energy_h, dtype=jnp.float64),
-                target_density_matrix=jnp.asarray(
-                    point.fci_density_matrix,
+                target_grid_density=jnp.asarray(
+                    point.fci_density_grid,
                     dtype=jnp.float64,
                 ),
                 target_s1_total_h=jnp.asarray(target_s1_total_h, dtype=jnp.float64),
@@ -1652,7 +1652,7 @@ def train_functional(
         mode=str(args.training_mode),
         e0_total_mse_weight=float(args.e0_total_mse_weight),
         e0_total_mae_weight=float(args.e0_total_mae_weight),
-        density_matrix_mse_weight=float(args.density_matrix_mse_weight),
+        grid_density_mse_weight=float(args.grid_density_mse_weight),
         s1_total_mse_weight=float(args.s1_total_mse_weight),
         s1_total_mae_weight=float(args.s1_total_mae_weight),
         excited_state_solver=str(args.excited_state_solver),
@@ -2944,7 +2944,7 @@ def write_summary(
         "s1_total_mae_weight": float(args.s1_total_mae_weight),
         "e0_total_mse_weight": float(args.e0_total_mse_weight),
         "e0_total_mae_weight": float(args.e0_total_mae_weight),
-        "density_matrix_mse_weight": float(args.density_matrix_mse_weight),
+        "grid_density_mse_weight": float(args.grid_density_mse_weight),
         "excited_state_solver": str(args.excited_state_solver),
         "eval_use_tda": eval_use_tda,
         "evaluation_solver": evaluation_solver,
@@ -3023,7 +3023,7 @@ def main() -> None:
         f"s1_total_mse_weight={float(args.s1_total_mse_weight)}, "
         f"s1_total_mae_weight={float(args.s1_total_mae_weight)}, "
         f"e0_total_mse_weight={float(args.e0_total_mse_weight)}, "
-        f"e0_total_mae_weight={float(args.e0_total_mae_weight)}, density_matrix_mse_weight={float(args.density_matrix_mse_weight)}, "
+        f"e0_total_mae_weight={float(args.e0_total_mae_weight)}, grid_density_mse_weight={float(args.grid_density_mse_weight)}, "
         f"train_solver={args.excited_state_solver}, "
         f"eval_solver={'tda' if ((args.excited_state_solver == 'tda') if args.eval_use_tda is None else bool(args.eval_use_tda)) else 'casida'}, "
         f"reference_label={_reference_label(args)}"

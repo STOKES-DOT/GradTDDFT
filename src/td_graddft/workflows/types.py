@@ -12,7 +12,6 @@ from td_graddft.jax_runtime import (
 )
 from td_graddft.neural_xc import (
     DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_MODE,
-    DEFAULT_NEURAL_XC_DENSITY_SUPERVISION,
     DEFAULT_NEURAL_XC_HF_INPUT_MODE,
     DEFAULT_NEURAL_XC_RESPONSE_PT2_MODE,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
@@ -34,11 +33,7 @@ class NeuralXCTrainingConfig:
     lr_decay_factor: float = 0.5
     jit_train: bool = True
     log_interval: int = 0
-    objective: MolecularTrainingConfig = field(
-        default_factory=lambda: MolecularTrainingConfig(
-            grid_density_spin=DEFAULT_NEURAL_XC_DENSITY_SUPERVISION
-        )
-    )
+    objective: MolecularTrainingConfig = field(default_factory=MolecularTrainingConfig)
     coefficient_prior_weight: float = 0.0
     coefficient_prior_values: tuple[float, ...] | None = None
     coefficient_prior_mode: Literal["pointwise", "mean"] = DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_MODE
@@ -187,13 +182,10 @@ class TrainingRun:
     min_loss_step: int
     initial_density_penalty: float
     final_density_penalty: float
-    initial_stationarity_penalty: float
-    final_stationarity_penalty: float
     initial_coefficient_prior_penalty: float
     final_coefficient_prior_penalty: float
     loss_history: list[float]
     density_penalty_history: list[float]
-    stationarity_penalty_history: list[float]
     coefficient_prior_penalty_history: list[float]
     grad_norm_history: list[float]
     grad_abs_max_history: list[float]

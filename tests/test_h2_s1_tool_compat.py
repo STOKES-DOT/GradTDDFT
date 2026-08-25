@@ -50,7 +50,7 @@ def test_h2_ground_tool_normalizes_legacy_cli_aliases():
     assert not hasattr(args, "density_matrix_constraint_weight")
 
 
-def test_h2_ground_training_data_uses_density_matrix_target():
+def test_h2_ground_training_data_uses_grid_density_target():
     module = _load_tool_module(
         "tools/h2_self_consistent_ground_train5_dense100_vs_fci.py",
         "h2_self_consistent_ground_train5_dense100_vs_fci_test_density_target",
@@ -62,23 +62,21 @@ def test_h2_ground_training_data_uses_density_matrix_target():
         fci_density_matrix=np.asarray([[1.0]], dtype=np.float64),
     )
 
-    (datum,) = module.build_training_data([point], density_matrix_mse_weight=0.7)
+    (datum,) = module.build_training_data([point])
 
-    assert datum.target_grid_density is None
-    assert np.allclose(np.asarray(datum.target_density_matrix), point.fci_density_matrix)
-    assert datum.target_density_matrix is not None
+    assert np.allclose(np.asarray(datum.target_grid_density), point.fci_density_grid)
 
 
-def test_h2_ground_script_exposes_only_explicit_dm_weight():
+def test_h2_ground_script_exposes_only_grid_density_weight():
     source = Path("tools/h2_self_consistent_ground_train5_dense100_vs_fci.py").read_text(
         encoding="utf-8"
     )
 
-    assert "--density-matrix-mse-weight" in source
+    assert "--grid-density-mse-weight" in source
     assert "density_matrix_constraint_weight" not in source
     assert "_metric_scalar(train_metrics, 'energy_mae')" not in source
     assert "_metric_scalar(train_metrics, 'e0_total_mae')" in source
-    assert source.count('"density_matrix_mse": float(density_matrix_mse[idx])') == 1
+    assert source.count('"grid_density_mse": float(grid_density_mse[idx])') == 1
     assert "predicted_total_energies" not in source
     assert "predicted_e0_total_h" in source
 
@@ -281,7 +279,7 @@ def test_h2_s1_reference_cache_writer_matches_current_reference_point(tmp_path, 
         assert "fci_dm_ao" not in group
 
 
-def test_h2_s1_training_data_uses_density_matrix_target():
+def test_h2_s1_training_data_uses_grid_density_target():
     module = _load_tool_module(
         "tools/h2_s1_tda_train5_dense100_vs_fci.py",
         "h2_s1_tda_train5_dense100_vs_fci_test_density_target",
@@ -297,9 +295,7 @@ def test_h2_s1_training_data_uses_density_matrix_target():
 
     (datum,) = module.build_s1_training_data([point])
 
-    assert datum.target_grid_density is None
-    assert np.allclose(np.asarray(datum.target_density_matrix), point.fci_density_matrix)
-    assert np.allclose(np.asarray(datum.target_density_matrix), point.fci_density_matrix)
+    assert np.allclose(np.asarray(datum.target_grid_density), point.fci_density_grid)
     assert np.isclose(np.asarray(datum.target_s1_total_h), -0.4)
 
 

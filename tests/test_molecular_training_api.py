@@ -24,6 +24,22 @@ def _predict_e0(params, molecule):
     return jnp.asarray(1.0, dtype=jnp.float64), molecule
 
 
+def test_density_loss_api_only_exposes_grid_density():
+    import td_graddft.training as training
+
+    config_fields = set(training.MolecularTrainingConfig.__dataclass_fields__)
+    datum_fields = set(training.MolecularTrainingDatum.__dataclass_fields__)
+
+    assert "grid_density_mse_weight" in config_fields
+    assert "target_grid_density" in datum_fields
+    assert "density_matrix_mse_weight" not in config_fields
+    assert "target_density_matrix" not in datum_fields
+    assert "grid_density_spin" not in config_fields
+    assert "density_stationarity_weight" not in config_fields
+    assert not hasattr(training, "density_matrix_matching_penalty")
+    assert not hasattr(training, "density_stationarity_penalty")
+
+
 def test_s1_total_and_excitation_gap_are_distinct_objectives(monkeypatch):
     from td_graddft.training import (
         MolecularTrainingConfig,
@@ -168,17 +184,14 @@ def test_molecular_datum_is_jittable_with_static_sample_weight(monkeypatch):
     assert float(compiled(datum)) == pytest.approx(0.01)
 
 
-def test_density_objectives_do_not_fallback_between_grid_and_matrix():
+def test_grid_density_objective_requires_explicit_grid_target():
     from td_graddft.training import (
         MolecularTrainingConfig,
         MolecularTrainingDatum,
         molecular_loss,
     )
 
-    datum = MolecularTrainingDatum(
-        molecule=SimpleNamespace(),
-        target_density_matrix=jnp.eye(1, dtype=jnp.float64),
-    )
+    datum = MolecularTrainingDatum(molecule=SimpleNamespace())
     with pytest.raises(ValueError, match="target_grid_density"):
         molecular_loss(
             {},

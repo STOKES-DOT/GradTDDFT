@@ -99,7 +99,6 @@ _PUBLIC_EXPORTS = {
     "density_matching_penalty": "training",
     "density_on_grid": "training",
     "density_on_grid_spin_resolved": "training",
-    "density_stationarity_penalty": "training",
     "eri_element": "data.integrals",
     "eri_tensor": "data.integrals",
     "eri_tensor_screened": "data.integrals",

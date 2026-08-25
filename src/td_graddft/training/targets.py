@@ -270,13 +270,11 @@ def _needs_predicted_ground_state_energy(
 _LOSS_COMPONENT_KEYS = (
     "e0_total_loss",
     "grid_density_loss",
-    "density_matrix_loss",
     "xc_potential_loss",
     "xc_kernel_loss",
     "self_consistent_e0_loss",
     "orbital_energy_loss",
     "coefficient_prior_loss",
-    "density_stationarity_loss",
     "dm21_scf_loss",
     "fractional_linearity_loss",
     "s1_total_loss",
@@ -291,7 +289,6 @@ _MOLECULAR_METRIC_KEYS = (
     "normalized_e0_total_mse",
     "normalized_e0_total_mae",
     "grid_density_mse",
-    "density_matrix_mse",
     "xc_potential_mse",
     "xc_kernel_mse",
     "self_consistent_e0_mse",
@@ -414,19 +411,6 @@ def density_on_grid_spin_resolved(molecule: Any) -> Array:
     if density_matrix.ndim == 3:
         return jnp.einsum("spq,rp,rq->rs", density_matrix, ao, ao)
     raise ValueError("Expected rdm1 to have shape (nao, nao) or (spin, nao, nao).")
-
-
-def _density_on_grid_from_density_matrix(molecule: Any, density_matrix: Any) -> Array:
-    if getattr(molecule, "ao", None) is None:
-        raise AttributeError("Molecule-like object must define ao for density projection.")
-    ao = jnp.asarray(molecule.ao)
-    density_matrix = jnp.asarray(density_matrix)
-    if density_matrix.ndim == 2:
-        return jnp.einsum("pq,rp,rq->r", density_matrix, ao, ao)
-    if density_matrix.ndim == 3:
-        spin_density = jnp.einsum("spq,rp,rq->rs", density_matrix, ao, ao)
-        return spin_density.sum(axis=-1)
-    raise ValueError("Expected density_matrix to have shape (nao, nao) or (spin, nao, nao).")
 
 
 def _spin_summed_density_matrix(molecule: Any) -> Array:
@@ -1573,77 +1557,6 @@ def _effective_exact_exchange_fraction(
     return jnp.asarray(exact_exchange_fraction)
 
 
-def density_stationarity_penalty(
-    params: PyTree,
-    functional: Any,
-    molecule: Any,
-    *,
-    occupation_tolerance: float = 1e-8,
-) -> Array:
-    """Differentiable density consistency penalty for fixed-density training."""
-
-    if getattr(molecule, "ao", None) is None:
-        raise AttributeError("Molecule-like object must define ao.")
-    if getattr(molecule, "grid", None) is None:
-        raise AttributeError("Molecule-like object must define grid.weights.")
-    if getattr(molecule, "h1e", None) is None:
-        raise AttributeError("Molecule-like object must define h1e.")
-    if getattr(molecule, "rep_tensor", None) is None:
-        raise AttributeError("Molecule-like object must define rep_tensor.")
-
-    density_matrix = _spin_summed_density_matrix(molecule)
-    ao = jnp.asarray(molecule.ao)
-    ao_deriv1 = getattr(molecule, "ao_deriv1", None)
-    weights = jnp.asarray(molecule.grid.weights)
-    h1e = jnp.asarray(molecule.h1e)
-    v_rho, v_grad, v_tau, v_lapl, xc_kind = _grid_xc_potential_components(
-        params,
-        functional,
-        molecule,
-    )
-    v_rho = jnp.nan_to_num(v_rho, nan=0.0, posinf=0.0, neginf=0.0)
-    v_grad = jnp.nan_to_num(v_grad, nan=0.0, posinf=0.0, neginf=0.0)
-    kind = _normalize_response_feature_kind(xc_kind)
-    if ao_deriv1 is None:
-        kind = "LDA"
-        ao_deriv1_arr = jnp.zeros((4, ao.shape[0], ao.shape[1]), dtype=ao.dtype)
-    else:
-        ao_deriv1_arr = jnp.asarray(ao_deriv1)
-        if ao_deriv1_arr.shape[0] < 4 and kind in {"GGA", "MGGA", "MGGA_LAPL"}:
-            kind = "LDA"
-    ao_laplacian = getattr(molecule, "ao_laplacian", None)
-    if ao_laplacian is None:
-        ao_laplacian_arr = jnp.zeros_like(ao)
-        if kind == "MGGA_LAPL":
-            kind = "MGGA"
-    else:
-        ao_laplacian_arr = jnp.asarray(ao_laplacian)
-    vxc_matrix = _vxc_matrix_from_grid_potential(
-        ao=ao,
-        ao_deriv1=ao_deriv1_arr,
-        ao_laplacian=ao_laplacian_arr,
-        weights=weights,
-        vxc_rho=v_rho,
-        vxc_grad=v_grad,
-        vxc_tau=v_tau,
-        vxc_lapl=v_lapl,
-        xc_kind=kind,
-    )
-
-    j_matrix = _coulomb_potential_from_molecule(molecule, density_matrix)
-    k_matrix = _exchange_potential_from_molecule(molecule, density_matrix)
-    alpha = _effective_exact_exchange_fraction(params, functional, molecule)
-    fock = h1e + j_matrix - 0.5 * alpha * k_matrix + vxc_matrix
-
-    mo_coeff, mo_occ = _restricted_channel(molecule)
-    fock_mo = mo_coeff.T.conj() @ fock @ mo_coeff
-    occ_mask = (mo_occ > occupation_tolerance).astype(fock_mo.dtype)
-    vir_mask = (mo_occ <= occupation_tolerance).astype(fock_mo.dtype)
-    ov_mask = occ_mask[:, None] * vir_mask[None, :]
-    denominator = jnp.maximum(jnp.sum(ov_mask), 1.0)
-    return jnp.sum(jnp.abs(fock_mo * ov_mask) ** 2) / denominator
-
-
 def dm21_scf_regularization_delta_energy(
     params: PyTree,
     functional: Any,
@@ -1770,81 +1683,31 @@ def density_matching_penalty(
     *,
     training_config: MolecularTrainingConfig | None = None,
     self_consistent_molecule: Any | None = None,
-    spin_resolved: bool | None = None,
     target_density: Array | None = None,
-    target_density_matrix: Array | None = None,
 ) -> Array:
-    """Weighted grid-density MSE between the reference and model self-consistent densities."""
+    """Electron-normalized integral of the squared total-density error."""
 
     if getattr(molecule, "grid", None) is None:
         raise AttributeError("Molecule-like object must define grid.weights.")
 
     cfg = MolecularTrainingConfig() if training_config is None else training_config
-    use_spin_resolved = (
-        cfg.grid_density_spin == "spin_resolved"
-        if spin_resolved is None
-        else bool(spin_resolved)
+    reference_density = (
+        density_on_grid(molecule)
+        if target_density is None
+        else jnp.asarray(target_density)
     )
-    if target_density is not None:
-        reference_density = jnp.asarray(target_density)
-    elif target_density_matrix is None:
-        reference_density = density_on_grid(molecule)
-    else:
-        reference_density = _density_on_grid_from_density_matrix(molecule, target_density_matrix)
     model_molecule = self_consistent_molecule
     if model_molecule is None:
         scf_cfg = cfg if cfg.mode == "self_consistent" else replace(cfg, mode="self_consistent")
         model_molecule = _resolve_training_molecule_with_mode(params, functional, molecule, scf_cfg)
-    if use_spin_resolved:
-        if target_density is not None:
-            reference_density = jnp.asarray(target_density)
-            if reference_density.ndim == 1:
-                reference_density = reference_density[:, None]
-        elif target_density_matrix is None:
-            reference_density = density_on_grid_spin_resolved(molecule)
-        else:
-            density_matrix = jnp.asarray(target_density_matrix)
-            if density_matrix.ndim == 2:
-                reference_density = _density_on_grid_from_density_matrix(
-                    molecule,
-                    density_matrix,
-                )[:, None]
-            elif density_matrix.ndim == 3:
-                ao = jnp.asarray(molecule.ao)
-                reference_density = jnp.einsum("spq,rp,rq->rs", density_matrix, ao, ao)
-            else:
-                raise ValueError(
-                    "Expected target_density_matrix to have shape (nao, nao) or (spin, nao, nao)."
-                )
-        model_density = density_on_grid_spin_resolved(model_molecule)
-        channel_count = max(reference_density.shape[-1], 1)
-        residual = jnp.sum((model_density - reference_density) ** 2, axis=-1) / channel_count
-    else:
-        model_density = density_on_grid(model_molecule)
-        residual = (model_density - reference_density) ** 2
+    model_density = density_on_grid(model_molecule)
+    if reference_density.ndim != 1 or reference_density.shape != model_density.shape:
+        raise ValueError(
+            "target_grid_density must be spin-summed with shape (ngrids,) matching the model grid."
+        )
     weights = jnp.asarray(molecule.grid.weights)
-    normalization = jnp.maximum(jnp.sum(weights), 1e-12)
-    return jnp.sum(weights * residual) / normalization
-
-
-def density_matrix_matching_penalty(
-    molecule: Any,
-    *,
-    self_consistent_molecule: Any | None = None,
-    target_density_matrix: Array | None = None,
-) -> Array:
-    """Mean-squared AO density-matrix error using spin-summed matrices."""
-
-    reference = (
-        _spin_summed_density_matrix(molecule)
-        if target_density_matrix is None
-        else jnp.asarray(target_density_matrix)
-    )
-    if reference.ndim == 3:
-        reference = reference.sum(axis=0)
-    model_molecule = molecule if self_consistent_molecule is None else self_consistent_molecule
-    model = _spin_summed_density_matrix(model_molecule)
-    return jnp.mean((model - reference) ** 2)
+    electron_count = jnp.maximum(jnp.abs(_electron_count(molecule)), 1e-12)
+    return jnp.sum(weights * (model_density - reference_density) ** 2) / electron_count**2
 
 
 def xc_potential_matching_penalty(
@@ -2182,11 +2045,6 @@ def _validate_training_datum(
             "target_grid_density",
         ),
         (
-            config.density_matrix_mse_weight != 0.0,
-            datum.target_density_matrix,
-            "target_density_matrix",
-        ),
-        (
             config.xc_potential_mse_weight != 0.0,
             datum.target_xc_potential,
             "target_xc_potential",
@@ -2245,10 +2103,8 @@ def _has_active_objective(config: MolecularTrainingConfig) -> bool:
         "e0_total_mse_weight",
         "e0_total_mae_weight",
         "grid_density_mse_weight",
-        "density_matrix_mse_weight",
         "xc_potential_mse_weight",
         "xc_kernel_mse_weight",
-        "density_stationarity_weight",
         "dm21_scf_regularization_weight",
         "orbital_energy_mse_weight",
         "orbital_energy_mae_weight",
@@ -2272,7 +2128,6 @@ def _datum_dtype(datum: MolecularTrainingDatum) -> Any:
         "target_s1_total_h",
         "target_excitation_gaps_h",
         "target_grid_density",
-        "target_density_matrix",
         "target_xc_potential",
         "target_xc_kernel",
         "target_orbital_energies",
@@ -2341,7 +2196,6 @@ def molecular_loss(
         self_consistent_molecule = eval_molecule if config.mode == "self_consistent" else None
         needs_self_consistent = (
             config.grid_density_mse_weight != 0.0
-            or config.density_matrix_mse_weight != 0.0
             or config.self_consistent_e0_weight != 0.0
             or _has_weight(
                 config,
@@ -2387,17 +2241,6 @@ def molecular_loss(
             )
             component_losses["grid_density_loss"] = (
                 config.grid_density_mse_weight * grid_density_mse
-            )
-
-        density_matrix_mse = zero
-        if config.density_matrix_mse_weight != 0.0:
-            density_matrix_mse = density_matrix_matching_penalty(
-                datum.molecule,
-                self_consistent_molecule=self_consistent_molecule,
-                target_density_matrix=datum.target_density_matrix,
-            )
-            component_losses["density_matrix_loss"] = (
-                config.density_matrix_mse_weight * density_matrix_mse
             )
 
         xc_potential_mse = zero
@@ -2484,12 +2327,6 @@ def molecular_loss(
             )
             component_losses["coefficient_prior_loss"] = (
                 config.coefficient_prior_weight * coefficient_prior_mse
-            )
-
-        if config.density_stationarity_weight != 0.0:
-            component_losses["density_stationarity_loss"] = (
-                config.density_stationarity_weight
-                * density_stationarity_penalty(params, functional, datum.molecule)
             )
 
         dm21_scf_delta = dm21_scf_mse = zero
@@ -2603,7 +2440,6 @@ def molecular_loss(
             "normalized_e0_total_mse": normalized_e0_mse,
             "normalized_e0_total_mae": normalized_e0_mae,
             "grid_density_mse": grid_density_mse,
-            "density_matrix_mse": density_matrix_mse,
             "xc_potential_mse": xc_potential_mse,
             "xc_kernel_mse": xc_kernel_mse,
             "self_consistent_e0_mse": self_consistent_e0_mse,

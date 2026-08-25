@@ -73,3 +73,21 @@ def test_janak_constraint_code_is_removed_from_core_sources():
 
     assert "janak" not in source_text.lower()
     assert "eta_autodiff" not in source_text
+
+
+def test_legacy_density_loss_modes_are_removed():
+    source_text = "\n".join(
+        path.read_text()
+        for root in (Path("src"), Path("tools"))
+        for path in root.rglob("*.py")
+    )
+
+    for token in (
+        "density_matrix_matching_penalty",
+        "density_matrix_mse_weight",
+        "density_stationarity_penalty",
+        "density_stationarity_weight",
+        "grid_density_spin",
+        "target_density_matrix",
+    ):
+        assert token not in source_text

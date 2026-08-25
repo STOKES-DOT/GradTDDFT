@@ -77,7 +77,7 @@ class ReferencePoint:
     correlation_energy_h: float
     perturbative_corr_h: float
     reference_method: str
-    target_density_matrix: Any
+    target_grid_density: Any
 
 
 class RunLogger:
@@ -443,6 +443,16 @@ def build_reference_point(
         mf_energy = float(mf_ref.e_tot)
         corr_energy = float(reference_energy - mf_energy)
         reference_dm_ao = np.asarray(mf_ref.make_rdm1(), dtype=np.float64)
+    density_matrix = np.asarray(reference_dm_ao, dtype=np.float64)
+    if density_matrix.ndim == 3:
+        density_matrix = density_matrix.sum(axis=0)
+    target_grid_density = np.einsum(
+        "pq,rp,rq->r",
+        density_matrix,
+        np.asarray(reference.ao),
+        np.asarray(reference.ao),
+        optimize=True,
+    )
     return ReferencePoint(
         r_angstrom=float(r_angstrom),
         molecule=reference,
@@ -451,7 +461,7 @@ def build_reference_point(
         correlation_energy_h=float(corr_energy),
         perturbative_corr_h=float(perturbative_corr),
         reference_method=str(args.reference_method),
-        target_density_matrix=jnp.asarray(reference_dm_ao, dtype=jnp.float64),
+        target_grid_density=jnp.asarray(target_grid_density, dtype=jnp.float64),
     )
 
 
@@ -465,7 +475,7 @@ def build_training_data(
                 point.reference_energy_h,
                 dtype=jnp.float64,
             ),
-            target_density_matrix=jnp.asarray(point.target_density_matrix),
+            target_grid_density=jnp.asarray(point.target_grid_density),
         )
         for point in points
     )
@@ -487,6 +497,7 @@ def _cache_base_group_name(args: argparse.Namespace) -> str:
         f"active={active}/"
         f"basis={str(args.basis).replace('/', '_')}/"
         f"grid={int(args.grids_level)}/"
+        "density=grid-v1/"
         f"jk={str(args.jk_backend)}/"
         f"{pt2}/"
         f"{hfx}/"
@@ -535,8 +546,8 @@ def _write_reference_point(group: Any, point: ReferencePoint) -> None:
     group.attrs["ccsd_corr_h"] = float(point.correlation_energy_h)
     group.attrs["triples_corr_h"] = float(point.perturbative_corr_h)
     group.create_dataset(
-        "target_density_matrix",
-        data=np.asarray(point.target_density_matrix, dtype=np.float64),
+        "target_grid_density",
+        data=np.asarray(point.target_grid_density, dtype=np.float64),
     )
     write_restricted_molecule(group.require_group("molecule"), point.molecule)
 
@@ -550,11 +561,7 @@ def _read_reference_point(
         group["molecule"],
         hfx_nu_storage=("chunked" if str(hfx_nu_storage) == "chunked" else "array"),
     )
-    target_density_matrix = (
-        group["target_density_matrix"][()]
-        if "target_density_matrix" in group
-        else np.asarray(molecule.rdm1).sum(axis=0)
-    )
+    target_grid_density = group["target_grid_density"][()]
     return ReferencePoint(
         r_angstrom=float(group.attrs["r_angstrom"]),
         molecule=molecule,
@@ -579,7 +586,7 @@ def _read_reference_point(
             else group.attrs["triples_corr_h"]
         ),
         reference_method=str(group.attrs.get("reference_method", "ccsd_t")),
-        target_density_matrix=jnp.asarray(target_density_matrix),
+        target_grid_density=jnp.asarray(target_grid_density),
     )
 
 
@@ -697,7 +704,7 @@ _STREAM_POINT_METRICS = (
     "energy_mae_h",
     "energy_signed_err_h",
     "predicted_energy_h",
-    "density_matrix_mse",
+    "grid_density_mse",
     "grad_norm",
     "grad_abs_max",
     "nonfinite_grad_fraction",
@@ -771,7 +778,7 @@ def build_functional_and_training_config(
         e0_total_mse_weight=float(args.e0_total_mse_weight),
         e0_total_mae_weight=float(args.e0_total_mae_weight),
         e0_normalization=str(args.e0_normalization),
-        density_matrix_mse_weight=float(args.density_matrix_mse_weight),
+        grid_density_mse_weight=float(args.grid_density_mse_weight),
         coefficient_prior_weight=float(args.coefficient_prior_weight),
         coefficient_prior_values=coefficient_prior,
         scf_max_cycle=(
@@ -838,26 +845,26 @@ def train_functional(
         def _eval_all(params):
             losses = []
             maes = []
-            density_matrix_mses = []
-            density_matrix_losses = []
+            grid_density_mses = []
+            grid_density_losses = []
             point_metric_rows = []
             for idx, datum in enumerate(train_data):
                 loss_val, metrics_val = eval_single(params, datum)
                 loss_scalar = float(loss_val)
                 energy_mae = _metric_scalar(metrics_val, "e0_total_mae")
-                density_matrix_mse = _metric_scalar(metrics_val, "density_matrix_mse")
-                density_matrix_loss = _metric_scalar(metrics_val, "density_matrix_loss")
+                grid_density_mse = _metric_scalar(metrics_val, "grid_density_mse")
+                grid_density_loss = _metric_scalar(metrics_val, "grid_density_loss")
                 predicted_energy = _metric_scalar(metrics_val, "predicted_e0_total_h")
                 losses.append(loss_scalar)
                 maes.append(energy_mae)
-                density_matrix_mses.append(density_matrix_mse)
-                density_matrix_losses.append(density_matrix_loss)
+                grid_density_mses.append(grid_density_mse)
+                grid_density_losses.append(grid_density_loss)
                 point_metric_rows.append(
                     {
                         "energy_mae_h": energy_mae,
                         "energy_signed_err_h": predicted_energy - target_energies_h[idx],
                         "predicted_energy_h": predicted_energy,
-                        "density_matrix_mse": density_matrix_mse,
+                        "grid_density_mse": grid_density_mse,
                         "scf_converged": _metric_scalar(metrics_val, "scf_converged"),
                         "scf_cycles": _metric_scalar(metrics_val, "scf_cycles"),
                         "scf_selected_rms_density": _metric_scalar(
@@ -873,8 +880,8 @@ def train_functional(
             row = {
                 "loss": float(np.mean(losses)),
                 "energy_mae_h": float(np.mean(maes)),
-                "density_matrix_mse": float(np.mean(density_matrix_mses)),
-                "density_matrix_loss": float(np.mean(density_matrix_losses)),
+                "grid_density_mse": float(np.mean(grid_density_mses)),
+                "grid_density_loss": float(np.mean(grid_density_losses)),
             }
             _add_stream_point_metrics(
                 row,
@@ -913,8 +920,8 @@ def train_functional(
             grad_sum = None
             losses = []
             maes = []
-            density_matrix_mses = []
-            density_matrix_losses = []
+            grid_density_mses = []
+            grid_density_losses = []
             grad_norms = []
             grad_abs_maxes = []
             nonfinite_fracs = []
@@ -923,15 +930,15 @@ def train_functional(
                 loss_val, metrics, grads = loss_and_grad(state.params, datum)
                 loss_scalar = float(loss_val)
                 energy_mae = _metric_scalar(metrics, "e0_total_mae")
-                density_matrix_mse = _metric_scalar(metrics, "density_matrix_mse")
+                grid_density_mse = _metric_scalar(metrics, "grid_density_mse")
                 grad_norm = _metric_scalar(metrics, "grad_norm")
                 grad_abs_max = _metric_scalar(metrics, "grad_abs_max")
                 nonfinite_frac = _metric_scalar(metrics, "nonfinite_grad_fraction", 0.0)
                 predicted_energy = _metric_scalar(metrics, "predicted_e0_total_h")
                 losses.append(loss_scalar)
                 maes.append(energy_mae)
-                density_matrix_mses.append(density_matrix_mse)
-                density_matrix_losses.append(_metric_scalar(metrics, "density_matrix_loss"))
+                grid_density_mses.append(grid_density_mse)
+                grid_density_losses.append(_metric_scalar(metrics, "grid_density_loss"))
                 grad_norms.append(grad_norm)
                 grad_abs_maxes.append(grad_abs_max)
                 nonfinite_fracs.append(nonfinite_frac)
@@ -940,7 +947,7 @@ def train_functional(
                         "energy_mae_h": energy_mae,
                         "energy_signed_err_h": predicted_energy - target_energies_h[idx],
                         "predicted_energy_h": predicted_energy,
-                        "density_matrix_mse": density_matrix_mse,
+                        "grid_density_mse": grid_density_mse,
                         "grad_norm": grad_norm,
                         "grad_abs_max": grad_abs_max,
                         "nonfinite_grad_fraction": nonfinite_frac,
@@ -979,8 +986,8 @@ def train_functional(
                 "step": step,
                 "loss": loss,
                 "energy_mae_h": float(np.mean(maes)),
-                "density_matrix_mse": float(np.mean(density_matrix_mses)),
-                "density_matrix_loss": float(np.mean(density_matrix_losses)),
+                "grid_density_mse": float(np.mean(grid_density_mses)),
+                "grid_density_loss": float(np.mean(grid_density_losses)),
                 "grad_norm": float(np.mean(grad_norms)),
                 "grad_abs_max": float(np.max(grad_abs_maxes)),
                 "param_update_norm": 0.0 if reverted else float(_tree_l2_norm(param_delta)),
@@ -1000,8 +1007,8 @@ def train_functional(
                     f"step={step:4d}/{int(args.steps):4d} "
                     f"loss={row['loss']:.8e} "
                     f"energy_mae={row['energy_mae_h']:.8e} "
-                    f"density_matrix_mse={row['density_matrix_mse']:.8e} "
-                    f"dm_mse={row['density_matrix_mse']:.8e} "
+                    f"grid_density_mse={row['grid_density_mse']:.8e} "
+                    f"density_mse={row['grid_density_mse']:.8e} "
                     f"grad_norm={row['grad_norm']:.8e} "
                     f"update_norm={row['param_update_norm']:.8e} "
                     f"lr={row['lr']:.8e}"
@@ -1062,8 +1069,8 @@ def train_functional(
             "step": 0,
             "loss": float(initial_loss),
             "energy_mae_h": _metric_scalar(initial_metrics, "e0_total_mae"),
-            "density_matrix_mse": _metric_scalar(initial_metrics, "density_matrix_mse"),
-            "density_matrix_loss": _metric_scalar(initial_metrics, "density_matrix_loss"),
+            "grid_density_mse": _metric_scalar(initial_metrics, "grid_density_mse"),
+            "grid_density_loss": _metric_scalar(initial_metrics, "grid_density_loss"),
             "grad_norm": float("nan"),
             "grad_abs_max": float("nan"),
             "param_update_norm": float("nan"),
@@ -1099,8 +1106,8 @@ def train_functional(
             "step": step,
             "loss": loss,
             "energy_mae_h": _metric_scalar(metrics, "e0_total_mae"),
-            "density_matrix_mse": _metric_scalar(metrics, "density_matrix_mse"),
-            "density_matrix_loss": _metric_scalar(metrics, "density_matrix_loss"),
+            "grid_density_mse": _metric_scalar(metrics, "grid_density_mse"),
+            "grid_density_loss": _metric_scalar(metrics, "grid_density_loss"),
             "grad_norm": _metric_scalar(metrics, "grad_norm"),
             "grad_abs_max": _metric_scalar(metrics, "grad_abs_max"),
             "param_update_norm": 0.0 if reverted else _metric_scalar(metrics, "param_update_norm"),
@@ -1118,8 +1125,8 @@ def train_functional(
                 f"step={step:4d}/{int(args.steps):4d} "
                 f"loss={row['loss']:.8e} "
                 f"energy_mae={row['energy_mae_h']:.8e} "
-                f"density_matrix_mse={row['density_matrix_mse']:.8e} "
-                f"dm_mse={row['density_matrix_mse']:.8e} "
+                f"grid_density_mse={row['grid_density_mse']:.8e} "
+                f"density_mse={row['grid_density_mse']:.8e} "
                 f"scf_conv_frac={row['scf_converged_fraction']:.6f} "
                 f"scf_cycles_max={row['scf_cycles_max']:.6f} "
                 f"scf_selected_rms_max={row['scf_selected_rms_max']:.8e} "
@@ -1176,7 +1183,7 @@ def write_per_point_history_csv(
         "energy_abs_err_ev",
         "energy_signed_err_h",
         "predicted_energy_h",
-        "density_matrix_mse",
+        "grid_density_mse",
         "grad_norm",
         "grad_abs_max",
         "nonfinite_grad_fraction",
@@ -1207,8 +1214,8 @@ def write_per_point_history_csv(
                             f"predicted_energy_h_{label}",
                             float("nan"),
                         ),
-                        "density_matrix_mse": row.get(
-                            f"density_matrix_mse_{label}",
+                        "grid_density_mse": row.get(
+                            f"grid_density_mse_{label}",
                             float("nan"),
                         ),
                         "grad_norm": row.get(f"grad_norm_{label}", float("nan")),
@@ -1244,8 +1251,8 @@ def prediction_rows_to_eval_history(
         "step": 0,
         "loss": float(np.mean(np.square(abs_err_h))),
         "energy_mae_h": float(np.mean(abs_err_h)),
-        "density_matrix_mse": float("nan"),
-        "density_matrix_loss": float("nan"),
+        "grid_density_mse": float("nan"),
+        "grid_density_loss": float("nan"),
         "grad_norm": float("nan"),
         "grad_abs_max": float("nan"),
         "param_update_norm": float("nan"),
@@ -1260,7 +1267,7 @@ def prediction_rows_to_eval_history(
         history_row[f"energy_mae_h_{label}"] = float(err_h)
         history_row[f"energy_signed_err_h_{label}"] = predicted_energy_h - reference_energy_h
         history_row[f"predicted_energy_h_{label}"] = predicted_energy_h
-        history_row[f"density_matrix_mse_{label}"] = float("nan")
+        history_row[f"grid_density_mse_{label}"] = float("nan")
         history_row[f"grad_norm_{label}"] = float("nan")
         history_row[f"grad_abs_max_{label}"] = float("nan")
         history_row[f"nonfinite_grad_fraction_{label}"] = float("nan")
@@ -1609,7 +1616,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("fixed_density", "self_consistent"),
         default="self_consistent",
     )
-    p.add_argument("--density-matrix-mse-weight", type=float, default=0.0)
+    p.add_argument("--grid-density-mse-weight", type=float, default=0.0)
     p.add_argument("--coefficient-prior-weight", type=float, default=0.0)
     p.add_argument("--grids-level", type=int, default=2)
     p.add_argument("--reference-scf-max-cycle", type=int, default=160)
@@ -1793,7 +1800,7 @@ def run_eval_only_checkpoint_streaming(
             correlation_energy_h=float(row["correlation_energy_h"]),
             perturbative_corr_h=float(row["perturbative_corr_h"]),
             reference_method=str(row["reference_method"]),
-            target_density_matrix=None,
+            target_grid_density=None,
         )
         for row in pred_rows
     ]
@@ -1829,7 +1836,7 @@ def run_eval_only_checkpoint_streaming(
         "ground_state_hf_mode": str(args.ground_state_hf_mode),
         "ground_state_pt2_mode": str(args.ground_state_pt2_mode),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
-        "density_matrix_mse_weight": float(args.density_matrix_mse_weight),
+        "grid_density_mse_weight": float(args.grid_density_mse_weight),
         "reference_scf_device": str(args.reference_scf_device),
         "steps": 0,
         "learning_rate": float(args.learning_rate),
@@ -1877,8 +1884,8 @@ def run_eval_only_checkpoint_streaming(
                 "y": [
                     "loss",
                     "energy_mae_h",
-                    "density_matrix_mse",
-                    "density_matrix_loss",
+                    "grid_density_mse",
+                    "grid_density_loss",
                 ],
             },
             {
@@ -1936,7 +1943,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         f"ground_state_pt2_mode={args.ground_state_pt2_mode} "
         f"pt2_channel_mode={args.pt2_channel_mode if bool(args.include_pt2_channel) else 'none'} "
         f"training_mode={args.training_mode} "
-        f"density_matrix_mse_weight={args.density_matrix_mse_weight} "
+        f"grid_density_mse_weight={args.grid_density_mse_weight} "
         f"reference_scf_device={args.reference_scf_device} "
         f"reference={reference_label} "
         f"active_space={args.active_space if uses_active_space else 'none'}"
@@ -2100,7 +2107,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "ground_state_hf_mode": str(args.ground_state_hf_mode),
             "ground_state_pt2_mode": str(args.ground_state_pt2_mode),
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
-            "density_matrix_mse_weight": float(args.density_matrix_mse_weight),
+            "grid_density_mse_weight": float(args.grid_density_mse_weight),
             "reference_scf_device": str(args.reference_scf_device),
             "steps": 0,
             "learning_rate": float(args.learning_rate),
@@ -2147,8 +2154,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                     "y": [
                         "loss",
                         "energy_mae_h",
-                        "density_matrix_mse",
-                        "density_matrix_loss",
+                        "grid_density_mse",
+                        "grid_density_loss",
                     ],
                 },
                 {
@@ -2234,7 +2241,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             "ground_state_hf_mode": str(args.ground_state_hf_mode),
             "ground_state_pt2_mode": str(args.ground_state_pt2_mode),
             "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
-            "density_matrix_mse_weight": float(args.density_matrix_mse_weight),
+            "grid_density_mse_weight": float(args.grid_density_mse_weight),
             "reference_scf_device": str(args.reference_scf_device),
             "prediction_scf_stability_check": bool(args.prediction_scf_stability_check),
             "prediction_scf_stability_tol_ev": float(args.prediction_scf_stability_tol_ev),
@@ -2273,7 +2280,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         "ground_state_pt2_mode": str(args.ground_state_pt2_mode),
         "pt2_channel_mode": str(args.pt2_channel_mode) if bool(args.include_pt2_channel) else None,
         "training_mode": str(args.training_mode),
-        "density_matrix_mse_weight": float(args.density_matrix_mse_weight),
+        "grid_density_mse_weight": float(args.grid_density_mse_weight),
         "reference_scf_device": str(args.reference_scf_device),
         "steps": int(args.steps),
         "learning_rate": float(args.learning_rate),
@@ -2321,8 +2328,8 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
                 "y": [
                     "loss",
                     "energy_mae_h",
-                    "density_matrix_mse",
-                    "density_matrix_loss",
+                    "grid_density_mse",
+                    "grid_density_loss",
                     "grad_norm",
                     "param_update_norm",
                     "scf_converged_fraction",

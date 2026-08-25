@@ -69,7 +69,6 @@ def test_strict_graddft_ground_state_canonicalizes_network_and_loss_shape():
         objective=MolecularTrainingConfig(
             e0_total_mse_weight=1.0,
             e0_total_mae_weight=0.0,
-            grid_density_spin="spin_summed",
         ),
         input_feature_mode="enhanced",
         network_architecture="simple_mlp",
@@ -83,7 +82,6 @@ def test_strict_graddft_ground_state_canonicalizes_network_and_loss_shape():
     assert aligned.objective.e0_total_mae_weight == 1.0
     assert aligned.objective.orbital_energy_mse_weight == 0.0
     assert aligned.objective.orbital_energy_mae_weight == 0.0
-    assert aligned.objective.grid_density_spin == "spin_resolved"
 
 
 def test_strict_graddft_ground_state_rejects_excited_state_constraints():

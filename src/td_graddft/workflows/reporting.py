@@ -131,7 +131,6 @@ def write_training_curve_csv(path: Path, training: TrainingRun) -> None:
                 "step",
                 "loss",
                 "density_penalty",
-                "stationarity_penalty",
                 "coefficient_prior_penalty",
                 "grad_norm",
                 "grad_abs_max",
@@ -142,7 +141,6 @@ def write_training_curve_csv(path: Path, training: TrainingRun) -> None:
         for step, (
             loss,
             density_penalty,
-            stationarity_penalty,
             coefficient_prior_penalty,
             grad_norm,
             grad_abs_max,
@@ -152,7 +150,6 @@ def write_training_curve_csv(path: Path, training: TrainingRun) -> None:
             zip(
                 training.loss_history,
                 training.density_penalty_history,
-                training.stationarity_penalty_history,
                 training.coefficient_prior_penalty_history,
                 training.grad_norm_history,
                 training.grad_abs_max_history,
@@ -166,7 +163,6 @@ def write_training_curve_csv(path: Path, training: TrainingRun) -> None:
                     step,
                     loss,
                     density_penalty,
-                    stationarity_penalty,
                     coefficient_prior_penalty,
                     grad_norm,
                     grad_abs_max,
@@ -181,7 +177,6 @@ def plot_training_curves(path: Path, training: TrainingRun, *, title: str) -> No
     steps = np.arange(len(training.loss_history))
     loss_values = np.asarray(training.loss_history, dtype=float)
     density_penalty_values = np.asarray(training.density_penalty_history, dtype=float)
-    stationarity_penalty_values = np.asarray(training.stationarity_penalty_history, dtype=float)
     coefficient_prior_penalty_values = np.asarray(
         training.coefficient_prior_penalty_history,
         dtype=float,
@@ -190,7 +185,6 @@ def plot_training_curves(path: Path, training: TrainingRun, *, title: str) -> No
     # Keep the default report compact when only the main loss is active.
     if not (
         np.any(density_penalty_values > 0.0)
-        or np.any(stationarity_penalty_values > 0.0)
         or np.any(coefficient_prior_penalty_values > 0.0)
     ):
         fig, ax = plt.subplots(1, 1, figsize=(7.2, 4.4))
@@ -206,7 +200,7 @@ def plot_training_curves(path: Path, training: TrainingRun, *, title: str) -> No
         plt.close(fig)
         return
 
-    fig, axes = plt.subplots(1, 4, figsize=(19, 4.0))
+    fig, axes = plt.subplots(1, 3, figsize=(14.4, 4.0))
 
     axes[0].plot(steps, np.maximum(loss_values, 1e-16), lw=1.8)
     axes[0].set_xlabel("Step")
@@ -235,45 +229,25 @@ def plot_training_curves(path: Path, training: TrainingRun, *, title: str) -> No
     axes[1].set_title("Density Matching")
     axes[1].grid(alpha=0.2)
 
-    if np.any(stationarity_penalty_values > 0.0):
-        axes[2].plot(steps, np.maximum(stationarity_penalty_values, 1e-16), lw=1.8)
+    if np.any(coefficient_prior_penalty_values > 0.0):
+        axes[2].plot(steps, np.maximum(coefficient_prior_penalty_values, 1e-16), lw=1.8)
         axes[2].set_yscale("log")
     else:
-        axes[2].plot(steps, stationarity_penalty_values, lw=1.8)
+        axes[2].plot(steps, coefficient_prior_penalty_values, lw=1.8)
         axes[2].set_yscale("linear")
         axes[2].text(
             0.03,
             0.92,
-            "All stationarity penalties are zero",
+            "All coefficient priors are zero",
             transform=axes[2].transAxes,
             fontsize=9,
             ha="left",
             va="top",
         )
     axes[2].set_xlabel("Step")
-    axes[2].set_ylabel("Stationarity Penalty")
-    axes[2].set_title("Fock OV Constraint")
+    axes[2].set_ylabel("Coefficient Prior")
+    axes[2].set_title("DM21-Style Prior")
     axes[2].grid(alpha=0.2)
-
-    if np.any(coefficient_prior_penalty_values > 0.0):
-        axes[3].plot(steps, np.maximum(coefficient_prior_penalty_values, 1e-16), lw=1.8)
-        axes[3].set_yscale("log")
-    else:
-        axes[3].plot(steps, coefficient_prior_penalty_values, lw=1.8)
-        axes[3].set_yscale("linear")
-        axes[3].text(
-            0.03,
-            0.92,
-            "All coefficient priors are zero",
-            transform=axes[3].transAxes,
-            fontsize=9,
-            ha="left",
-            va="top",
-        )
-    axes[3].set_xlabel("Step")
-    axes[3].set_ylabel("Coefficient Prior")
-    axes[3].set_title("DM21-Style Prior")
-    axes[3].grid(alpha=0.2)
 
     fig.suptitle(title)
     fig.tight_layout()
@@ -335,11 +309,6 @@ def print_run_summary(run: PipelineRun, *, print_all_states: bool = True) -> Non
     print(
         "Density penalty: "
         f"{training.initial_density_penalty:.6e} -> {training.final_density_penalty:.6e}"
-    )
-    print(
-        "Stationarity penalty: "
-        f"{training.initial_stationarity_penalty:.6e} -> "
-        f"{training.final_stationarity_penalty:.6e}"
     )
     print(
         "Coefficient prior penalty: "

@@ -18,11 +18,9 @@ from td_graddft.training import (
     MolecularTrainingConfig,
     create_train_state_from_molecule,
     dm21_scf_regularization_delta_energy,
-    density_matrix_matching_penalty,
     density_matching_penalty,
     density_on_grid,
     density_on_grid_spin_resolved,
-    density_stationarity_penalty,
     molecular_loss,
     make_fixed_density_predictor,
     make_molecular_train_step,
@@ -438,47 +436,32 @@ def test_molecular_e0_training_decreases_loss():
     assert jnp.isfinite(metrics["total_loss"])
 
 
-def test_grid_density_and_density_matrix_losses_are_explicit():
+def test_grid_density_loss_is_quadrature_integral_normalized_by_electron_count():
     molecule = _make_toy_molecule()
-    functional = _make_trainable_functional()
-    params = functional.init_from_molecule(jax.random.PRNGKey(2), molecule)
-    grid_datum = MolecularTrainingDatum(
-        molecule=molecule,
-        target_grid_density=density_on_grid(molecule) * 0.9,
-    )
-    matrix_datum = MolecularTrainingDatum(
-        molecule=molecule,
-        target_density_matrix=jnp.asarray(molecule.rdm1).sum(axis=0) * 0.9,
-    )
+    target_density = jnp.zeros_like(density_on_grid(molecule))
 
-    _, grid_metrics = molecular_loss(
-        params,
-        functional,
-        grid_datum,
-        training_config=MolecularTrainingConfig(grid_density_mse_weight=1.0),
+    actual = density_matching_penalty(
+        {},
+        object(),
+        molecule,
+        self_consistent_molecule=molecule,
+        target_density=target_density,
     )
-    _, matrix_metrics = molecular_loss(
-        params,
-        functional,
-        matrix_datum,
-        training_config=MolecularTrainingConfig(density_matrix_mse_weight=1.0),
+    residual = density_on_grid(molecule) - target_density
+    expected = (
+        jnp.sum(molecule.grid.weights * residual**2)
+        / _electron_count(molecule) ** 2
     )
 
-    assert grid_metrics["grid_density_mse"].shape == (1,)
-    assert matrix_metrics["density_matrix_mse"].shape == (1,)
-    assert grid_metrics["density_matrix_mse"][0] == 0.0
-    assert matrix_metrics["grid_density_mse"][0] == 0.0
+    assert jnp.allclose(actual, expected)
 
 
-def test_density_stationarity_and_dm21_regularizers_use_config_weights():
+def test_dm21_regularizer_uses_config_weight():
     molecule = _make_toy_molecule()
     functional = _make_trainable_functional()
     params = functional.init_from_molecule(jax.random.PRNGKey(5), molecule)
     datum = MolecularTrainingDatum(molecule=molecule)
-    config = MolecularTrainingConfig(
-        density_stationarity_weight=0.1,
-        dm21_scf_regularization_weight=0.2,
-    )
+    config = MolecularTrainingConfig(dm21_scf_regularization_weight=0.2)
 
     loss, metrics = molecular_loss(
         params,
@@ -488,7 +471,6 @@ def test_density_stationarity_and_dm21_regularizers_use_config_weights():
     )
 
     assert jnp.isfinite(loss)
-    assert metrics["density_stationarity_loss"][0] >= 0.0
     assert metrics["dm21_scf_loss"][0] >= 0.0
 
 

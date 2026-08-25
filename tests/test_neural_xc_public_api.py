@@ -290,7 +290,6 @@ def test_neural_xc_trainer_accepts_explicit_training_config(monkeypatch):
                 "total_loss": jnp.asarray([0.0]),
                 "e0_total_mae": jnp.asarray([0.0]),
                 "grid_density_mse": jnp.asarray([0.0]),
-                "density_matrix_mse": jnp.asarray([0.0]),
                 "orbital_energy_mae": jnp.asarray([0.0]),
                 "scf_cycles_mean": jnp.asarray([1.0]),
                 "scf_converged_fraction": jnp.asarray([1.0]),

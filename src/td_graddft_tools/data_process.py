@@ -14,7 +14,6 @@ from td_graddft.training.config import MolecularTrainingDatum
 _ARRAY_FIELD_NAMES = (
     "target_e0_total_h",
     "target_grid_density",
-    "target_density_matrix",
     "target_s1_total_h",
     "target_excitation_gaps_h",
     "target_oscillator_strengths",
@@ -265,7 +264,6 @@ class MolecularTargetBundle:
     input_info: InputInfo
     target_e0_total_h: np.ndarray | None = None
     target_grid_density: np.ndarray | None = None
-    target_density_matrix: np.ndarray | None = None
     target_s1_total_h: np.ndarray | None = None
     target_excitation_gaps_h: np.ndarray | None = None
     target_oscillator_strengths: np.ndarray | None = None
@@ -390,7 +388,6 @@ def build_molecular_target_bundle(
     basis_name: str | None = None,
     target_e0_total_h: Any | None = None,
     target_grid_density: Any | None = None,
-    target_density_matrix: Any | None = None,
     target_s1_total_h: Any | None = None,
     target_excitation_gaps_h: Any | None = None,
     target_oscillator_strengths: Any | None = None,
@@ -407,7 +404,6 @@ def build_molecular_target_bundle(
         molecule=molecule,
         target_e0_total_h=_to_jax_or_none(_to_numpy_or_none(target_e0_total_h)),
         target_grid_density=_to_jax_or_none(_to_numpy_or_none(target_grid_density)),
-        target_density_matrix=_to_jax_or_none(_to_numpy_or_none(target_density_matrix)),
         target_s1_total_h=_to_jax_or_none(_to_numpy_or_none(target_s1_total_h)),
         target_excitation_gaps_h=_to_jax_or_none(
             _to_numpy_or_none(target_excitation_gaps_h)

@@ -14,7 +14,6 @@ from td_graddft.workflows import (
 )
 from td_graddft.neural_xc import (
     DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_MODE,
-    DEFAULT_NEURAL_XC_DENSITY_SUPERVISION,
     DEFAULT_NEURAL_XC_SEMILOCAL_XC,
     DEFAULT_INPUT_FEATURE_MODE,
     DEFAULT_NETWORK_ARCHITECTURE,
@@ -148,14 +147,6 @@ def test_strict_jax_workflow_presets_return_reference_specs():
     assert benzene.simulation.scf_backend == "jax_rks"
 
 
-def test_neural_xc_training_config_accepts_density_supervision():
-    config = NeuralXCTrainingConfig(
-        objective=MolecularTrainingConfig(grid_density_spin="spin_resolved")
-    )
-
-    assert config.objective.grid_density_spin == "spin_resolved"
-
-
 def test_neural_xc_training_config_accepts_tda_eigenvector_gradient_mode():
     config = NeuralXCTrainingConfig(
         objective=MolecularTrainingConfig(
@@ -184,7 +175,6 @@ def test_neural_xc_training_config_defaults_follow_neural_xc_defaults():
     config = NeuralXCTrainingConfig()
 
     assert config.semilocal_xc == DEFAULT_NEURAL_XC_SEMILOCAL_XC
-    assert config.objective.grid_density_spin == DEFAULT_NEURAL_XC_DENSITY_SUPERVISION
     assert config.coefficient_prior_mode == DEFAULT_NEURAL_XC_COEFFICIENT_PRIOR_MODE
     assert config.objective.e0_total_mse_weight == 0.0
     assert config.objective.e0_total_mae_weight == 0.0

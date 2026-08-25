@@ -1162,15 +1162,15 @@ def test_ground_state_datum_preserves_scf_initial_density_and_stores_target_dens
     _pyscf_or_skip()
     molecule = _make_h2_reference()
     original_rdm1 = np.asarray(molecule.rdm1)
-    target_density_matrix = np.asarray(original_rdm1.sum(axis=0)) * 0.9
+    target_grid_density = np.asarray(density_on_grid(molecule)) * 0.9
     datum = MolecularTrainingDatum(
         molecule=molecule,
         target_e0_total_h=np.asarray(molecule.mf_energy),
-        target_density_matrix=target_density_matrix,
+        target_grid_density=target_grid_density,
     )
 
     assert np.allclose(np.asarray(datum.molecule.rdm1), original_rdm1)
-    assert np.allclose(np.asarray(datum.target_density_matrix), target_density_matrix)
+    assert np.allclose(np.asarray(datum.target_grid_density), target_grid_density)
 
 
 def test_training_config_passes_explicit_scf_energy_tolerance():

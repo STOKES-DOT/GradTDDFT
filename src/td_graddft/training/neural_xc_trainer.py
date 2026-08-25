@@ -16,7 +16,6 @@ _NEURAL_XC_HISTORY_KEYS = (
     "total_loss",
     "e0_total_mae",
     "grid_density_mse",
-    "density_matrix_mse",
     "orbital_energy_mae",
     "scf_cycles",
     "scf_converged",
@@ -111,9 +110,6 @@ class NeuralXCTrainer:
             history["total_loss"].append(_scalar_metric(metrics, "total_loss"))
             history["e0_total_mae"].append(_scalar_metric(metrics, "e0_total_mae"))
             history["grid_density_mse"].append(_scalar_metric(metrics, "grid_density_mse"))
-            history["density_matrix_mse"].append(
-                _scalar_metric(metrics, "density_matrix_mse")
-            )
             history["orbital_energy_mae"].append(_scalar_metric(metrics, "orbital_energy_mae"))
             history["scf_cycles"].append(_scalar_metric(metrics, "scf_cycles_mean"))
             history["scf_converged"].append(_scalar_metric(metrics, "scf_converged_fraction"))
