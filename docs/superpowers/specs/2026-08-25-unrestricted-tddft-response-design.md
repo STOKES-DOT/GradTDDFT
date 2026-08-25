@@ -239,11 +239,12 @@ The change is complete when:
 
 1. Explicit B3LYP and PBE unrestricted TDA/full-TDDFT no longer raise for a
    missing spin kernel.
-2. Traditional unrestricted excitation energies use the same tolerance as the
-   existing restricted B3LYP comparison: `atol=8e-4 Hartree` and `rtol=2e-3`.
-3. Unrestricted oscillator strengths use the same tolerance as the existing
-   restricted B3LYP comparison: `atol=2e-3` and `rtol=2e-2`, with summed
-   strengths used for matched degenerate manifolds.
+2. Traditional unrestricted excitation energies use a tolerance two orders of
+   magnitude tighter than the existing restricted B3LYP comparison:
+   `atol=8e-6 Hartree` and `rtol=2e-5`.
+3. Unrestricted oscillator strengths use a tolerance two orders of magnitude
+   tighter than the existing restricted B3LYP comparison: `atol=2e-5` and
+   `rtol=2e-4`, with summed strengths used for matched degenerate manifolds.
 4. H2+, OH, and O2 cover empty-beta, doublet, and triplet response behavior,
    respectively; the applicable TDA and full-TDDFT comparisons pass on
    identical PySCF orbitals.
