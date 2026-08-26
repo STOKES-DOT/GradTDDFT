@@ -6,6 +6,7 @@ import weakref
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import core as jax_core
 from jax.lax import Precision
 from jaxtyping import Array
@@ -408,6 +409,32 @@ def has_explicit_spin_axis(molecule: Any) -> bool:
             continue
         shape = getattr(value, "shape", None)
         if shape is not None and len(shape) == ndim and int(shape[0]) == 2:
+            return True
+    return False
+
+
+def requires_unrestricted_spin_treatment(molecule: Any) -> bool:
+    if not has_explicit_spin_axis(molecule):
+        return False
+    nocc_alpha = getattr(molecule, "nocc_alpha", None)
+    nocc_beta = getattr(molecule, "nocc_beta", None)
+    if nocc_alpha is not None and nocc_beta is not None:
+        try:
+            if int(nocc_alpha) != int(nocc_beta):
+                return True
+        except (TypeError, ValueError):
+            pass
+    for name in ("mo_occ", "rdm1"):
+        value = getattr(molecule, name, None)
+        if value is None:
+            continue
+        arr = jnp.asarray(value)
+        if isinstance(arr, jax.core.Tracer):
+            continue
+        host_arr = np.asarray(jax.device_get(arr))
+        if host_arr.ndim >= 1 and int(host_arr.shape[0]) == 2 and not np.allclose(
+            host_arr[0], host_arr[1]
+        ):
             return True
     return False
 

@@ -2644,6 +2644,68 @@ class _ConstantChannelModel(nn.Module):
         return jnp.broadcast_to(coeffs, inputs.shape[:-1] + (coeffs.shape[0],))
 
 
+def test_open_shell_energy_from_molecule_uses_polarized_semilocal_channels():
+    molecule = _make_open_shell_toy_molecule()
+    non_hf_module = make_custom_semilocal_module(
+        channel_names=("spin_local",),
+        energy_density_channels_fn=lambda features: jnp.zeros_like(features.rho),
+        unrestricted_energy_density_channels_fn=lambda features: (
+            features.rho_a + 2.0 * features.rho_b
+        ),
+        name="polarized_energy_path",
+    )
+    functional = NeuralXCFunctional(
+        model=_ConstantChannelModel((1.0,)),
+        non_hf_module=non_hf_module,
+        name="open_shell_polarized_energy",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(189), molecule)
+    features = restricted_grid_features(molecule)
+    expected = jnp.tensordot(
+        molecule.grid.weights,
+        features.rho_a + 2.0 * features.rho_b,
+        axes=(0, 0),
+    )
+
+    actual = functional.energy_from_molecule(params, molecule)
+
+    assert not jnp.allclose(expected, 0.0)
+    assert jnp.allclose(actual, expected, atol=1e-12)
+
+
+def test_open_shell_nograd_hfx_descriptor_uses_current_spin_resolved_nu():
+    molecule = _make_open_shell_toy_molecule()
+    nu = _toy_hfx_nu_cache()
+    _, stale_fxx = _toy_hfx_local_and_fxx(molecule, nu)
+    molecule = replace(
+        molecule,
+        rdm1=molecule.rdm1.at[0, 0, 0].set(0.4).at[0, 1, 1].set(1.2),
+        hfx_nu=nu,
+        hfx_fxx=stale_fxx,
+    )
+    expected_local, _ = _toy_hfx_local_and_fxx(molecule, nu)
+    stale_total, stale_a, stale_b = _toy_linear_hfx_from_fxx(molecule, stale_fxx)
+    functional = make_neural_xc_functional(
+        semilocal_xc=("gga_x_pbe", "gga_c_pbe"),
+        include_hfx_channel=True,
+        ground_state_hf_mode="nograd",
+        hidden_dims=(8,),
+    )
+    features = restricted_grid_features(molecule)
+
+    total, hfx_a, hfx_b, _ = functional._restricted_hfx_grid_contribution_components(
+        molecule,
+        features=features,
+        include_fxx=True,
+    )
+
+    assert not jnp.allclose(stale_a, expected_local[0, :, 0])
+    assert not jnp.allclose(stale_total, expected_local[:, :, 0].sum(axis=0))
+    assert jnp.allclose(hfx_a, expected_local[0, :, 0], atol=1e-12)
+    assert jnp.allclose(hfx_b, expected_local[1, :, 0], atol=1e-12)
+    assert jnp.allclose(total, expected_local[:, :, 0].sum(axis=0), atol=1e-12)
+
+
 def test_unrestricted_neural_xc_scf_components_keep_spin_potentials():
     molecule = _make_open_shell_toy_molecule()
     molecule = replace(

@@ -5,7 +5,6 @@ from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax.lax import Precision
 from jaxtyping import Array, PyTree
 
@@ -14,6 +13,7 @@ from ..features import (
     grid_features_with_spin_gradients_for_molecule,
     grid_features_with_gradients_for_molecule,
     has_explicit_spin_axis,
+    requires_unrestricted_spin_treatment,
 )
 from ..tddft.cisd import (
     restricted_cisd_second_order_correction,
@@ -27,30 +27,6 @@ from .inputs import (
     is_chunked_hfx_nu,
 )
 from ..xc_backend.jax_libxc import RestrictedFeatureBundle
-
-
-def _requires_unrestricted_response_binding(molecule: Any) -> bool:
-    if not has_explicit_spin_axis(molecule):
-        return False
-    nocc_alpha = getattr(molecule, "nocc_alpha", None)
-    nocc_beta = getattr(molecule, "nocc_beta", None)
-    if nocc_alpha is not None and nocc_beta is not None:
-        try:
-            if int(nocc_alpha) != int(nocc_beta):
-                return True
-        except (TypeError, ValueError):
-            pass
-    for name in ("mo_occ", "rdm1"):
-        value = getattr(molecule, name, None)
-        if value is None:
-            continue
-        arr = jnp.asarray(value)
-        if isinstance(arr, jax.core.Tracer):
-            continue
-        host_arr = np.asarray(jax.device_get(arr))
-        if host_arr.ndim >= 1 and int(host_arr.shape[0]) == 2 and not np.allclose(host_arr[0], host_arr[1]):
-            return True
-    return False
 
 
 def _pack_restricted_grid_payload(
@@ -396,7 +372,10 @@ class NeuralXCBindingMixin:
                 "as the fixed GradDFT-style chi/fxx reference."
             )
         current_hfx_fxx = None
-        if mode == "nograd" and cached_fxx is not None:
+        use_current_spin_nu = (
+            requires_unrestricted_spin_treatment(molecule) and nu_source is not None
+        )
+        if mode == "nograd" and cached_fxx is not None and not use_current_spin_nu:
             if getattr(molecule, "ao", None) is None:
                 raise AttributeError("Molecule-like object must define ao.")
             ao = jnp.asarray(molecule.ao)
@@ -1651,7 +1630,7 @@ class NeuralXCBindingMixin:
                 "contractions and is not implemented. Use response_hf_mode='approx'."
             )
 
-        if _requires_unrestricted_response_binding(molecule):
+        if requires_unrestricted_spin_treatment(molecule):
             features, grad_a, grad_b = grid_features_with_spin_gradients_for_molecule(molecule)
             semilocal_channels = self.unrestricted_semilocal_energy_density_channels(
                 features

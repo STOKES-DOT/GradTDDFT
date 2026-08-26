@@ -13,6 +13,7 @@ from ..data.integrals import eri_pair_matrix_to_mo_eri_slices
 from ..data.integrals.jax.packed_eri import _metadata_arrays, _mo_pair_products
 from ..features import (
     grid_features_for_molecule,
+    requires_unrestricted_spin_treatment,
 )
 from .inputs import (
     _local_pt2_feature_from_unrestricted_orbitals,
@@ -658,7 +659,11 @@ class NeuralXCProjectionMixin:
     ) -> tuple[RestrictedFeatureBundle, Array, Array]:
         if features is None:
             features = grid_features_for_molecule(molecule)
-        semilocal_channels = self.semilocal_energy_density_channels(features)
+        semilocal_channels = (
+            self.unrestricted_semilocal_energy_density_channels(features)
+            if requires_unrestricted_spin_treatment(molecule)
+            else self.semilocal_energy_density_channels(features)
+        )
         semilocal_total = (
             jnp.sum(semilocal_channels, axis=-1)
             if semilocal_energy_density is None
