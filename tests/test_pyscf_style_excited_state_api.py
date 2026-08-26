@@ -268,6 +268,43 @@ def test_tda_and_tddft_dispatch_unrestricted_references(monkeypatch):
     assert tddft.xy == (("xaa", "xbb"), ("yaa", "ybb"))
 
 
+def test_unrestricted_tda_string_xc_uses_unrestricted_response(monkeypatch):
+    import td_graddft.tdscf.api as api
+    from td_graddft.tddft._unrestricted_semilocal_response import (
+        UnrestrictedSemilocalResponseFunctional,
+    )
+
+    captured = {}
+
+    class FakeUnrestrictedTDA:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def kernel(self, nstates=None):
+            return types.SimpleNamespace(
+                excitation_energies=jnp.asarray([0.11]),
+                amplitudes_alpha="xa",
+                amplitudes_beta="xb",
+            )
+
+    monkeypatch.setattr(api, "UnrestrictedTDA", FakeUnrestrictedTDA)
+    reference = types.SimpleNamespace(
+        mo_coeff=jnp.zeros((2, 2, 2)),
+        mo_occ=jnp.zeros((2, 2)),
+        mo_energy=jnp.zeros((2, 2)),
+        nocc_alpha=1,
+        nocc_beta=1,
+    )
+
+    tdscf.TDA(reference, xc_functional="b3lyp").kernel(nstates=1)
+
+    assert isinstance(
+        captured["xc_functional"],
+        UnrestrictedSemilocalResponseFunctional,
+    )
+    assert captured["xc_functional"].xc_spec == "b3lyp"
+
+
 def test_scf_shortcuts_return_tdscf_facades():
     mf = scf.RKS(gto.M(atom="H 0 0 0; H 0 0 0.74", basis="sto-3g"))
 

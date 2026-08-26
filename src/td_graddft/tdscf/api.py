@@ -11,6 +11,9 @@ from ..tddft.eigensolvers import PYSCF_TD_POSITIVE_EIG_THRESHOLD
 from ..tddft.eigenvector_differentiation import TDAGradientMode
 from ..tddft import RestrictedCasidaTDDFT, UnrestrictedCasidaTDDFT, UnrestrictedTDA
 from ..tddft._semilocal_response import SemilocalResponseFunctional
+from ..tddft._unrestricted_semilocal_response import (
+    UnrestrictedSemilocalResponseFunctional,
+)
 
 
 def _molecule_from_source(source: Any) -> Any:
@@ -185,6 +188,12 @@ class _BaseTD:
 
     def _unrestricted_solver_kwargs(self, molecule: Any) -> dict[str, Any]:
         kwargs = self._common_solver_kwargs(molecule)
+        source_xc = self.xc_functional
+        if source_xc is None:
+            source_xc = getattr(self.mf, "xc", None)
+        if isinstance(source_xc, str):
+            source_xc = UnrestrictedSemilocalResponseFunctional(source_xc)
+        kwargs["xc_functional"] = source_xc
         kwargs.update(
             {
                 "matrix_eps": self.matrix_eps,
