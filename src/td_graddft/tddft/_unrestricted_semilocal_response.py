@@ -67,6 +67,56 @@ def _validate_spin_tangent(
     return array
 
 
+def pack_spin_grid_tangents(
+    tangent_a: Array,
+    tangent_b: Array,
+    *,
+    ngrids: int,
+    dtype: Any,
+    trailing_zeros: int = 0,
+) -> Array:
+    tangent_a = _validate_spin_tangent(
+        jnp.asarray(tangent_a, dtype=dtype),
+        nfeatures=4,
+        ngrids=ngrids,
+        label="tangent_a",
+    )
+    tangent_b = _validate_spin_tangent(
+        jnp.asarray(tangent_b, dtype=dtype),
+        nfeatures=4,
+        ngrids=ngrids,
+        label="tangent_b",
+    )
+    if tangent_a.shape[0] != tangent_b.shape[0]:
+        raise ValueError("Alpha and beta spin-grid tangents must share a batch size.")
+    channels = [
+        tangent_a[:, 0:1],
+        tangent_b[:, 0:1],
+        tangent_a[:, 1:4],
+        tangent_b[:, 1:4],
+    ]
+    if trailing_zeros:
+        channels.append(
+            jnp.zeros(
+                (tangent_a.shape[0], int(trailing_zeros), int(ngrids)),
+                dtype=dtype,
+            )
+        )
+    return jnp.concatenate(channels, axis=1).transpose(0, 2, 1)
+
+
+def unpack_spin_grid_response(response: Array) -> tuple[Array, Array]:
+    response = jnp.asarray(response).transpose(0, 2, 1)
+    if response.shape[1] < 8:
+        raise ValueError(
+            "Spin-grid response must contain rho_a, rho_b, and both gradient blocks."
+        )
+    return (
+        jnp.concatenate([response[:, 0:1], response[:, 2:5]], axis=1),
+        jnp.concatenate([response[:, 1:2], response[:, 5:8]], axis=1),
+    )
+
+
 def build_spin_transition_factors(
     molecule: Any,
     orbo: Array,
@@ -195,27 +245,22 @@ class UnrestrictedSemilocalResponseFunctional:
                 ],
                 axis=-1,
             )
-            tangent = jnp.concatenate(
-                [
-                    tangent_a[:, 0:1],
-                    tangent_b[:, 0:1],
-                    tangent_a[:, 1:4],
-                    tangent_b[:, 1:4],
-                ],
-                axis=1,
-            ).transpose(0, 2, 1)
+            tangent = pack_spin_grid_tangents(
+                tangent_a,
+                tangent_b,
+                ngrids=ngrids,
+                dtype=base.dtype,
+            )
 
         base_batch = jnp.broadcast_to(base, (tangent.shape[0],) + base.shape)
         response = _point_spin_hvp(
             self.xc_spec,
             self.response_feature_kind,
-        )(base_batch, tangent).transpose(0, 2, 1)
+        )(base_batch, tangent)
         if self.response_feature_kind == "LDA":
+            response = response.transpose(0, 2, 1)
             return response[:, 0:1], response[:, 1:2]
-        return (
-            jnp.concatenate([response[:, 0:1], response[:, 2:5]], axis=1),
-            jnp.concatenate([response[:, 1:2], response[:, 5:8]], axis=1),
-        )
+        return unpack_spin_grid_response(response)
 
 
 __all__ = [
@@ -223,6 +268,8 @@ __all__ = [
     "UnrestrictedSemilocalResponseFunctional",
     "build_spin_transition_factors",
     "build_unrestricted_semilocal_response_action",
+    "pack_spin_grid_tangents",
     "project_grid_response_to_spin_transition",
     "project_spin_transition_to_grid",
+    "unpack_spin_grid_response",
 ]

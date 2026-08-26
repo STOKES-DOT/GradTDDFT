@@ -14,6 +14,10 @@ from ..features import (
     restricted_feature_bundle_from_response_variables,
     restricted_transition_response_features,
 )
+from ..tddft._unrestricted_semilocal_response import (
+    pack_spin_grid_tangents,
+    unpack_spin_grid_response,
+)
 from ..xc_backend.jax_libxc import RestrictedFeatureBundle
 from .components import (
     SemilocalEnergyDensityFn,
@@ -1227,36 +1231,13 @@ class ResponseMixin:
             grad_a,
             grad_b,
         )
-        tangent_a = jnp.asarray(tangent_a, dtype=response_variables.dtype)
-        tangent_b = jnp.asarray(tangent_b, dtype=response_variables.dtype)
-        expected_tail = (4, int(response_variables.shape[0]))
-        if tangent_a.ndim != 3 or tangent_a.shape[1:] != expected_tail:
-            raise ValueError(
-                "Unrestricted alpha response tangent must have shape "
-                f"(batch, 4, ngrids), got {tangent_a.shape}."
-            )
-        if tangent_b.ndim != 3 or tangent_b.shape[1:] != expected_tail:
-            raise ValueError(
-                "Unrestricted beta response tangent must have shape "
-                f"(batch, 4, ngrids), got {tangent_b.shape}."
-            )
-        if tangent_a.shape[0] != tangent_b.shape[0]:
-            raise ValueError("Alpha and beta response tangents must share a batch size.")
-
-        zeros = jnp.zeros(
-            (tangent_a.shape[0], 2, tangent_a.shape[2]),
+        tangent = pack_spin_grid_tangents(
+            tangent_a,
+            tangent_b,
+            ngrids=int(response_variables.shape[0]),
             dtype=response_variables.dtype,
+            trailing_zeros=2,
         )
-        tangent = jnp.concatenate(
-            [
-                tangent_a[:, 0:1],
-                tangent_b[:, 0:1],
-                tangent_a[:, 1:4],
-                tangent_b[:, 1:4],
-                zeros,
-            ],
-            axis=1,
-        ).transpose(0, 2, 1)
         hf_feature_a, hf_feature_b = hf_spin_energy_density
         pt2_feature = (
             jnp.zeros_like(hf_projected)
@@ -1307,11 +1288,7 @@ class ResponseMixin:
 
         response = jax.vmap(vector_hvp)(tangent)
         response = response * active[None, :, None].astype(response.dtype)
-        response = response.transpose(0, 2, 1)
-        return (
-            jnp.concatenate([response[:, 0:1], response[:, 2:5]], axis=1),
-            jnp.concatenate([response[:, 1:2], response[:, 5:8]], axis=1),
-        )
+        return unpack_spin_grid_response(response)
 
     def _strict_point_response_tensor_fn(
         self,
