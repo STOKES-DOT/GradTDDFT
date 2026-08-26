@@ -162,7 +162,6 @@ class MolecularTrainingConfig:
     ) = None
     scf_gradient_mode: Literal["expl", "impl"] = "impl"
     scf_implicit_diff_max_iter: int = 6
-    scf_implicit_diff_clip: float = 1e4
     scf_implicit_diff_tolerance: float = 1e-6
     scf_implicit_diff_regularization: float = 0.0
 

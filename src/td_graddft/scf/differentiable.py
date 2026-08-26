@@ -732,9 +732,6 @@ class DifferentiableSCFConfig:
     iterate_selection: Literal["final", "best_rms", "first_converged"] = "final"
     require_converged_iterates: bool = False
     implicit_diff_max_iter: int = 6
-    implicit_diff_step_size: float = 0.2
-    implicit_diff_clip: float = 1e4
-    implicit_diff_solver: Literal["normal_cg", "gmres", "bicgstab"] = "gmres"
     implicit_diff_tolerance: float = 1e-6
     implicit_diff_regularization: float = 0.0
     implicit_diff_restart: int = 12
@@ -1682,7 +1679,7 @@ class DifferentiableSCF:
             tolerance=float(self.config.implicit_diff_tolerance),
             max_iter=int(self.config.implicit_diff_max_iter),
             regularization=float(self.config.implicit_diff_regularization),
-            clip=float(self.config.implicit_diff_clip),
+            restart=int(self.config.implicit_diff_restart),
         )
 
         if fixed_point_args is None:
@@ -1836,7 +1833,7 @@ class DifferentiableSCF:
             tolerance=float(self.config.implicit_diff_tolerance),
             max_iter=int(self.config.implicit_diff_max_iter),
             regularization=float(self.config.implicit_diff_regularization),
-            clip=float(self.config.implicit_diff_clip),
+            restart=int(self.config.implicit_diff_restart),
         )
 
         density_implicit = implicit_fixed_point_solution(

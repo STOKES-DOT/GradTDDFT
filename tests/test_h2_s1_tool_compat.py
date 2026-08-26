@@ -243,8 +243,6 @@ def test_h2_s1_self_consistent_config_uses_current_implicit_diff_fields():
         [
             "--scf-implicit-diff-max-iter",
             "9",
-            "--scf-implicit-diff-clip",
-            "123.0",
             "--scf-implicit-diff-tolerance",
             "1e-5",
             "--scf-implicit-diff-regularization",
@@ -255,7 +253,6 @@ def test_h2_s1_self_consistent_config_uses_current_implicit_diff_fields():
     config = module._self_consistent_prediction_config(args)
 
     assert config.scf_implicit_diff_max_iter == 9
-    assert config.scf_implicit_diff_clip == 123.0
     assert config.scf_implicit_diff_tolerance == 1e-5
     assert config.scf_implicit_diff_regularization == 2e-3
     assert not hasattr(config, "scf_implicit_diff_solver")

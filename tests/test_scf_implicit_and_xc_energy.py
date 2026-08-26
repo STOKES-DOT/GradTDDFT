@@ -12,7 +12,6 @@ from td_graddft.scf.xc_energy import xc_energy_and_potential_from_density
 
 def test_implicit_fixed_point_solution_matches_scalar_analytic_gradient():
     cfg = ImplicitFixedPointConfig(
-        solver_name="gmres",
         tolerance=1e-10,
         max_iter=4,
     )
@@ -32,26 +31,6 @@ def test_implicit_fixed_point_solution_matches_scalar_analytic_gradient():
     assert np.allclose(jax.grad(solve)(param), 1.0 / (1.0 - 0.2) ** 2, rtol=1e-6)
 
 
-def test_implicit_fixed_point_solution_neumann_adjoint_matches_scalar_gradient():
-    cfg = ImplicitFixedPointConfig(
-        solver_name="neumann",
-        max_iter=12,
-    )
-
-    def solve(param):
-        solution = jax.lax.stop_gradient(1.0 / (1.0 - param))
-        return implicit_fixed_point_solution(
-            param,
-            solution=solution,
-            fixed_point=lambda x, p: p * x + 1.0,
-            config=cfg,
-        )
-
-    param = jnp.asarray(0.2, dtype=jnp.float64)
-
-    assert np.allclose(jax.grad(solve)(param), 1.0 / (1.0 - 0.2) ** 2, rtol=1e-6)
-
-
 def test_scf_package_exports_new_refactor_boundaries():
     from td_graddft.scf import (
         ImplicitFixedPointConfig as ExportedImplicitFixedPointConfig,
@@ -68,7 +47,6 @@ def test_scf_package_exports_new_refactor_boundaries():
 
 def test_implicit_fixed_point_solution_accepts_custom_transpose_and_param_vjp():
     cfg = ImplicitFixedPointConfig(
-        solver_name="gmres",
         tolerance=1e-10,
         max_iter=4,
     )
@@ -100,7 +78,6 @@ def test_implicit_fixed_point_solution_accepts_custom_transpose_and_param_vjp():
 
 def test_implicit_fixed_point_solution_threads_callback_aux():
     cfg = ImplicitFixedPointConfig(
-        solver_name="gmres",
         tolerance=1e-10,
         max_iter=4,
     )
@@ -133,7 +110,6 @@ def test_implicit_fixed_point_solution_threads_callback_aux():
 
 def test_implicit_fixed_point_solution_builds_custom_transpose_once():
     cfg = ImplicitFixedPointConfig(
-        solver_name="gmres",
         tolerance=1e-10,
         max_iter=4,
     )
@@ -172,44 +148,41 @@ def test_implicit_fixed_point_solution_builds_custom_transpose_once():
     assert calls["matvec"] > 1
 
 
-def test_implicit_gmres_solves_nonsymmetric_system_with_restart():
-    matrix = jnp.asarray(
-        [[4.0, 1.0], [2.0, 3.0]],
-        dtype=jnp.float64,
-    )
-    rhs = jnp.asarray([1.0, -1.0], dtype=jnp.float64)
+def test_implicit_gmres_uses_restart_cycles_for_larger_system():
+    size = 30
+    rng = np.random.default_rng(7)
+    rotation, _ = np.linalg.qr(rng.normal(size=(size, size)))
+    fixed_point_jacobian = rotation @ np.diag(np.linspace(0.2, 0.95, size)) @ rotation.T
+    matrix = jnp.asarray(np.eye(size) - fixed_point_jacobian.T, dtype=jnp.float64)
+    rhs = jnp.asarray(np.linspace(-1.0, 1.0, size), dtype=jnp.float64)
 
     solution = solve_implicit_linear_system(
         lambda vec: matrix @ vec,
         rhs,
-        solver_name="gmres",
         tol=1e-10,
-        max_iter=4,
-        restart=2,
+        max_iter=5,
+        restart=10,
     )
 
-    assert np.allclose(matrix @ solution, rhs, rtol=1e-8, atol=1e-8)
+    relative_residual = jnp.linalg.norm(matrix @ solution - rhs) / jnp.linalg.norm(rhs)
+    assert float(relative_residual) < 1e-8
 
 
-def test_implicit_gmres_skips_zero_initial_matvec():
-    calls = {"matvec": 0}
+def test_implicit_gmres_solves_identity_system():
     rhs = jnp.asarray([1.0, -1.0], dtype=jnp.float64)
 
     def matvec(vec):
-        calls["matvec"] += 1
         return vec
 
     solution = solve_implicit_linear_system(
         matvec,
         rhs,
-        solver_name="gmres",
         tol=1e-10,
         max_iter=1,
         restart=1,
     )
 
     assert np.allclose(solution, rhs)
-    assert calls["matvec"] == 1
 
 
 def test_xc_energy_and_potential_from_density_uses_energy_gradient():

@@ -1971,7 +1971,6 @@ def _make_differentiable_scf(
             vxc_clip=cfg.scf_vxc_clip,
             iterate_selection=cfg.scf_iterate_selection,
             implicit_diff_max_iter=cfg.scf_implicit_diff_max_iter,
-            implicit_diff_clip=cfg.scf_implicit_diff_clip,
             implicit_diff_tolerance=cfg.scf_implicit_diff_tolerance,
             implicit_diff_regularization=cfg.scf_implicit_diff_regularization,
         )

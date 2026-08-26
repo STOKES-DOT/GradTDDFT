@@ -834,11 +834,12 @@ def test_unrestricted_impl_forward_uses_self_consistent_density():
 
 def test_unrestricted_impl_delegates_to_generic_fixed_point_wrapper(monkeypatch):
     molecule = _make_toy_unrestricted_reference()
-    calls = {"implicit": 0}
+    calls = {"implicit": 0, "restart": None}
     original = scf_differentiable.implicit_fixed_point_solution
 
     def counted_implicit_fixed_point_solution(*args, **kwargs):
         calls["implicit"] += 1
+        calls["restart"] = kwargs["config"].restart
         return original(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -885,6 +886,7 @@ def test_unrestricted_impl_delegates_to_generic_fixed_point_wrapper(monkeypatch)
             conv_tol_density=1e-8,
             implicit_diff_max_iter=8,
             implicit_diff_regularization=1e-3,
+            implicit_diff_restart=7,
         )
     )
 
@@ -896,6 +898,7 @@ def test_unrestricted_impl_delegates_to_generic_fixed_point_wrapper(monkeypatch)
     _, grad = jax.value_and_grad(_objective)(jnp.asarray(0.1, dtype=jnp.float32))
 
     assert calls["implicit"] == 1
+    assert calls["restart"] == 7
     assert jnp.isfinite(grad)
 
 

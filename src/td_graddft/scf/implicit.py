@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
+from jax.scipy.sparse.linalg import gmres as jax_gmres
 from jaxtyping import Array, PyTree
 
 
@@ -12,12 +13,10 @@ from jaxtyping import Array, PyTree
 class ImplicitFixedPointConfig:
     """Controls the adjoint solve for an implicit fixed-point state."""
 
-    solver_name: str = "gmres"
     tolerance: float = 1e-6
     max_iter: int = 6
-    restart: int | None = None
+    restart: int | None = 20
     regularization: float = 0.0
-    clip: float = 1e4
 
 
 def implicit_fixed_point_solution(
@@ -72,7 +71,7 @@ def implicit_fixed_point_solution(
         cotangent_solution: Array,
     ) -> tuple[PyTree, Array, PyTree]:
         params_local, solution_local, args_local = res
-        rhs = _clean_and_clip(cotangent_solution, cfg.clip)
+        rhs = jnp.asarray(cotangent_solution)
 
         if apply_fixed_point_transpose_factory is not None:
             fixed_point_transpose = apply_fixed_point_transpose_factory(
@@ -94,8 +93,7 @@ def implicit_fixed_point_solution(
             fixed_point_transpose = lambda vec: solution_vjp(vec)[0]
 
         def _optimality_transpose(vec: Array) -> Array:
-            cot = fixed_point_transpose(vec) - vec
-            return _clean_and_clip(cot, cfg.clip)
+            return fixed_point_transpose(vec) - vec
 
         regularization = jnp.asarray(
             max(float(cfg.regularization), 0.0),
@@ -104,34 +102,16 @@ def implicit_fixed_point_solution(
 
         def _adjoint_op(vec_flat: Array) -> Array:
             vec = vec_flat.reshape(solution_local.shape)
-            out = _optimality_transpose(vec) - regularization * vec
-            return _clean_and_clip(out, cfg.clip).reshape(-1)
+            return (_optimality_transpose(vec) - regularization * vec).reshape(-1)
 
-        solver_name = str(cfg.solver_name).lower()
-        if solver_name in {"neumann", "fixed_point", "fixed-point"}:
-            denom = jnp.asarray(1.0, dtype=solution_local.dtype) + regularization
-
-            def _neumann_step(_idx: int, adjoint_value: Array) -> Array:
-                next_value = rhs + fixed_point_transpose(adjoint_value)
-                return _clean_and_clip(next_value / denom, cfg.clip)
-
-            adjoint = jax.lax.fori_loop(
-                0,
-                max(1, int(cfg.max_iter)),
-                _neumann_step,
-                jnp.zeros_like(rhs),
-            )
-        else:
-            lambda_flat = solve_implicit_linear_system(
-                _adjoint_op,
-                -jax.lax.stop_gradient(rhs.reshape(-1)),
-                solver_name=cfg.solver_name,
-                tol=cfg.tolerance,
-                max_iter=cfg.max_iter,
-                restart=cfg.restart,
-            )
-            adjoint = jax.lax.stop_gradient(lambda_flat).reshape(solution_local.shape)
-        adjoint = _clean_and_clip(adjoint, cfg.clip)
+        lambda_flat = solve_implicit_linear_system(
+            _adjoint_op,
+            -jax.lax.stop_gradient(rhs.reshape(-1)),
+            tol=cfg.tolerance,
+            max_iter=cfg.max_iter,
+            restart=cfg.restart,
+        )
+        adjoint = jax.lax.stop_gradient(lambda_flat).reshape(solution_local.shape)
 
         if params_vjp_from_adjoint is not None:
             grad_params = _call_with_optional_aux(
@@ -147,10 +127,6 @@ def implicit_fixed_point_solution(
             )
             grad_params = params_vjp(adjoint)[0]
 
-        grad_params = jax.tree_util.tree_map(
-            lambda x: jnp.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0),
-            grad_params,
-        )
         return (
             grad_params,
             jnp.zeros_like(solution_local),
@@ -165,73 +141,17 @@ def solve_implicit_linear_system(
     matvec: Callable[[Array], Array],
     b_flat: Array,
     *,
-    solver_name: str = "gmres",
     tol: float,
     max_iter: int,
     restart: int | None = None,
 ) -> Array:
-    if str(solver_name).lower() != "gmres":
-        raise ValueError(f"Unsupported implicit linear solver {solver_name!r}.")
-    del restart
-
-    def _matvec(vec: Array) -> Array:
-        return jnp.nan_to_num(matvec(vec), nan=0.0, posinf=0.0, neginf=0.0)
-
-    sol = _solve_implicit_gmres(
-        _matvec,
+    sol, _ = jax_gmres(
+        matvec,
         b_flat,
         tol=float(tol),
+        atol=0.0,
+        restart=20 if restart is None else max(1, int(restart)),
         maxiter=max(1, int(max_iter)),
+        solve_method="incremental",
     )
-    return jnp.nan_to_num(sol, nan=0.0, posinf=0.0, neginf=0.0)
-
-
-def _solve_implicit_gmres(
-    matvec: Callable[[Array], Array],
-    b_flat: Array,
-    *,
-    tol: float,
-    maxiter: int,
-) -> Array:
-    maxiter = max(1, int(maxiter))
-    x0 = jnp.zeros_like(b_flat)
-    dtype = b_flat.dtype
-    eps = jnp.asarray(1e-30, dtype=dtype)
-    r0 = jnp.nan_to_num(b_flat, nan=0.0, posinf=0.0, neginf=0.0)
-    beta = jnp.sqrt(jnp.maximum(jnp.vdot(r0, r0).real, eps))
-    b_norm = jnp.sqrt(jnp.maximum(jnp.vdot(b_flat, b_flat).real, eps))
-    tol_abs = jnp.asarray(float(tol), dtype=dtype) * b_norm
-    v = jnp.zeros((maxiter + 1, b_flat.size), dtype=dtype)
-    h = jnp.zeros((maxiter + 1, maxiter), dtype=dtype)
-    v = v.at[0].set(jnp.where(beta > eps, r0 / beta, jnp.zeros_like(r0)))
-    rhs = jnp.zeros((maxiter + 1,), dtype=dtype).at[0].set(beta)
-    done = beta <= tol_abs
-    x_best = x0
-
-    for col in range(maxiter):
-        w = jnp.nan_to_num(matvec(v[col]), nan=0.0, posinf=0.0, neginf=0.0)
-        for row in range(col + 1):
-            h_row = jnp.vdot(v[row], w).real
-            w = w - h_row * v[row]
-            h = h.at[row, col].set(h_row)
-
-        h_next = jnp.sqrt(jnp.maximum(jnp.vdot(w, w).real, eps))
-        h = h.at[col + 1, col].set(h_next)
-        v_next = jnp.where(h_next > eps, w / h_next, jnp.zeros_like(w))
-        v = v.at[col + 1].set(v_next)
-
-        h_sub = h[: col + 2, : col + 1]
-        rhs_sub = rhs[: col + 2]
-        y, *_ = jnp.linalg.lstsq(h_sub, rhs_sub, rcond=None)
-        x_candidate = x0 + v[: col + 1].T @ y
-        residual_vec = rhs_sub - h_sub @ y
-        residual = jnp.sqrt(jnp.maximum(jnp.vdot(residual_vec, residual_vec).real, eps))
-        x_best = jnp.where(done, x_best, x_candidate)
-        done = jnp.logical_or(done, residual <= tol_abs)
-
-    return x_best
-
-
-def _clean_and_clip(value: Any, clip: float) -> Array:
-    arr = jnp.nan_to_num(jnp.asarray(value), nan=0.0, posinf=0.0, neginf=0.0)
-    return jnp.clip(arr, -float(clip), float(clip))
+    return sol

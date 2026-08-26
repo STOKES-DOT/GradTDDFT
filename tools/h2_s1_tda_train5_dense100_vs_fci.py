@@ -469,7 +469,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="impl",
     )
     p.add_argument("--scf-implicit-diff-max-iter", type=int, default=6)
-    p.add_argument("--scf-implicit-diff-clip", type=float, default=1e4)
     p.add_argument("--scf-implicit-diff-tolerance", type=float, default=1e-6)
     p.add_argument("--scf-implicit-diff-regularization", type=float, default=1e-3)
     p.add_argument("--grad-clip-norm", type=float, default=None)
@@ -768,7 +767,6 @@ def _training_checkpoint_metadata(
         "recover_nonfinite_steps": bool(args.recover_nonfinite_steps),
         "scf_gradient_mode": str(args.scf_gradient_mode),
         "scf_implicit_diff_max_iter": int(args.scf_implicit_diff_max_iter),
-        "scf_implicit_diff_clip": float(args.scf_implicit_diff_clip),
         "scf_implicit_diff_tolerance": float(args.scf_implicit_diff_tolerance),
         "scf_implicit_diff_regularization": float(args.scf_implicit_diff_regularization),
         "steps": int(args.steps),
@@ -1176,7 +1174,6 @@ def _self_consistent_prediction_config(args: argparse.Namespace) -> MolecularTra
         scf_iterate_selection=str(args.scf_iterate_selection),
         scf_gradient_mode=str(args.scf_gradient_mode),
         scf_implicit_diff_max_iter=int(args.scf_implicit_diff_max_iter),
-        scf_implicit_diff_clip=float(args.scf_implicit_diff_clip),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
     )
@@ -1667,7 +1664,6 @@ def train_functional(
         scf_iterate_selection=str(args.scf_iterate_selection),
         scf_gradient_mode=str(args.scf_gradient_mode),
         scf_implicit_diff_max_iter=int(args.scf_implicit_diff_max_iter),
-        scf_implicit_diff_clip=float(args.scf_implicit_diff_clip),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
     )

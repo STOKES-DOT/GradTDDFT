@@ -147,7 +147,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="unrolled",
     )
     p.add_argument("--scf-implicit-diff-max-iter", type=int, default=6)
-    p.add_argument("--scf-implicit-diff-clip", type=float, default=1e4)
     p.add_argument("--scf-implicit-diff-tolerance", type=float, default=1e-6)
     p.add_argument("--scf-implicit-diff-regularization", type=float, default=1e-3)
     p.add_argument("--scf-warm-start", action=argparse.BooleanOptionalAction, default=False)
@@ -169,7 +168,6 @@ def _apply_checkpoint_metadata(args: argparse.Namespace) -> argparse.Namespace:
         "pt2_channel_mode": "scaled_projected",
         "scf_gradient_mode": "unrolled",
         "scf_implicit_diff_max_iter": 6,
-        "scf_implicit_diff_clip": 1e4,
         "scf_implicit_diff_tolerance": 1e-6,
         "scf_implicit_diff_regularization": 1e-3,
         "scf_warm_start": False,
@@ -183,7 +181,6 @@ def _apply_checkpoint_metadata(args: argparse.Namespace) -> argparse.Namespace:
         "pt2_channel_mode",
         "scf_gradient_mode",
         "scf_implicit_diff_max_iter",
-        "scf_implicit_diff_clip",
         "scf_implicit_diff_tolerance",
         "scf_implicit_diff_regularization",
         "scf_warm_start",
@@ -302,7 +299,6 @@ def main() -> None:
         scf_iterate_selection=str(args.scf_iterate_selection),
         scf_gradient_mode=str(args.scf_gradient_mode),
         scf_implicit_diff_max_iter=int(args.scf_implicit_diff_max_iter),
-        scf_implicit_diff_clip=float(args.scf_implicit_diff_clip),
         scf_implicit_diff_tolerance=float(args.scf_implicit_diff_tolerance),
         scf_implicit_diff_regularization=float(args.scf_implicit_diff_regularization),
     )
