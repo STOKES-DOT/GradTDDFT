@@ -209,11 +209,11 @@ Implementation follows red-green-refactor order.
 
 - H2+ B3LYP/def2-SVP, grid level 2, using identical PySCF orbitals, covers an
   empty beta occupied space.
-- OH B3LYP/def2-SVP covers a conventional doublet with alpha and beta
-  occupied-virtual channels.
+- LiH+ B3LYP/def2-SVP covers a three-electron doublet with alpha and beta
+  occupied-virtual channels and a stable single-reference UKS solution.
 - O2 PBE/def2-SVP covers a triplet and a non-hybrid GGA.
 - Compare the first four TDA and full-TDDFT roots and oscillator strengths
-  against PySCF for H2+ and the lowest stable matched roots for OH and O2.
+  against PySCF for H2+ and the lowest stable matched roots for LiH+ and O2.
 - Compare raw operator columns where root matching alone is insufficient.
 - Compare oscillator strengths root by root for isolated roots. For degenerate
   or numerically near-degenerate manifolds, compare the sum of oscillator
@@ -245,7 +245,7 @@ The change is complete when:
 3. Unrestricted oscillator strengths use a tolerance two orders of magnitude
    tighter than the existing restricted B3LYP comparison: `atol=2e-5` and
    `rtol=2e-4`, with summed strengths used for matched degenerate manifolds.
-4. H2+, OH, and O2 cover empty-beta, doublet, and triplet response behavior,
+4. H2+, LiH+, and O2 cover empty-beta, doublet, and triplet response behavior,
    respectively; the applicable TDA and full-TDDFT comparisons pass on
    identical PySCF orbitals.
 5. JAX UKS orbitals give consistent excitation energies within the known SCF

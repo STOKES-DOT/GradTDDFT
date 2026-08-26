@@ -16,7 +16,7 @@ Create:
 
 - `src/td_graddft/tddft/_unrestricted_semilocal_response.py`: unrestricted point HVP, transition projection, and traditional functional wrapper.
 - `tests/test_unrestricted_semilocal_response.py`: contract, projection, JIT, and edge-case tests.
-- `tests/test_unrestricted_tddft_pyscf_compare.py`: H2+, OH, and O2 accuracy plus oscillator strengths.
+- `tests/test_unrestricted_tddft_pyscf_compare.py`: H2+, LiH+, and O2 accuracy plus oscillator strengths.
 
 Modify only unrestricted behavior in:
 
@@ -758,11 +758,11 @@ Expected: both matrices pass after Tasks 1-6. A failure is a root-cause signal
 to return to the corresponding projection or point-HVP task; tolerances are not
 changed.
 
-- [ ] **Step 4: Add OH and O2 tests**
+- [ ] **Step 4: Add LiH+ and O2 tests**
 
 Use:
 
-- OH: B3LYP/def2-SVP, doublet, grid level 2;
+- LiH+: B3LYP/def2-SVP, three-electron doublet, grid level 2;
 - O2: PBE/def2-SVP, triplet, grid level 2.
 
 Compare isolated roots directly. Group roots whose PySCF energies differ by at
@@ -778,7 +778,7 @@ TD_GRADDFT_RUN_OPEN_SHELL_TESTS=1 JAX_ENABLE_X64=1 \
 pytest -q tests/test_unrestricted_tddft_pyscf_compare.py
 ```
 
-Expected: H2+, OH, and O2 pass the specified energy and oscillator-strength tolerances.
+Expected: H2+, LiH+, and O2 pass the specified energy and oscillator-strength tolerances.
 
 - [ ] **Step 6: Commit**
 
