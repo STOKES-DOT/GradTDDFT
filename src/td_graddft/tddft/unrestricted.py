@@ -473,6 +473,15 @@ def _build_unrestricted_response_operator_data(
         if resolved_xc is None
         else getattr(resolved_xc, "spin_grid_response_hvp", None)
     )
+    explicit_spin_hvp = (
+        None
+        if resolved_xc is None
+        else getattr(resolved_xc, "spin_grid_response_hvp_fn", spin_grid_response_hvp)
+    )
+    if explicit_spin_hvp is None:
+        spin_grid_response_hvp = None
+    elif callable(explicit_spin_hvp):
+        spin_grid_response_hvp = explicit_spin_hvp
     if callable(spin_grid_response_hvp):
         xc_response_action_fn = build_unrestricted_semilocal_response_action(
             molecule,

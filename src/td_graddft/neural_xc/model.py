@@ -1208,6 +1208,111 @@ class ResponseMixin:
         )
         return jnp.moveaxis(response_grid_major, -2, -1)
 
+    def _unrestricted_total_response_hvp(
+        self,
+        params: PyTree,
+        features: RestrictedFeatureBundle,
+        grad_a: Array,
+        grad_b: Array,
+        hf_projected: Array,
+        tangent_a: Array,
+        tangent_b: Array,
+        *,
+        pt2_projected: Array | None = None,
+        hf_spin_energy_density: tuple[Array, Array],
+        response_pt2_mode: Literal["approx", "strict"] | None = None,
+    ) -> tuple[Array, Array]:
+        response_variables, active = self._unrestricted_response_variables(
+            features,
+            grad_a,
+            grad_b,
+        )
+        tangent_a = jnp.asarray(tangent_a, dtype=response_variables.dtype)
+        tangent_b = jnp.asarray(tangent_b, dtype=response_variables.dtype)
+        expected_tail = (4, int(response_variables.shape[0]))
+        if tangent_a.ndim != 3 or tangent_a.shape[1:] != expected_tail:
+            raise ValueError(
+                "Unrestricted alpha response tangent must have shape "
+                f"(batch, 4, ngrids), got {tangent_a.shape}."
+            )
+        if tangent_b.ndim != 3 or tangent_b.shape[1:] != expected_tail:
+            raise ValueError(
+                "Unrestricted beta response tangent must have shape "
+                f"(batch, 4, ngrids), got {tangent_b.shape}."
+            )
+        if tangent_a.shape[0] != tangent_b.shape[0]:
+            raise ValueError("Alpha and beta response tangents must share a batch size.")
+
+        zeros = jnp.zeros(
+            (tangent_a.shape[0], 2, tangent_a.shape[2]),
+            dtype=response_variables.dtype,
+        )
+        tangent = jnp.concatenate(
+            [
+                tangent_a[:, 0:1],
+                tangent_b[:, 0:1],
+                tangent_a[:, 1:4],
+                tangent_b[:, 1:4],
+                zeros,
+            ],
+            axis=1,
+        ).transpose(0, 2, 1)
+        hf_feature_a, hf_feature_b = hf_spin_energy_density
+        pt2_feature = (
+            jnp.zeros_like(hf_projected)
+            if pt2_projected is None
+            else jnp.asarray(pt2_projected)
+        )
+        point_gradient = jax.grad(
+            self._total_point_local_energy_from_unrestricted_variables,
+            argnums=1,
+        )
+
+        def point_hvp(
+            variables: Array,
+            hf_point: Array,
+            hf_point_a: Array,
+            hf_point_b: Array,
+            pt2_point: Array,
+            tangent_point: Array,
+        ) -> Array:
+            def gradient_at(point_variables: Array) -> Array:
+                return point_gradient(
+                    params,
+                    point_variables,
+                    hf_point,
+                    hf_point_a,
+                    hf_point_b,
+                    pt2_point=pt2_point,
+                    response_pt2_mode=response_pt2_mode,
+                )
+
+            _, response = jax.jvp(
+                gradient_at,
+                (variables,),
+                (tangent_point,),
+            )
+            response = jnp.nan_to_num(response, nan=0.0, posinf=0.0, neginf=0.0)
+            return self._maybe_clip_response(response)
+
+        def vector_hvp(tangent_grid_major: Array) -> Array:
+            return jax.vmap(point_hvp)(
+                response_variables,
+                hf_projected,
+                hf_feature_a,
+                hf_feature_b,
+                pt2_feature,
+                tangent_grid_major,
+            )
+
+        response = jax.vmap(vector_hvp)(tangent)
+        response = response * active[None, :, None].astype(response.dtype)
+        response = response.transpose(0, 2, 1)
+        return (
+            jnp.concatenate([response[:, 0:1], response[:, 2:5]], axis=1),
+            jnp.concatenate([response[:, 1:2], response[:, 5:8]], axis=1),
+        )
+
     def _strict_point_response_tensor_fn(
         self,
         params: PyTree,

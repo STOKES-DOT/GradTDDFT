@@ -103,7 +103,7 @@ class BoundNeuralXCFunctional:
     response_hf_mode: str = "approx"
     grid_response_tensor_fn: Callable[[], Array] | None = None
     grid_response_hvp_fn: Callable[..., Array] | None = None
-    spin_local_kernel_fn: Callable[[Array, Array], Any] | None = None
+    spin_grid_response_hvp_fn: Callable[..., tuple[Array, Array]] | None = None
     nonlocal_response_action_fn: Callable[..., Array] | None = None
     nonlocal_response_b_action_fn: Callable[..., Array] | None = None
     nonlocal_response_diagonal_fn: Callable[..., Array] | None = None
@@ -218,12 +218,17 @@ class BoundNeuralXCFunctional:
             raise AttributeError("This bound functional does not expose a grid response HVP.")
         return self.grid_response_hvp_fn(molecule, tangent)
 
-    def spin_local_kernel(self, density_alpha: Array, density_beta: Array) -> Any:
-        if self.spin_local_kernel_fn is None:
+    def spin_grid_response_hvp(
+        self,
+        molecule: Any,
+        tangent_a: Array,
+        tangent_b: Array,
+    ) -> tuple[Array, Array]:
+        if self.spin_grid_response_hvp_fn is None:
             raise AttributeError(
-                "This bound functional does not expose a spin-resolved local kernel."
+                "This bound functional does not expose a spin-grid response HVP."
             )
-        return self.spin_local_kernel_fn(density_alpha, density_beta)
+        return self.spin_grid_response_hvp_fn(molecule, tangent_a, tangent_b)
 
     def nonlocal_response_action(
         self,
@@ -1376,64 +1381,6 @@ class NeuralXCBindingMixin:
             hfx_fxx=current_hfx_fxx,
         )
 
-    def _unrestricted_spin_local_kernel_components(
-        self,
-        params: PyTree,
-        features: RestrictedFeatureBundle,
-        grad_a: Array,
-        grad_b: Array,
-        hf_projected: Array,
-        *,
-        pt2_projected: Array | None = None,
-        hf_spin_energy_density: tuple[Array, Array],
-        response_pt2_mode: str | None = None,
-    ) -> tuple[Array, Array, Array]:
-        response_variables, active = self._unrestricted_response_variables(
-            features,
-            grad_a,
-            grad_b,
-        )
-        hf_feature_a, hf_feature_b = hf_spin_energy_density
-        pt2_feature = (
-            jnp.zeros_like(hf_projected)
-            if pt2_projected is None
-            else jnp.asarray(pt2_projected)
-        )
-        point_hessian_fn = jax.hessian(
-            self._total_point_local_energy_from_unrestricted_variables,
-            argnums=1,
-        )
-
-        def point_spin_tensor(
-            variables: Array,
-            hf_point: Array,
-            hf_point_a: Array,
-            hf_point_b: Array,
-            pt2_point: Array,
-        ) -> Array:
-            tensor = point_hessian_fn(
-                params,
-                variables,
-                hf_point,
-                hf_point_a,
-                hf_point_b,
-                pt2_point=pt2_point,
-                response_pt2_mode=response_pt2_mode,
-            )
-            tensor = jnp.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
-            tensor = self._maybe_clip_response(tensor)
-            return 0.5 * (tensor[:2, :2] + tensor[:2, :2].T)
-
-        spin_tensor = jax.vmap(point_spin_tensor)(
-            response_variables,
-            hf_projected,
-            hf_feature_a,
-            hf_feature_b,
-            pt2_feature,
-        )
-        spin_tensor = spin_tensor * active[:, None, None].astype(spin_tensor.dtype)
-        return spin_tensor[:, 0, 0], spin_tensor[:, 0, 1], spin_tensor[:, 1, 1]
-
     def _strict_pt2_posthoc_correction_callbacks(
         self,
         rho: Array,
@@ -1766,17 +1713,20 @@ class NeuralXCBindingMixin:
                 alpha = jnp.nan_to_num(alpha, nan=0.0, posinf=1.0, neginf=0.0)
                 alpha = jnp.clip(alpha, 0.0, 1.0)
 
-            def spin_local_kernel_fn(
-                density_alpha: Array,
-                density_beta: Array,
-            ) -> tuple[Array, Array, Array]:
-                del density_alpha, density_beta
-                return self._unrestricted_spin_local_kernel_components(
+            def spin_grid_response_hvp_fn(
+                response_molecule: Any,
+                tangent_a: Array,
+                tangent_b: Array,
+            ) -> tuple[Array, Array]:
+                del response_molecule
+                return self._unrestricted_total_response_hvp(
                     params,
                     features,
                     grad_a,
                     grad_b,
                     hf_projected,
+                    tangent_a,
+                    tangent_b,
                     pt2_projected=pt2_projected,
                     hf_spin_energy_density=(hfx_feature_a, hfx_feature_b),
                     response_pt2_mode=self.response_pt2_mode,
@@ -1806,10 +1756,10 @@ class NeuralXCBindingMixin:
                 projected_local_potential_laplacian_values=None,
                 projected_energy_density_values=None,
                 local_hf_fraction_values=None,
-                response_feature_kind=self._response_feature_kind_label(),
+                response_feature_kind="GGA",
                 response_hf_mode=response_hf_mode if self._uses_hfx_channel() else "approx",
                 grid_response_tensor_fn=None,
-                spin_local_kernel_fn=spin_local_kernel_fn,
+                spin_grid_response_hvp_fn=spin_grid_response_hvp_fn,
                 post_tda_correction_fn=post_tda_correction_fn,
                 post_tddft_correction_fn=post_tddft_correction_fn,
             )
@@ -1924,7 +1874,6 @@ class NeuralXCBindingMixin:
             response_hf_mode=response_hf_mode if self._uses_hfx_channel() else "approx",
             grid_response_tensor_fn=None,
             grid_response_hvp_fn=grid_response_hvp_fn,
-            spin_local_kernel_fn=None,
             post_tda_correction_fn=post_tda_correction_fn,
             post_tddft_correction_fn=post_tddft_correction_fn,
         )
@@ -2124,5 +2073,4 @@ class NeuralXCBindingMixin:
             response_feature_kind=self._response_feature_kind_label(),
             response_hf_mode=self._response_hf_mode() if self._uses_hfx_channel() else "approx",
             grid_response_tensor_fn=None,
-            spin_local_kernel_fn=None,
         )

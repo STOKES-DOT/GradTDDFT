@@ -36,6 +36,7 @@ from td_graddft.spectra import HARTREE_TO_EV, oscillator_strengths
 from td_graddft.tddft import (
     RestrictedCasidaTDDFT,
     UnrestrictedCasidaTDDFT,
+    UnrestrictedTDA,
 )
 from td_graddft.tddft.cisd import (
     restricted_cisd_second_order_correction,
@@ -1311,7 +1312,7 @@ def test_response_grid_hvp_matches_dense_tensor_on_full_grid():
     assert jnp.allclose(actual, expected, atol=1e-10)
 
 
-def test_bind_to_molecule_for_response_exposes_spin_kernel_for_open_shell():
+def test_bind_to_molecule_for_response_exposes_full_spin_hvp_for_open_shell():
     molecule = _make_open_shell_toy_molecule()
     non_hf_module = make_custom_semilocal_module(
         channel_names=("alpha_density", "beta_density"),
@@ -1329,17 +1330,49 @@ def test_bind_to_molecule_for_response_exposes_spin_kernel_for_open_shell():
     params = functional.init_from_molecule(jax.random.PRNGKey(79), molecule)
 
     bound = functional.bind_to_molecule_for_response(params, molecule)
-    f_aa, f_ab, f_bb = bound.spin_local_kernel(
-        jnp.zeros_like(molecule.grid.weights),
-        jnp.zeros_like(molecule.grid.weights),
+    tangent_a = jnp.ones((1, 4, molecule.grid.weights.size), dtype=jnp.float64)
+    tangent_b = jnp.zeros_like(tangent_a)
+    response_a, response_b = bound.spin_grid_response_hvp(
+        molecule,
+        tangent_a,
+        tangent_b,
     )
 
-    assert f_aa.shape == molecule.grid.weights.shape
-    assert f_ab.shape == molecule.grid.weights.shape
-    assert f_bb.shape == molecule.grid.weights.shape
-    assert jnp.all(jnp.isfinite(f_aa))
-    assert jnp.all(jnp.isfinite(f_ab))
-    assert jnp.all(jnp.isfinite(f_bb))
+    assert response_a.shape == tangent_a.shape
+    assert response_b.shape == tangent_b.shape
+    assert jnp.all(jnp.isfinite(response_a))
+    assert jnp.all(jnp.isfinite(response_b))
+
+
+def test_unrestricted_tda_gradient_through_neural_hvp_is_finite_and_nonzero():
+    molecule = _make_open_shell_toy_molecule()
+    non_hf_module = make_custom_semilocal_module(
+        channel_names=("alpha_density", "beta_density"),
+        energy_density_channels_fn=lambda local_features: jnp.stack(
+            [local_features.rho_a, local_features.rho_b],
+            axis=-1,
+        ),
+        name="open_shell_tda_gradient_module",
+    )
+    functional = make_neural_xc_functional(
+        non_hf_module=non_hf_module,
+        hidden_dims=(8, 8),
+        name="open_shell_tda_gradient_neural_xc",
+    )
+    params = functional.init_from_molecule(jax.random.PRNGKey(81), molecule)
+
+    def s1_energy(local_params):
+        return UnrestrictedTDA(
+            molecule,
+            functional,
+            xc_params=local_params,
+        ).kernel(nstates=1).excitation_energies[0]
+
+    gradient = jax.grad(s1_energy)(params)
+    leaves = jax.tree_util.tree_leaves(gradient)
+
+    assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in leaves)
+    assert sum(float(jnp.vdot(leaf, leaf).real) for leaf in leaves) > 0.0
 
 
 def test_bind_to_molecule_for_response_keeps_closed_shell_with_spin_gauge_difference():
@@ -1372,7 +1405,7 @@ def test_bind_to_molecule_for_response_keeps_closed_shell_with_spin_gauge_differ
 
     assert bound.grid_response_tensor_fn is None
     assert bound.grid_response_hvp_fn is not None
-    assert bound.spin_local_kernel_fn is None
+    assert bound.spin_grid_response_hvp_fn is None
     vind, _, _ = build_restricted_tda_operator(
         molecule,
         functional,
