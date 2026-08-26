@@ -26,6 +26,7 @@ from td_graddft.neural_xc.inputs import (
 )
 import td_graddft.neural_xc.model as neural_xc_model
 import td_graddft.neural_xc.binding as neural_xc_binding
+import td_graddft.neural_xc.components as neural_xc_components
 import td_graddft.neural_xc.projection as neural_xc_projection
 from td_graddft.features import has_explicit_spin_axis, restricted_grid_features
 import td_graddft.scf.differentiable as scf_differentiable
@@ -54,6 +55,38 @@ from td_graddft.training import (
     predict_excitation_energies,
     predict_ground_state_total_energy,
 )
+
+
+def test_libxc_module_uses_polarized_channels_for_unrestricted_features(monkeypatch):
+    features = RestrictedFeatureBundle(
+        rho_a=jnp.asarray([0.3, 0.4]),
+        rho_b=jnp.asarray([0.1, 0.2]),
+        sigma_aa=jnp.asarray([0.04, 0.09]),
+        sigma_ab=jnp.asarray([0.01, 0.02]),
+        sigma_bb=jnp.asarray([0.0, 0.01]),
+        tau_a=jnp.asarray([0.2, 0.3]),
+        tau_b=jnp.asarray([0.0, 0.1]),
+    )
+    calls = []
+
+    def fake_unrestricted(spec, local_features, **kwargs):
+        del kwargs
+        calls.append(spec)
+        return local_features.rho_a - local_features.rho_b
+
+    monkeypatch.setattr(
+        neural_xc_components,
+        "eval_xc_energy_density_unrestricted",
+        fake_unrestricted,
+        raising=False,
+    )
+    module = make_libxc_semilocal_module(("gga_x_b88", "gga_c_lyp"))
+
+    values = module.unrestricted_energy_density_channels(features)
+
+    assert values.shape == (2, 2)
+    assert calls == ["gga_x_b88", "gga_c_lyp"]
+    assert jnp.allclose(values[:, 0], features.rho_a - features.rho_b)
 
 
 @dataclass

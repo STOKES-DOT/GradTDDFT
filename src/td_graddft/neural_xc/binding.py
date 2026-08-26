@@ -1706,7 +1706,9 @@ class NeuralXCBindingMixin:
 
         if _requires_unrestricted_response_binding(molecule):
             features, grad_a, grad_b = grid_features_with_spin_gradients_for_molecule(molecule)
-            semilocal_channels = self.semilocal_energy_density_channels(features)
+            semilocal_channels = self.unrestricted_semilocal_energy_density_channels(
+                features
+            )
             semilocal = jnp.sum(semilocal_channels, axis=-1)
             needs_response_alpha = self._uses_hfx_channel()
             if needs_response_alpha:
@@ -1934,7 +1936,7 @@ class NeuralXCBindingMixin:
     ) -> tuple[Array, Array, Array, Array, Array, Array, Array]:
         self._require_pt2_fock_response_for_scf(molecule)
         features, grad_a, grad_b = grid_features_with_spin_gradients_for_molecule(molecule)
-        semilocal_channels = self.semilocal_energy_density_channels(features)
+        semilocal_channels = self.unrestricted_semilocal_energy_density_channels(features)
         semilocal = jnp.sum(semilocal_channels, axis=-1)
         if self._uses_hfx_channel():
             hf_projected, hf_projected_a, hf_projected_b = self.projected_hf_grid_contribution_components(

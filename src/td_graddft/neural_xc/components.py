@@ -11,6 +11,7 @@ from ..xc_backend.jax_libxc import (
     JAXXCStatus,
     RestrictedFeatureBundle,
     eval_xc_energy_density,
+    eval_xc_energy_density_unrestricted,
     jax_xc_functional_info,
     list_jax_xc_functionals,
     parse_xc,
@@ -56,6 +57,7 @@ class SemilocalEnergyDensityModule:
 
     channel_names: tuple[str, ...]
     energy_density_channels_fn: SemilocalEnergyDensityFn
+    unrestricted_energy_density_channels_fn: SemilocalEnergyDensityFn | None = None
     local_contribution_fn: SemilocalLocalContributionFn | None = None
     name: str = "semilocal_module"
 
@@ -63,8 +65,12 @@ class SemilocalEnergyDensityModule:
     def n_channels(self) -> int:
         return len(self.channel_names)
 
-    def energy_density_channels(self, features: RestrictedFeatureBundle) -> Array:
-        channels = jnp.asarray(self.energy_density_channels_fn(features))
+    def _normalize_channels(
+        self,
+        channels: Array,
+        features: RestrictedFeatureBundle,
+    ) -> Array:
+        channels = jnp.asarray(channels)
         channels = jnp.nan_to_num(channels, nan=0.0, posinf=0.0, neginf=0.0)
         if channels.ndim == features.rho.ndim:
             channels = channels[..., None]
@@ -78,6 +84,18 @@ class SemilocalEnergyDensityModule:
                 f"channel_names (got {channels.shape[-1]} vs {self.n_channels})."
             )
         return channels
+
+    def energy_density_channels(self, features: RestrictedFeatureBundle) -> Array:
+        return self._normalize_channels(self.energy_density_channels_fn(features), features)
+
+    def unrestricted_energy_density_channels(
+        self,
+        features: RestrictedFeatureBundle,
+    ) -> Array:
+        callback = self.unrestricted_energy_density_channels_fn
+        if callback is None:
+            callback = self.energy_density_channels_fn
+        return self._normalize_channels(callback(features), features)
 
     def energy_density(self, features: RestrictedFeatureBundle) -> Array:
         return jnp.sum(self.energy_density_channels(features), axis=-1)
@@ -168,9 +186,25 @@ def make_libxc_semilocal_module(
             axis=-1,
         )
 
+    def unrestricted_energy_density_channels_fn(
+        features: RestrictedFeatureBundle,
+    ) -> Array:
+        return jnp.stack(
+            [
+                eval_xc_energy_density_unrestricted(
+                    spec,
+                    features,
+                    allow_experimental_jax_xc=allow_experimental_jax_xc,
+                )
+                for spec in specs
+            ],
+            axis=-1,
+        )
+
     return SemilocalEnergyDensityModule(
         channel_names=tuple(names),
         energy_density_channels_fn=energy_density_channels_fn,
+        unrestricted_energy_density_channels_fn=unrestricted_energy_density_channels_fn,
         name=name,
     )
 
@@ -179,6 +213,7 @@ def make_custom_semilocal_module(
     *,
     channel_names: Sequence[str],
     energy_density_channels_fn: SemilocalEnergyDensityFn,
+    unrestricted_energy_density_channels_fn: SemilocalEnergyDensityFn | None = None,
     local_contribution_fn: SemilocalLocalContributionFn | None = None,
     name: str = "custom_semilocal_module",
 ) -> SemilocalEnergyDensityModule:
@@ -188,6 +223,7 @@ def make_custom_semilocal_module(
     return SemilocalEnergyDensityModule(
         channel_names=names,
         energy_density_channels_fn=energy_density_channels_fn,
+        unrestricted_energy_density_channels_fn=unrestricted_energy_density_channels_fn,
         local_contribution_fn=local_contribution_fn,
         name=name,
     )

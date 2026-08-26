@@ -437,6 +437,12 @@ class AssemblyMixin:
     def semilocal_energy_density_channels(self, features: RestrictedFeatureBundle) -> Array:
         return self.resolved_non_hf_module().energy_density_channels(features)
 
+    def unrestricted_semilocal_energy_density_channels(
+        self,
+        features: RestrictedFeatureBundle,
+    ) -> Array:
+        return self.resolved_non_hf_module().unrestricted_energy_density_channels(features)
+
     def semilocal_energy_density(self, features: RestrictedFeatureBundle) -> Array:
         channels = self.semilocal_energy_density_channels(features)
         return jnp.sum(channels, axis=-1)
@@ -867,7 +873,9 @@ class ResponseMixin:
     ) -> Array:
         pt2_mode = self.response_pt2_mode if response_pt2_mode is None else response_pt2_mode
         point_features = self._feature_bundle_from_unrestricted_variables(variables)
-        semilocal_channels = self.semilocal_energy_density_channels(point_features)
+        semilocal_channels = self.unrestricted_semilocal_energy_density_channels(
+            point_features
+        )
         semilocal_local_channels = self._semilocal_local_contribution_channels(
             point_features,
             semilocal_channels,
