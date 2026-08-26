@@ -475,6 +475,7 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
             "scf_cycles_mean": _metric_mean(initial_metrics, "scf_cycles_mean"),
             "scf_cycles_max": _metric_mean(initial_metrics, "scf_cycles_max"),
             "grad_norm": float("nan"),
+            "nonfinite_grad_fraction": float("nan"),
             "param_update_norm": float("nan"),
             "lr": float(args.learning_rate),
         }
@@ -507,6 +508,7 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
             "scf_cycles_mean": _metric_mean(metrics, "scf_cycles_mean"),
             "scf_cycles_max": _metric_mean(metrics, "scf_cycles_max"),
             "grad_norm": _metric_mean(metrics, "grad_norm"),
+            "nonfinite_grad_fraction": _metric_mean(metrics, "nonfinite_grad_fraction"),
             "param_update_norm": _metric_mean(metrics, "param_update_norm"),
             "lr": float(lr_schedule(step - 1)),
         }
@@ -520,7 +522,8 @@ def train_functional(points: list[ReferencePoint], *, args: argparse.Namespace, 
                 f"density_mse={row['grid_density_mse']:.8e} "
                 f"scf_conv_frac={row['scf_converged_fraction']:.6f} "
                 f"scf_cycles_max={row['scf_cycles_max']:.6f} "
-                f"grad_norm={row['grad_norm']:.8e} lr={row['lr']:.8e}"
+                f"grad_norm={row['grad_norm']:.8e} "
+                f"nonfinite_grad_frac={row['nonfinite_grad_fraction']:.8e} lr={row['lr']:.8e}"
             )
     final_loss, final_metrics = compiled_eval(state.params)
     if float(final_loss) < min_loss:

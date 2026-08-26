@@ -314,6 +314,48 @@ def test_eval_jax_xc_from_unrestricted_features_uses_polarized_density(monkeypat
     assert jnp.allclose(eps, features.rho_a + 10.0 * features.rho_b)
 
 
+def test_unrestricted_zero_spin_gradient_has_finite_second_derivative(monkeypatch):
+    import td_graddft.xc_backend.jax_xc_adapter as jax_xc_adapter
+
+    class FakeModule:
+        __version__ = "fake"
+
+        @staticmethod
+        def gga_x_b88(*, polarized=False):
+            assert polarized
+
+            def functional(rho_fn, r, mo_fn=None):
+                del mo_fn
+                return jnp.sum(jax.jacfwd(rho_fn)(r))
+
+            return functional
+
+    monkeypatch.setattr(
+        jax_xc_adapter,
+        "load_jax_xc",
+        lambda: (jax_xc_adapter._SafeJAXXCModule(FakeModule()), "upstream"),
+    )
+
+    def evaluate(sigma_bb):
+        features = RestrictedFeatureBundle(
+            rho_a=jnp.asarray(0.2),
+            rho_b=jnp.asarray(0.0),
+            sigma_aa=jnp.asarray(0.04),
+            sigma_ab=jnp.asarray(0.0),
+            sigma_bb=sigma_bb,
+            tau_a=jnp.asarray(0.1),
+            tau_b=jnp.asarray(0.0),
+        )
+        return jax_xc_adapter.eval_jax_xc_from_unrestricted_features(
+            "gga_x_b88",
+            features,
+        )
+
+    first_derivative = jax.grad(evaluate)
+    assert jnp.isfinite(first_derivative(jnp.asarray(0.0)))
+    assert jnp.isfinite(jax.grad(first_derivative)(jnp.asarray(0.0)))
+
+
 def test_eval_jax_xc_from_restricted_features_requires_experimental_opt_in(monkeypatch):
     import td_graddft.xc_backend.jax_xc_adapter as jax_xc_adapter
 

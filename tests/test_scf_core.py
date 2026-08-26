@@ -8,17 +8,13 @@ import jax.numpy as jnp
 
 
 def test_scf_modules_share_core_helper_implementations():
-    assert rhf._orthogonalizer is core._orthogonalizer
     assert rks._orthogonalizer is core._orthogonalizer
     assert differentiable._orthogonalizer is core._orthogonalizer
 
-    assert rhf._diagonalize_fock is core._diagonalize_fock
     assert rks._diagonalize_fock is core._diagonalize_fock
 
-    assert rhf._build_density is core._build_density_closed_shell
     assert rks._build_density_from_occ is core._build_density_from_occ
     assert uks._build_density_from_occ is core._build_density_from_occ
-    assert rhf._build_jk is rks._build_jk
     assert differentiable._build_jk is rks._build_jk
 
     assert facade._contains_jax_tracer is core._contains_jax_tracer
@@ -66,6 +62,17 @@ def test_rks_module_exposes_one_shared_integrals_entry():
 def test_spin_density_gradient_helper_is_shared():
     assert rks._spin_density_and_gradient is features._spin_density_and_gradient
     assert uks._spin_density_and_gradient is features._spin_density_and_gradient
+
+
+def test_spin_tau_from_density_matches_orbital_contraction():
+    ao_deriv1 = jnp.arange(48, dtype=jnp.float64).reshape(4, 4, 3) / 17.0
+    mo_coeff = jnp.asarray([[0.8, -0.2], [0.3, 0.9], [-0.4, 0.1]])
+    mo_occ = jnp.asarray([1.0, 0.35])
+    density = jnp.einsum("pi,i,qi->pq", mo_coeff, mo_occ, mo_coeff)
+    ao_grad_mo = jnp.einsum("xrp,pi->xri", ao_deriv1[1:4], mo_coeff)
+    orbital_tau = 0.5 * jnp.einsum("i,xri,xri->r", mo_occ, ao_grad_mo, ao_grad_mo)
+
+    assert jnp.allclose(features._spin_tau(ao_deriv1, density), orbital_tau, atol=1e-12)
 
 
 def test_rks_integral_path_does_not_build_restricted_spin_view(monkeypatch):

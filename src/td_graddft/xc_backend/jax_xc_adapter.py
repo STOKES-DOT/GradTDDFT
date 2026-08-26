@@ -381,8 +381,9 @@ def _evaluate_factory_from_unrestricted_features(
     rho_b = jnp.maximum(jnp.asarray(features.rho_b), _DENSITY_FLOOR)
     sigma_aa = jnp.maximum(jnp.asarray(features.sigma_aa), 0.0)
     sigma_bb = jnp.maximum(jnp.asarray(features.sigma_bb), 0.0)
-    grad_a = jnp.sqrt(sigma_aa)
-    grad_b = jnp.sqrt(sigma_bb)
+    gradient_floor2 = _UNRESTRICTED_DERIVATIVE_FLOOR**2
+    grad_a = jnp.sqrt(jnp.maximum(sigma_aa, gradient_floor2))
+    grad_b = jnp.sqrt(jnp.maximum(sigma_bb, gradient_floor2))
     tau_a = jnp.maximum(jnp.asarray(features.tau_a), 0.0)
     tau_b = jnp.maximum(jnp.asarray(features.tau_b), 0.0)
     origin = jnp.zeros((3,), dtype=rho_a.dtype)

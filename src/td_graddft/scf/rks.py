@@ -659,7 +659,7 @@ def _fock_components_for_density(
     j_mat, k_mat = jk_builder(density, mo_coeff, mo_occ, density_last, j_last, k_last)
     del mo_energy
     rho, grad = _spin_density_and_gradient(ao, ao_deriv1, density)
-    tau = _spin_tau(ao_deriv1, mo_coeff, mo_occ)
+    tau = _spin_tau(ao_deriv1, density)
     xc_energy, vxc_rho, vxc_grad = _xc_energy_and_potential_on_grid(
         rho=rho,
         grad=grad,
