@@ -16,6 +16,11 @@ from ..xc_backend.jax_libxc import (
     parse_xc,
     xc_type,
 )
+from .response import (
+    _project_grid_response_to_restricted_transition,
+    _project_restricted_transition_to_grid,
+    _restricted_response_factors,
+)
 
 
 SpinGridHVP = Callable[[Any, Array, Array], tuple[Array, Array]]
@@ -60,6 +65,77 @@ def _validate_spin_tangent(
             f"got {array.shape}."
         )
     return array
+
+
+def build_spin_transition_factors(
+    molecule: Any,
+    orbo: Array,
+    orbv: Array,
+    *,
+    feature_kind: str,
+    dtype: Any,
+):
+    return _restricted_response_factors(
+        molecule,
+        orbo,
+        orbv,
+        feature_kind=str(feature_kind).upper(),
+        dtype=dtype,
+    )
+
+
+def project_spin_transition_to_grid(factors: Any, values: Array) -> Array:
+    return _project_restricted_transition_to_grid(factors, values)
+
+
+def project_grid_response_to_spin_transition(factors: Any, values: Array) -> Array:
+    return _project_grid_response_to_restricted_transition(factors, values)
+
+
+def build_unrestricted_semilocal_response_action(
+    molecule: Any,
+    orbo_a: Array,
+    orbv_a: Array,
+    orbo_b: Array,
+    orbv_b: Array,
+    response_hvp: SpinGridHVP,
+    *,
+    feature_kind: str,
+    dtype: Any,
+) -> Callable[[Array, Array], tuple[Array, Array]]:
+    kind = str(feature_kind).upper()
+    if kind not in {"LDA", "GGA"}:
+        raise NotImplementedError(
+            "Unrestricted semilocal response projection supports LDA/GGA only."
+        )
+    factors_a = build_spin_transition_factors(
+        molecule,
+        orbo_a,
+        orbv_a,
+        feature_kind=kind,
+        dtype=dtype,
+    )
+    factors_b = build_spin_transition_factors(
+        molecule,
+        orbo_b,
+        orbv_b,
+        feature_kind=kind,
+        dtype=dtype,
+    )
+    weights = jnp.asarray(molecule.grid.weights, dtype=dtype)
+
+    def action(alpha: Array, beta: Array) -> tuple[Array, Array]:
+        tangent_a = project_spin_transition_to_grid(factors_a, alpha)
+        tangent_b = project_spin_transition_to_grid(factors_b, beta)
+        response_a, response_b = response_hvp(molecule, tangent_a, tangent_b)
+        weighted_a = jnp.asarray(response_a, dtype=dtype) * weights[None, None, :]
+        weighted_b = jnp.asarray(response_b, dtype=dtype) * weights[None, None, :]
+        return (
+            project_grid_response_to_spin_transition(factors_a, weighted_a),
+            project_grid_response_to_spin_transition(factors_b, weighted_b),
+        )
+
+    return action
 
 
 @dataclass(frozen=True)
@@ -142,4 +218,11 @@ class UnrestrictedSemilocalResponseFunctional:
         )
 
 
-__all__ = ["SpinGridHVP", "UnrestrictedSemilocalResponseFunctional"]
+__all__ = [
+    "SpinGridHVP",
+    "UnrestrictedSemilocalResponseFunctional",
+    "build_spin_transition_factors",
+    "build_unrestricted_semilocal_response_action",
+    "project_grid_response_to_spin_transition",
+    "project_spin_transition_to_grid",
+]

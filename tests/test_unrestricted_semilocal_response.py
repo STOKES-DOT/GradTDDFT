@@ -6,6 +6,9 @@ import pytest
 
 from td_graddft.tddft._unrestricted_semilocal_response import (
     UnrestrictedSemilocalResponseFunctional,
+    build_spin_transition_factors,
+    project_grid_response_to_spin_transition,
+    project_spin_transition_to_grid,
 )
 
 
@@ -77,3 +80,56 @@ def test_b3lyp_unrestricted_hvp_is_jittable(open_shell_molecule):
 
     assert jnp.all(jnp.isfinite(response_a))
     assert jnp.all(jnp.isfinite(response_b))
+
+
+def test_spin_transition_projection_matches_explicit_ao_derivative_formula(
+    open_shell_molecule,
+):
+    orbo = open_shell_molecule.mo_coeff[0][:, :1]
+    orbv = open_shell_molecule.mo_coeff[0][:, 1:]
+    factors = build_spin_transition_factors(
+        open_shell_molecule,
+        orbo,
+        orbv,
+        feature_kind="GGA",
+        dtype=jnp.float64,
+    )
+    amplitudes = jnp.asarray([[[0.7]]], dtype=jnp.float64)
+
+    projected = project_spin_transition_to_grid(factors, amplitudes)
+
+    ao1 = open_shell_molecule.ao_deriv1[:4]
+    occupied = jnp.einsum("xgp,pi->xgi", ao1, orbo)
+    virtual = jnp.einsum("xgp,pa->xga", ao1, orbv)
+    expected_density = 0.7 * occupied[0, :, 0] * virtual[0, :, 0]
+    expected_gradient = 0.7 * (
+        occupied[1:4, :, 0] * virtual[0, :, 0]
+        + occupied[0, :, 0][None, :] * virtual[1:4, :, 0]
+    )
+
+    assert projected.shape == (1, 4, open_shell_molecule.ao.shape[0])
+    assert jnp.allclose(projected[0, 0], expected_density, atol=1e-12)
+    assert jnp.allclose(projected[0, 1:4], expected_gradient, atol=1e-12)
+
+
+def test_spin_grid_projection_and_backprojection_are_adjoint(open_shell_molecule):
+    orbo = open_shell_molecule.mo_coeff[0][:, :1]
+    orbv = open_shell_molecule.mo_coeff[0][:, 1:]
+    factors = build_spin_transition_factors(
+        open_shell_molecule,
+        orbo,
+        orbv,
+        feature_kind="GGA",
+        dtype=jnp.float64,
+    )
+    amplitudes = jnp.asarray([[[0.37]]], dtype=jnp.float64)
+    grid_values = jnp.arange(12, dtype=jnp.float64).reshape(1, 4, 3) * 0.01
+
+    projected = project_spin_transition_to_grid(factors, amplitudes)
+    backprojected = project_grid_response_to_spin_transition(factors, grid_values)
+
+    assert jnp.allclose(
+        jnp.vdot(projected, grid_values),
+        jnp.vdot(amplitudes, backprojected),
+        atol=1e-12,
+    )
