@@ -31,6 +31,7 @@ def _toy_unrestricted_reference():
     dm_b = jnp.asarray([[1.0, 0.0], [0.0, 0.0]])
     return SimpleNamespace(
         ao=ao,
+        ao_deriv1=jnp.stack([ao, 0.1 * ao, -0.2 * ao, 0.05 * ao], axis=0),
         grid=SimpleNamespace(weights=weights),
         rep_tensor=jnp.zeros((2, 2, 2, 2)),
         mo_coeff=mo_coeff,
@@ -115,6 +116,31 @@ def test_unrestricted_response_rejects_scalar_kernel_fallback():
 
     with pytest.raises(ValueError, match="requires spin-resolved XC kernels"):
         build_unrestricted_tda_operator(reference, ScalarKernelXC())
+
+
+def test_unrestricted_response_accepts_b3lyp_string():
+    reference = _toy_unrestricted_reference()
+
+    vind, diagonal, _, _ = build_unrestricted_tda_operator(reference, "b3lyp")
+    matrix = _operator_matrix(vind, int(diagonal.size))
+
+    assert matrix.shape == (int(diagonal.size), int(diagonal.size))
+    assert jnp.all(jnp.isfinite(matrix))
+
+
+def test_unrestricted_gga_rejects_density_only_spin_kernel():
+    reference = _toy_unrestricted_reference()
+
+    class DensityOnlyGGA:
+        exact_exchange_fraction = 0.0
+        response_feature_kind = "GGA"
+
+        @staticmethod
+        def spin_local_kernel(rho_a, rho_b):
+            return rho_a, jnp.zeros_like(rho_a), rho_b
+
+    with pytest.raises(ValueError, match="spin_grid_response_hvp"):
+        build_unrestricted_tda_operator(reference, DensityOnlyGGA())
 
 
 def test_unrestricted_tda_allows_empty_beta_occupied_channel():

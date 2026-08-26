@@ -12,6 +12,10 @@ from jax.lax import Precision
 from jaxtyping import Array
 
 from .cisd import unrestricted_cisd_second_order_correction
+from ._unrestricted_semilocal_response import (
+    UnrestrictedSemilocalResponseFunctional,
+    build_unrestricted_semilocal_response_action,
+)
 from .eigensolvers import (
     FULL_TDDFT_DAVIDSON_MAX_CYCLE,
     PYSCF_TD_DAVIDSON_MAX_CYCLE,
@@ -187,6 +191,14 @@ def _spin_resolved_kernel_on_grid(
     density_beta: Array,
     dtype: Any,
 ) -> tuple[Array, Array, Array]:
+    feature_kind = str(
+        getattr(resolved_xc, "response_feature_kind", "LDA")
+    ).upper()
+    if feature_kind != "LDA":
+        raise ValueError(
+            "Unrestricted GGA response requires spin_grid_response_hvp; "
+            "a density-only spin kernel is not a complete GGA response."
+        )
     spin_grid_kernel = getattr(resolved_xc, "spin_grid_kernel", None)
     if callable(spin_grid_kernel):
         raw_kernel = spin_grid_kernel(molecule)
@@ -417,6 +429,8 @@ def _build_unrestricted_response_operator_data(
     occupation_tolerance: float = 1e-8,
 ) -> _UnrestrictedResponseOperatorData:
     resolved_xc = _resolve_xc_functional(molecule, xc_functional, xc_params)
+    if isinstance(resolved_xc, str):
+        resolved_xc = UnrestrictedSemilocalResponseFunctional(resolved_xc)
     _raise_if_strict_local_hf_response(resolved_xc)
     orbo_a, orbv_a, orbo_b, orbv_b, de_a, de_b = _unrestricted_orbital_data(
         molecule,
@@ -454,15 +468,32 @@ def _build_unrestricted_response_operator_data(
             include_exchange=_needs_exchange_terms(hybrid_fraction),
             dtype=jnp.result_type(de_a, de_b),
         )
-    xc_response_action_fn = _unrestricted_grid_xc_response_action(
-        molecule,
-        resolved_xc,
-        orbo_a,
-        orbv_a,
-        orbo_b,
-        orbv_b,
-        dtype=jnp.result_type(de_a, de_b),
+    spin_grid_response_hvp = (
+        None
+        if resolved_xc is None
+        else getattr(resolved_xc, "spin_grid_response_hvp", None)
     )
+    if callable(spin_grid_response_hvp):
+        xc_response_action_fn = build_unrestricted_semilocal_response_action(
+            molecule,
+            orbo_a,
+            orbv_a,
+            orbo_b,
+            orbv_b,
+            spin_grid_response_hvp,
+            feature_kind=str(getattr(resolved_xc, "response_feature_kind", "LDA")),
+            dtype=jnp.result_type(de_a, de_b),
+        )
+    else:
+        xc_response_action_fn = _unrestricted_grid_xc_response_action(
+            molecule,
+            resolved_xc,
+            orbo_a,
+            orbv_a,
+            orbo_b,
+            orbv_b,
+            dtype=jnp.result_type(de_a, de_b),
+        )
     return _UnrestrictedResponseOperatorData(
         orbital_energy_differences_alpha=de_a,
         orbital_energy_differences_beta=de_b,
