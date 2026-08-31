@@ -29,9 +29,18 @@
 
 ### Fixes
 
+- Align the standalone JAX molecular grid with PySCF 2.13 for levels 0-9:
+  full Lebedev tables through 1454 points, Treutler-Ahlrichs radial constants,
+  NWChem pruning, Becke partitioning, and the PySCF Angstrom-to-Bohr constant.
+  Keep the grid JIT- and geometry-gradient-safe without caching traced arrays.
+- Solve implicit-SCF adjoint systems with JAX GMRES and remove the previous
+  regularized fixed-point residual bias.
 - Align the matrix-free full-TDDFT Davidson solver with PySCF-style dual
   subspaces, residual-only convergence, and differentiable symplectic Rayleigh
   reconstruction.
+- Extend restricted and unrestricted TDA/TDDFT validation to end-to-end JAX
+  SCF references, including excitation energies and degenerate-cluster
+  oscillator strengths.
 - Use canonical `excitation_gap_*` metric names in closed-shell checkpoint
   evaluation summaries.
 - Keep restricted two-AO references out of unrestricted spin-axis dispatch and

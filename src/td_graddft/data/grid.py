@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .molecule import MoleculeSpec, parse_molecule_spec
+from .molecule import MoleculeSpec, atomic_number, parse_molecule_spec
 
 RAD_GRIDS = np.asarray(
     [
@@ -42,14 +42,31 @@ ANG_ORDER = np.asarray(
 )
 PERIOD_TAB = np.asarray((2, 10, 18, 36, 54, 86, 118), dtype=np.int32)
 LEBEDEV_ORDER_TO_POINTS = {
+    0: 1,
+    3: 6,
+    5: 14,
+    7: 26,
+    9: 38,
     11: 50,
     13: 74,
     15: 86,
     17: 110,
+    19: 146,
+    21: 170,
     23: 194,
+    25: 230,
+    27: 266,
     29: 302,
+    31: 350,
+    35: 434,
+    41: 590,
+    47: 770,
+    53: 974,
+    59: 1202,
+    65: 1454,
 }
-BUNDLED_LEBEDEV_POINTS = (50, 74, 86)
+BUNDLED_LEBEDEV_POINTS = tuple(LEBEDEV_ORDER_TO_POINTS.values())
+LEBEDEV_NGRID = np.asarray(BUNDLED_LEBEDEV_POINTS, dtype=np.int32)
 SUPPORTED_GRID_LEVELS = range(min(RAD_GRIDS.shape[0], ANG_ORDER.shape[0]))
 BRAGG_RADII = {
     1: 0.6614041435977716,
@@ -91,22 +108,46 @@ BRAGG_RADII = {
 }
 TREUTLER_XI = {
     1: 0.8,
+    2: 0.9,
+    3: 1.8,
+    4: 1.4,
+    5: 1.3,
     6: 1.1,
     7: 0.9,
     8: 0.9,
+    9: 0.9,
+    10: 0.9,
+    11: 1.4,
+    12: 1.3,
+    13: 1.3,
+    14: 1.2,
+    15: 1.1,
+    16: 1.0,
+    17: 1.0,
+    18: 1.0,
+    19: 1.5,
+    20: 1.4,
+    21: 1.3,
+    22: 1.2,
+    23: 1.2,
+    24: 1.2,
+    25: 1.2,
+    26: 1.2,
+    27: 1.2,
+    28: 1.1,
+    29: 1.1,
+    30: 1.1,
+    31: 1.1,
+    32: 1.0,
+    33: 0.9,
+    34: 0.9,
+    35: 0.9,
+    36: 0.9,
 }
 
 
-@lru_cache(maxsize=None)
 def _load_lebedev_table(npoints: int) -> jnp.ndarray:
-    path = Path(__file__).with_name("_lebedev_level0.npz")
-    with np.load(path) as data:
-        key = f"g{int(npoints)}"
-        if key not in data:
-            raise NotImplementedError(
-                f"Bundled Lebedev grid with {npoints} points is not available."
-            )
-        return jnp.asarray(data[key], dtype=jnp.float64)
+    return jnp.asarray(_load_lebedev_table_np(npoints), dtype=jnp.float64)
 
 
 @lru_cache(maxsize=None)
@@ -134,12 +175,11 @@ def _default_ang(nuc: int, level: int) -> int:
     if order not in LEBEDEV_ORDER_TO_POINTS:
         raise NotImplementedError(f"Lebedev order {order} is not bundled.")
     target_points = int(LEBEDEV_ORDER_TO_POINTS[order])
-    available = [npoints for npoints in BUNDLED_LEBEDEV_POINTS if npoints <= target_points]
-    if not available:
+    if target_points not in BUNDLED_LEBEDEV_POINTS:
         raise NotImplementedError(
-            f"Lebedev grid with up to {target_points} points is not bundled."
+            f"Lebedev grid with {target_points} points is not bundled."
         )
-    return int(max(available))
+    return target_points
 
 
 def _validate_grid_level(level: int) -> int:
@@ -169,38 +209,6 @@ def _treutler_radial_grid(n: int, charge: int) -> tuple[jnp.ndarray, jnp.ndarray
     return r[::-1], dr[::-1]
 
 
-def _nwchem_prune(nuc: int, rads: jnp.ndarray, n_ang: int) -> jnp.ndarray:
-    alphas = jnp.asarray(
-        (
-            (0.25, 0.5, 1.0, 4.5),
-            (0.1667, 0.5, 0.9, 3.5),
-            (0.1, 0.4, 0.8, 2.5),
-        ),
-        dtype=jnp.float64,
-    )
-    leb_ngrid = jnp.asarray([38, 50, 74, 86, 110, 146, 170, 194, 230, 266, 302], dtype=jnp.int32)
-    if int(n_ang) < 50:
-        return jnp.full((int(rads.shape[0]),), int(n_ang), dtype=jnp.int32)
-    if int(n_ang) == 50:
-        leb_l = jnp.asarray([1, 2, 2, 2, 1], dtype=jnp.int32)
-    else:
-        matches = np.where(np.asarray(leb_ngrid) == int(n_ang))[0]
-        if matches.size == 0:
-            raise NotImplementedError(f"Unsupported n_ang={n_ang} in bundled NWChem prune.")
-        idx = int(matches[0])
-        leb_l = jnp.asarray([1, 3, idx - 1, idx, idx - 1], dtype=jnp.int32)
-
-    r_atom = float(BRAGG_RADII[int(nuc)]) + 1e-200
-    if int(nuc) <= 2:
-        thresholds = alphas[0]
-    elif int(nuc) <= 10:
-        thresholds = alphas[1]
-    else:
-        thresholds = alphas[2]
-    place = jnp.sum((rads / r_atom).reshape(-1, 1) > thresholds.reshape(1, -1), axis=1)
-    return leb_ngrid[leb_l[place]]
-
-
 def _original_becke(g: jnp.ndarray) -> jnp.ndarray:
     for _ in range(3):
         g = 0.5 * (3.0 - g * g) * g
@@ -208,7 +216,11 @@ def _original_becke(g: jnp.ndarray) -> jnp.ndarray:
 
 
 def _treutler_atomic_radii_adjust(charges: jnp.ndarray):
-    rad = jnp.sqrt(jnp.asarray([BRAGG_RADII[int(z)] for z in np.asarray(charges)], dtype=jnp.float64)) + 1e-200
+    radii = jnp.asarray(
+        [0.0] + [BRAGG_RADII[z] for z in range(1, max(BRAGG_RADII) + 1)],
+        dtype=jnp.float64,
+    )
+    rad = jnp.sqrt(radii[jnp.asarray(charges, dtype=jnp.int32)]) + 1e-200
     rr = rad.reshape(-1, 1) / rad.reshape(1, -1)
     a = 0.25 * (rr.T - rr)
     a = jnp.clip(a, -0.5, 0.5)
@@ -245,7 +257,7 @@ def _nwchem_prune_np(nuc: int, rads: np.ndarray, n_ang: int) -> np.ndarray:
         ),
         dtype=float,
     )
-    leb_ngrid = np.asarray([38, 50, 74, 86, 110, 146, 170, 194, 230, 266, 302], dtype=np.int32)
+    leb_ngrid = LEBEDEV_NGRID[4:]
     if int(n_ang) < 50:
         return np.full((int(rads.shape[0]),), int(n_ang), dtype=np.int32)
     if int(n_ang) == 50:
@@ -297,14 +309,14 @@ def _atomic_local_grid_np(charge: int, *, level: int) -> tuple[np.ndarray, np.nd
     for n in sorted({int(x) for x in angs}):
         grid = _load_lebedev_table_np(n)
         idx = np.where(angs == n)[0]
-        rad_sel = rad[idx]
-        w_sel = rad_weight[idx]
-        coords_parts.append(
-            np.einsum("i,jk->ijk", rad_sel, grid[:, :3]).reshape(-1, 3)
-        )
-        weight_parts.append(
-            np.einsum("i,j->ij", w_sel, grid[:, 3]).reshape(-1)
-        )
+        for i0 in range(0, len(idx), 12):
+            radial_idx = idx[i0 : i0 + 12]
+            coords_parts.append(
+                np.einsum("i,jk->jik", rad[radial_idx], grid[:, :3]).reshape(-1, 3)
+            )
+            weight_parts.append(
+                np.einsum("i,j->ji", rad_weight[radial_idx], grid[:, 3]).reshape(-1)
+            )
     return np.concatenate(coords_parts, axis=0), np.concatenate(weight_parts, axis=0)
 
 
@@ -365,9 +377,12 @@ def _build_molecular_grid_from_spec_jax(
     radii_adjust = _treutler_atomic_radii_adjust(charges)
 
     unique_atom_grids: dict[str, tuple[jnp.ndarray, jnp.ndarray]] = {}
-    for sym, z in zip(spec.symbols, np.asarray(charges), strict=True):
+    for sym in spec.symbols:
         if sym not in unique_atom_grids:
-            unique_atom_grids[sym] = _atomic_local_grid(int(z), level=int(level))
+            unique_atom_grids[sym] = _atomic_local_grid(
+                atomic_number(sym),
+                level=int(level),
+            )
 
     coords_all = []
     weights_all = []
@@ -402,20 +417,21 @@ def _atomic_local_grid(charge: int, *, level: int) -> tuple[jnp.ndarray, jnp.nda
     n_ang = _default_ang(int(charge), int(level))
     rad, dr = _treutler_radial_grid(n_rad, int(charge))
     rad_weight = 4.0 * jnp.pi * rad * rad * dr
-    angs = _nwchem_prune(int(charge), rad, int(n_ang))
+    radial_grid_np, _ = _treutler_radial_grid_np(n_rad, int(charge))
+    angs = _nwchem_prune_np(int(charge), radial_grid_np, int(n_ang))
     coords_parts = []
     weight_parts = []
     for n in sorted({int(x) for x in np.asarray(angs)}):
         grid = _load_lebedev_table(n)
         idx = np.where(np.asarray(angs) == n)[0]
-        rad_sel = rad[idx]
-        w_sel = rad_weight[idx]
-        coords_parts.append(
-            jnp.einsum("i,jk->ijk", rad_sel, grid[:, :3]).reshape(-1, 3)
-        )
-        weight_parts.append(
-            jnp.einsum("i,j->ij", w_sel, grid[:, 3]).reshape(-1)
-        )
+        for i0 in range(0, len(idx), 12):
+            radial_idx = idx[i0 : i0 + 12]
+            coords_parts.append(
+                jnp.einsum("i,jk->jik", rad[radial_idx], grid[:, :3]).reshape(-1, 3)
+            )
+            weight_parts.append(
+                jnp.einsum("i,j->ji", rad_weight[radial_idx], grid[:, 3]).reshape(-1)
+            )
     return jnp.concatenate(coords_parts, axis=0), jnp.concatenate(weight_parts, axis=0)
 
 

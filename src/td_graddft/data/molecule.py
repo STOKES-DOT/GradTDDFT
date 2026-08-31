@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-ANGSTROM_TO_BOHR = 1.8897261254578281
+ANGSTROM_TO_BOHR = 1.8897261245650618
 
 _SYMBOL_TO_Z = {
     "H": 1,
