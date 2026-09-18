@@ -7,7 +7,7 @@ is `td_graddft`.
 ```python
 from td_graddft import dft, gto, neural_xc, tdscf, training
 ```
-NOTE: We are migrating from GradTDDFT to [GradSCF](https://github.com/STOKES-DOT/GradSCF) for more general differentiable ab-initio code. 
+NOTE: We are migrating our code from GradTDDFT to [GradSCF](https://github.com/STOKES-DOT/GradSCF) for more general and standard differentiable ab-initio code. 
 ## v1.0.0 Scope
 
 The first release contains:
